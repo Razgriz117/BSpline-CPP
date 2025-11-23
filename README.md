@@ -72,14 +72,14 @@ Set `L` to the desired (\ell) value and rebuild. Both the potential and the anal
 On many Linux systems these can be installed with your package manager, e.g.:
 
 ```bash
-sudo apt-get install liblapack-dev libblas-dev libeigen3-dev
+sudo apt-get install liblapack-dev libblas-dev
 ```
 
 ---
 
 ## Building with CMake
 
-From the project root:
+If you have CMake installed, you may run the following commands from the project root:
 
 ```bash
 cmake -S . -B build
@@ -101,6 +101,18 @@ The program will:
 
 * Print the number of accurate eigenvalues and their energies/errors.
 * Write eigenfunctions to files `EigenState_XXX` in the **build directory**.
+
+### Make and Run Script
+
+On Linux, you may also combine the above steps by invoking the `make_and_run.sh` script as follows:
+```
+# You may need to add execution permission with chmond +x prior to first usage,
+# but this will not be necessary on subsequent executions of the script.
+# Example:
+#   chmod +x make_and_run.sh
+
+./make_and_run.sh
+```
 
 ---
 

@@ -8,13 +8,8 @@
 #include <string>
 
 #include <iomanip> // for std::setw, std::setprecision, std::scientific
-#include <Eigen/Dense>
 
 #include "BSpline.hpp"
-
-#ifndef TIMESTEPS_DIR
-     #define TIMESTEPS_DIR "./timesteps"
-#endif
 
 // ------------------------------------------------------------------
 // Select angular momentum quantum number l.
@@ -66,62 +61,6 @@ double Potential(double x, const double * /*parvec*/)
 {
      const double l = static_cast<double>(L);
      return l * (l + 1.0) / (2.0 * x * x) - 1.0 / x;
-}
-
-// Gaussian local operator centered at r0 = 5 a.u. with sigma = 1 a.u.
-// f(r) = exp( - (r - r0)^2 / (2 sigma^2) )
-double Gaussian1AU(double x, const double * /*parvec*/)
-{
-     const double r0 = initial_position; // center (atomic units)
-     const double sigma = 1.0; // standard deviation (atomic units)
-     const double dx = x - r0;
-     // return std::exp(-0.5 * dx * dx / (sigma * sigma));
-
-     // Ground state of the harmonic oscillator, which is a gaussian
-     // we determine k by matching the hydrogen potential to the quadratic potential
-     const double k = 1.0/8.0;
-     const double m_omega = std::sqrt(m_e * k); // \omega = \sqrt{k/m} -to m\omega = \sqrt{k*m}
-     return std::pow(m_omega/(pi*hbar), 0.25) *
-	    std::exp(-1.0 * m_omega * dx * dx / (2.0 * hbar));
-}
-
-// Compute sumCoeffs(iBs2) = sum_{iBs1} ∫ B_{iBs1}(r) * Gaussian(r) * B_{iBs2}(r) r^2 dr
-// for iBs2 = 2..nEn+1
-// Returns a vector indexed in the *B-spline index* convention:
-//   sumCoeffs[iBs2 - 1]
-std::vector<bspline::Real>
-computeGaussianSumCoeffs(const bspline::BSpline &bspline,
-                         int nEn,
-                         int BS_ORDER)
-{
-     using bspline::D2DFun;
-     using bspline::Real;
-
-     const int nBSplines = bspline.getNBSplines();
-
-     // Allocate over full B-spline index range (1..nBSplines) mapped to [0..nBSplines-1]
-     std::vector<Real> sumCoeffs(nBSplines, 0.0);
-
-     // Function pointer to the Gaussian local operator
-     D2DFun fGauss = Gaussian1AU;
-
-     for (int iBs2 = 2; iBs2 <= nEn + 1; ++iBs2)
-     {
-          Real sum = 0.0;
-
-          // Only B-splines within BS_ORDER-1 apart can overlap (support overlap),
-          // so we restrict iBs1 accordingly, just like the Fortran code.
-          int iBs1Min = std::max(2, iBs2 - BS_ORDER + 1);
-          for (int iBs1 = iBs1Min; iBs1 <= iBs2; ++iBs1)
-          {
-               Real coeff = bspline.integral(fGauss, iBs2, iBs1);
-               sum += coeff;
-          }
-          // Original code indexes b splines starting at 1
-          sumCoeffs[iBs2 - 1] = sum;
-     }
-
-     return sumCoeffs;
 }
 
 int main()
@@ -320,144 +259,6 @@ int main()
                  work.data(),
                  &infoLapack);
 
-          // -----------------------------------------------------------------------------
-          // For Project Part 2
-          // -----------------------------------------------------------------------------
-
-          //   Form <B | G> into a vector of all scalars <B_i|G>
-          std::vector<bspline::Real> sumCoeffs = computeGaussianSumCoeffs(bspline, nEn, BS_ORDER);
-
-          // Map evec as an nEn x nEn column-major matrix C
-          Eigen::Map<const Eigen::MatrixXd> C(evec.data(), nEn, nEn);
-
-          // Eigen::MatrixXd C_dagger = C.adjoint(); // or C.transpose(); <- Doesn't work
-          Eigen::MatrixXd C_dagger = C.inverse(); 
-
-          // Build vector <B|G> of <B_alpha | G> for alpha = 0..nEn-1
-          Eigen::VectorXd B_G(nEn);
-
-          // sumCoeffs is padded with a 0 at the beginning and end
-          // create B_G without this padding
-          for (int alpha = 0; alpha < nEn; ++alpha)
-          {
-               int iBs = alpha + 2;           // B-spline index: 2,3,...,nEn+1
-               B_G(alpha) = sumCoeffs[iBs - 1]; 
-          }
-
-          // Compute <φ|G> = C_dagger * <B|G>
-          Eigen::VectorXd Phi_G = C_dagger * B_G;
-
-          // Time-evolve <φ|G> by applying exp(-i H t) to get V(t).
-	     // Then do CV(t)
-          int timeSteps = 1000;
-          double dt = 0.3; // time step
-          for (int step = 0; step < timeSteps; ++step)
-          {
-               double t = step * dt;
-               Eigen::VectorXcd V_t = Eigen::VectorXcd::Zero(nEn);
-               
-               // Multiply the Phi_G eigenfunction by the time-evolution matrix.
-               // create vector that represents diagonal time evolution matrix for THIS time step
-               Eigen::VectorXcd evolution = Eigen::VectorXcd::Zero(nEn);
-               for (int idx = 0; idx < nEn; idx++)
-               {
-                    // energies are in std::vector<Real> eval, was computed by diagonalization
-                    // eval is not padded with 0s, and it has nEn elements.
-                    evolution(idx) = std::exp(std::complex<double>(0, -eval[idx] * t / hbar));
-               }
-
-               // Verify at t=0 that evolution is all ones
-               if (step == 0)
-               {
-                    for (int i = 0; i < nEn; ++i)
-                    {
-                         assert(evolution(i).real() == 1.0);
-                         assert(evolution(i).imag() == 0.0 || evolution(i).imag() == -0.0);
-                    }
-               }
-
-               //  We use cwiseProduct to represent the action of the diagonal time evolution matrix.
-               V_t = evolution.cwiseProduct(Phi_G);
-
-               // Verify at t=0 that V(t) == Phi_G
-               if (step == 0)
-               {
-                    for (int i = 0; i < nEn; ++i)
-                    {
-                         assert(Phi_G(i) == V_t(i).real());
-                    }
-               }
-
-               // Multiply V(t) by C
-               // These are coeffients of the wave function in the B-spline basis,
-               // as opposed to in the eigenstate basis (V(t)).
-               Eigen::VectorXcd CV_t = Eigen::VectorXcd::Zero(nEn);
-               CV_t = C * V_t;
-               
-               // Verify at t=0 that CV(t) == Phi_G
-               if (step == 0)
-               {
-                    for (int i = 0; i < nEn; i++)
-                    {
-                         assert(abs(CV_t(i).real() - B_G(i)) < 1e-12);
-                    }
-               }
-
-               // Pad CV(t) with zeros at both ends to match B-spline basis size.
-               Eigen::VectorXcd CV_padded(nBSplines);
-               CV_padded.setZero();
-               CV_padded.segment(1, nEn) = CV_t;
-
-               // Our final wavefunction is a linear combination of 
-               // all BSplines scaled by the corresponding coefficient in CV(t)
-	          // Elements of CV(t) are complex!
-               // We separate the real and imaginary part of each coefficient, 
-               // then evaluate two different linear combinations of B-splines,
-               // one using the real parts and one using the imaginary parts.
-               // We write these evaluated points to a file as x, real, imaginary
-	       
-               std::ostringstream oss;
-               oss << TIMESTEPS_DIR << "/Timestep_" << std::setw(3) << std::setfill('0') << step;
-               std::string filename = oss.str();
-
-               std::ofstream out(filename);
-               if (!out)
-               {
-                    std::cerr << "Cannot open file " << filename << " for writing\n";
-                    return EXIT_FAILURE;
-               }
-               out << std::scientific << std::setprecision(16);
-
-               // Separate real and imaginary parts of CV_padded into two arrays.
-               std::vector<Real> real_parts(nBSplines);
-               std::vector<Real> imag_parts(nBSplines);
-               for (int i = 0; i < nBSplines; i++)
-               {
-                    real_parts[i] = CV_padded(i).real();
-                    imag_parts[i] = CV_padded(i).imag();
-               }
-
-               // Use bspline.eval to evaluate the wavefunction at npts points.
-               for (int ix = 1; ix <= npts; ++ix)
-               {
-                    Real x = BS_GRMIN +
-                             (BS_GRMAX - BS_GRMIN) *
-                                 static_cast<Real>(ix - 1) /
-                                 static_cast<Real>(npts - 1);
-
-                    double real = bspline.eval(x, real_parts.data(), nBSplines);
-                    double im = bspline.eval(x, imag_parts.data(), nBSplines);
-
-                    out << " " << std::setw(24) << x
-                        << " " << std::setw(24) << real
-                        << " " << std::setw(24) << im << "\n";
-               }
-
-               out.close();
-          }
-          // -----------------------------------------------------------------------------
-          // -----------------------------------------------------------------------------
-
                int kd = BS_ORDER - 1;
                int ld = BS_ORDER;
 
@@ -481,7 +282,7 @@ int main()
                // ------------------------------------------------------------
                // Effective principal quantum number:
                //   n_eff = iEn + L
-               // This matches the Fortran logic:
+               // This matches the logic:
                //   L = 0: n_eff = iEn
                //   L = 1: n_eff = iEn + 1
                Real n_eff = static_cast<Real>(iEn + L);

@@ -18,16 +18,6 @@ target_compile_features(H-BoundStates PRIVATE
      cxx_std_17
 )
 
-# Define output directory for timesteps.
-set(TIMESTEPS_OUTPUT_DIR "${CMAKE_BINARY_DIR}/timesteps")
-add_custom_target(create_timesteps_dir ALL
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${TIMESTEPS_OUTPUT_DIR}
-)
-
-target_compile_definitions(H-BoundStates PRIVATE
-     TIMESTEPS_DIR="${TIMESTEPS_OUTPUT_DIR}"
-)
-
 target_include_directories(H-BoundStates PRIVATE 
      /usr/include/eigen3
      ${CMAKE_CURRENT_SOURCE_DIR}
