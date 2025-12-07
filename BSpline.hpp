@@ -1,3 +1,30 @@
+// This file is a C++ translation and adaptation of the original Fortran
+// ModuleBSpline code by Luca Argenti.
+//
+// ---------------------------------------------------------------------
+// Original copyright and license notice:
+//
+// ModuleBSplines, Copyright (C) 2020 Luca Argenti, PhD - Some Rights Reserved
+// ModuleBSplines is licensed under a
+// Creative Commons Attribution-ShareAlike 4.0 International License.
+// A copy of the license is available at <http://creativecommons.org/licenses/by-nd/4.0/>.
+//
+// Luca Argenti is Associate Professor of Physics, Optics and Photonics
+// Department of Physics and the College of Optics
+// University of Central Florida
+// 4111 Libra Drive, Orlando, Florida 32816, USA
+// email: luca.argenti@ucf.edu
+//
+// ---------------------------------------------------------------------
+//
+// C++ translation and modifications:
+//   Copyright (C) 2025  Martin de Salterain
+//   Copyright (C) 2025  Hui Xian Grace Lim
+//
+// This C++ version is a derivative work based on ModuleBSplines and is
+// distributed under the same Creative Commons license as the original.
+// Please refer to the original license terms for details.
+
 #pragma once
 
 #include <vector>
