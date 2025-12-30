@@ -300,6 +300,40 @@ namespace bspline
           }
      }
 
+     Real BSpline::getNodePosition(int node) const
+     {
+          checkInitialization();
+
+          if (node <= 1)
+          {
+               // Fortran: Position = SplineSet%Grid(0)
+               return gridAt(0);
+          }
+          else if (node >= nNodes_)
+          {
+               // Fortran: Position = SplineSet%Grid(NNodes-1)
+               return gridAt(nNodes_ - 1);
+          }
+          else
+          {
+               // Fortran: Position = SplineSet%Grid(Node-1)
+               return gridAt(node - 1);
+          }
+     }
+
+     Real BSpline::getNormFactor(int bsIndex) const
+     {
+          checkInitialization();
+
+          if (bsIndex < 1 || bsIndex > nBSplines_)
+          {
+               // Fortran BSplineNormalizationFactor returns 0 if out-of-range
+               return Real(0);
+          }
+          // Fortran indexing: f(Bs) -> normalization_[Bs-1]
+          return normalization_[bsIndex - 1];
+     }
+
      void BSpline::computeCoefficientsSingleBSpline(int order,
                                                     const Real *vec,
                                                     Real *coefficients) const

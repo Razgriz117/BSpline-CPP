@@ -1,54 +1,58 @@
 # H-BoundStates: Hydrogenic Bound States with B-Splines
 
 ## Table of Contents
-- [Code Structure](#code-structure)
-- [Changing the Angular Momentum](#changing-the-angular-momentum)
-- [Dependencies](#dependencies)
-- [Building with CMake](#building-with-cmake)
-- [Building with `g++` (manual build)](#building-with-g-manual-build)
-- [Output Files](#output-files)
+
+* [Code Structure](#code-structure)
+* [Changing the Angular Momentum](#changing-the-angular-momentum)
+* [Dependencies](#dependencies)
+* [Testing](#testing)
+* [Building with CMake](#building-with-cmake)
+* [Building with `g++` (manual build)](#building-with-g-manual-build)
+* [Output Files](#output-files)
 
 This project computes bound-state eigenvalues and eigenfunctions for a hydrogen-like atom using a **B-spline basis** and a **generalized eigenvalue problem**.
 
 The radial Schrödinger equation is solved for the potential
 
-\[
+[
 V_\ell(r) = \frac{\ell(\ell+1)}{2r^2} - \frac{1}{r},
-\]
+]
 
-where \(\ell\) is the orbital angular-momentum quantum number.  
+where (\ell) is the orbital angular-momentum quantum number.
 The code constructs a B-spline basis on a radial grid, builds the Hamiltonian and overlap matrices, and solves
 
-\[
-H \mathbf{c} = E\, S \mathbf{c}
-\]
+[
+H \mathbf{c} = E, S \mathbf{c}
+]
 
 using LAPACK’s `DSBGV` (symmetric banded generalized eigenproblem). The resulting eigenvalues are compared to the analytic hydrogenic energies
 
-\[
+[
 E_n^{(\ell)} = -\frac{1}{2(n_{\text{eff}})^2}, \quad n_{\text{eff}} = n + \ell,
-\]
+]
 
 and the corresponding eigenfunctions are written to files `EigenState_XXX` in the build directory.
 
 ## Code Structure
 
-- `BSpline.hpp` / `BSpline.cpp`  
-  C++ implementation of a B-spline basis (closely modeled after Luca Argenti’s Fortran `ModuleBSpline`).  
+* `BSpline.hpp` / `BSpline.cpp`
+  C++ implementation of a B-spline basis (closely modeled after Luca Argenti’s Fortran `ModuleBSpline`).
   Handles:
-  - B-spline grid construction with knot multiplicities at the endpoints
-  - Polynomial coefficients for each B-spline segment
-  - Evaluation of B-splines and their derivatives at arbitrary points
-  - Numerical integration via Gauss–Legendre quadrature
 
-- `main.cpp`  
+  * B-spline grid construction with knot multiplicities at the endpoints
+  * Polynomial coefficients for each B-spline segment
+  * Evaluation of B-splines and their derivatives at arbitrary points
+  * Numerical integration via Gauss–Legendre quadrature
+
+* `main.cpp`
   Sets up the hydrogenic radial problem:
-  - Defines the angular-momentum parameter `L` (an integer \(\ell \ge 0\))
-  - Builds a uniform radial grid \([r_{\min}, r_{\max}]\)
-  - Constructs Hamiltonian and overlap (mass) matrices in banded storage
-  - Calls LAPACK’s `DSBGV` to solve for eigenvalues/eigenvectors
-  - Prints accurate eigenvalues and errors
-  - Writes eigenfunctions to `EigenState_XXX` files sampled on a radial grid
+
+  * Defines the angular-momentum parameter `L` (an integer (\ell \ge 0))
+  * Builds a uniform radial grid ([r_{\min}, r_{\max}])
+  * Constructs Hamiltonian and overlap (mass) matrices in banded storage
+  * Calls LAPACK’s `DSBGV` to solve for eigenvalues/eigenvectors
+  * Prints accurate eigenvalues and errors
+  * Writes eigenfunctions to `EigenState_XXX` files sampled on a radial grid
 
 ## Changing the Angular Momentum
 
@@ -57,7 +61,7 @@ In `main.cpp`, there is a compile-time constant:
 ```cpp
 // Select orbital angular momentum l (integer >= 0).
 constexpr int L = 0;  // set to 0, 1, 2, ...
-````
+```
 
 Set `L` to the desired (\ell) value and rebuild. Both the potential and the analytic comparison used for the eigenvalue error will update accordingly.
 
@@ -74,6 +78,66 @@ On many Linux systems these can be installed with your package manager, e.g.:
 ```bash
 sudo apt-get install liblapack-dev libblas-dev
 ```
+
+---
+
+## Testing
+
+To help contributors ensure that changes to the B-spline implementation do not introduce regressions, this project includes a unit test suite based on **GoogleTest (GTest)**.
+
+### GTest Dependency
+
+You will need GoogleTest installed on your system. On many Linux systems you can install it via your package manager, for example:
+
+```bash
+sudo apt-get install libgtest-dev
+```
+
+(Depending on your distribution, you may also need to build the GTest libraries from source after installing the headers.)
+
+### Enabling and Building Tests
+
+Tests are controlled by the `BUILD_TESTING` CMake option. From the project root:
+
+```bash
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build
+```
+
+When `BUILD_TESTING` is enabled, CMake will:
+
+* Configure and build the main executable `H-BoundStates`
+* Configure and build the test executable (e.g. `test_bspline`) under `build/tests/`
+
+### Running the Test Suite
+
+After building with testing enabled, run the tests from the `build` directory:
+
+```bash
+cd build
+ctest
+```
+
+This will execute all registered tests (including the B-spline unit tests under `tests/`) and report any failures.
+
+### For Contributors
+
+If you modify `BSpline.hpp`, `BSpline.cpp`, or any code that depends on them, please:
+
+1. Reconfigure and rebuild with tests enabled:
+
+   ```bash
+   cmake -S . -B build -DBUILD_TESTING=ON
+   cmake --build build
+   ```
+2. Run the full test suite:
+
+   ```bash
+   cd build
+   ctest
+   ```
+
+All tests should pass before submitting or sharing your changes. This helps catch subtle numerical or indexing bugs in the B-spline implementation.
 
 ---
 
@@ -105,6 +169,7 @@ The program will:
 ### Make and Run Script
 
 On Linux, you may also combine the above steps by invoking the `make_and_run.sh` script as follows:
+
 ```
 # You may need to add execution permission with chmond +x prior to first usage,
 # but this will not be necessary on subsequent executions of the script.

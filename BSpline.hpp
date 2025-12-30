@@ -85,6 +85,17 @@ namespace bspline
           int getOrder() const { return order_; }
           int getNBSplines() const { return nBSplines_; }
 
+          // Return the position of a node (1-based index), using the same
+          // clamping convention as the Fortran BSplineNodePosition:
+          //   - node <= 1        -> grid(0)
+          //   - node >= nNodes_  -> grid(nNodes_-1)
+          //   - otherwise        -> grid(node-1)
+          Real getNodePosition(int node) const;
+
+          // Return the normalization factor f(i) for B-spline i,
+          // where f(i) = 1 / ||B_i||_L2. Returns 0 if i is out of range.
+          Real getNormFactor(int bsIndex) const;
+
           // Evaluate the n-th derivative (n = 0, 1, ...) of a single B-spline Bs at x.
           //
           //  - Bs is a 1-based index: 1 <= Bs <= nBSplines_ (mirrors Fortran)
