@@ -5,6 +5,7 @@
 - [Changing the Angular Momentum](#changing-the-angular-momentum)
 - [Dependencies](#dependencies)
 - [Building with CMake](#building-with-cmake)
+- [Building and Running Tests](#building-and-running-tests)
 - [Building with `g++` (manual build)](#building-with-g-manual-build)
 - [Output Files](#output-files)
 
@@ -101,6 +102,39 @@ The program will:
 
 * Print the number of accurate eigenvalues and their energies/errors.
 * Write eigenfunctions to files `EigenState_XXX` in the **build directory**.
+
+---
+
+## Building and Running Tests
+
+The test suite uses [GoogleTest](https://github.com/google/googletest) and is built separately from the main executable via the `BUILD_TESTING` CMake option. GTest must be installed on your system first:
+
+```bash
+sudo apt-get install libgtest-dev
+```
+
+To configure and build with tests enabled:
+
+```bash
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build
+```
+
+To run all tests:
+
+```bash
+cd build
+ctest --output-on-failure
+```
+
+This runs two test suites:
+
+| Suite | Binary | What it covers |
+|---|---|---|
+| `BSplineTests` | `test_bspline` | `BSpline` class — init error codes, `free()`, getters, partition of unity, derivative of PoU, linear combination eval, `skipFirst`, `Bsmin`/`Bsmax`, integrals (symmetry, bounds, derivative orders, parvec), multiple orders, non-uniform grids |
+| `UtilsTests` | `test_utils` | `buildAdjointMatrix` correctness, `printBandMatrixAsDense` smoke tests |
+
+The test sources live in `tests/`.
 
 ---
 

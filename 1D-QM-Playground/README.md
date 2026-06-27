@@ -16,7 +16,8 @@ The long-term goal is a publication-quality solver suitable for submission to th
 ├── TISE/                  # C++ solver for the time-independent Schrödinger equation
 │   ├── BSpline.cpp/.hpp   #   B-spline basis implementation
 │   ├── main.cpp           #   Hydrogenic eigenvalue problem + time evolution prototype
-│   ├── utils/             #   Utility functions
+│   ├── utils/             #   Utility functions (printBandMatrixAsDense, buildAdjointMatrix)
+│   ├── tests/             #   GoogleTest unit tests (BSpline + utils)
 │   ├── CMakeLists.txt
 │   └── make_and_run.sh
 ├── moduleBspline.f90      # Original Fortran B-spline module (Argenti)
