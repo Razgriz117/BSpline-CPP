@@ -1,0 +1,1 @@
+cd .. && python plot.py ; cd -
