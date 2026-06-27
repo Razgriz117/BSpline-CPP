@@ -19,8 +19,8 @@ void printBandMatrixAsDense(const std::vector<bspline::Real> &band,
                             int kd,
                             int ld,
                             const std::string &name,
-                            int width = 14,
-                            int precision = 6)
+                            int width,
+                            int precision)
 {
      using bspline::Real;
      using std::cout;
