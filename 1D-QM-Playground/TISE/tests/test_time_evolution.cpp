@@ -225,8 +225,8 @@ TEST_F(WriteTimestepTest, LineCountEqualsNpts)
 {
     std::ostringstream ss;
     tevol::writeTimestep(ss, bs, CV_padded, nBSplines, 20, 0.0, 1.0);
-    int lines = static_cast<int>(
-        std::count(ss.str().begin(), ss.str().end(), '\n'));
+    std::string output = ss.str();
+    int lines = static_cast<int>(std::count(output.begin(), output.end(), '\n'));
     EXPECT_EQ(lines, 20);
 }
 

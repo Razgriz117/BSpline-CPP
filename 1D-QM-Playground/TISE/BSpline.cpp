@@ -185,6 +185,7 @@ namespace bspline
           nNodes_ = numberOfNodes;
           order_ = order;
           nBSplines_ = numberOfNodes + order - 2;
+          saved_i1 = 0; // reset cached interval index for this new grid
 
           if (static_cast<int>(gridIn.size()) < numberOfNodes)
           {

@@ -55,11 +55,11 @@ TEST(RadialPotentialTest, L0IsMinusOneOverX)
 
 TEST(RadialPotentialTest, L1KnownValues)
 {
-    // L=1: V(x) = 1/(2x^2) - 1/x
-    // at x=1: 0.5 - 1.0 = -0.5
-    EXPECT_NEAR(tise::radialPotential(1.0, 1), -0.5,    1e-15);
-    // at x=2: 1/8 - 1/2 = -0.375
-    EXPECT_NEAR(tise::radialPotential(2.0, 1), -0.375,  1e-15);
+    // L=1: V(x) = l*(l+1)/(2x^2) - 1/x = 1*2/(2x^2) - 1/x = 1/x^2 - 1/x
+    // at x=1: 1 - 1 = 0
+    EXPECT_NEAR(tise::radialPotential(1.0, 1),  0.0,   1e-15);
+    // at x=2: 1/4 - 1/2 = -0.25
+    EXPECT_NEAR(tise::radialPotential(2.0, 1), -0.25,  1e-15);
 }
 
 TEST(RadialPotentialTest, L2KnownValues)
@@ -93,10 +93,12 @@ TEST(AnalyticHydrogenEnergyTest, ExcitedStates)
     EXPECT_NEAR(tise::analyticHydrogenEnergy(3, 0), -1.0/18.0, 1e-15);
 }
 
-TEST(AnalyticHydrogenEnergyTest, DecreaseWithN)
+TEST(AnalyticHydrogenEnergyTest, IncreaseWithN)
 {
+    // Energies are negative and approach 0 from below as n increases,
+    // so E(n+1) > E(n) (less negative = higher energy).
     for (int n = 1; n < 5; ++n)
-        EXPECT_LT(tise::analyticHydrogenEnergy(n+1, 0),
+        EXPECT_GT(tise::analyticHydrogenEnergy(n+1, 0),
                   tise::analyticHydrogenEnergy(n,   0));
 }
 
