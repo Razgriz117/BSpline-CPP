@@ -1,563 +1,109 @@
-#include <iostream>
-#include <vector>
 #include <cmath>
-#include <complex>
-#include <iomanip>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <string>
 
-#include <iomanip> // for std::setw, std::setprecision, std::scientific
-#include <Eigen/Dense>
-
 #include "BSpline.hpp"
+#include "tise.hpp"
+#include "time_evolution.hpp"
 
 #ifndef TIMESTEPS_DIR
      #define TIMESTEPS_DIR "./timesteps"
 #endif
 
-// ------------------------------------------------------------------
-// Select angular momentum quantum number l.
-// The radial potential is taken as:
-//
-//   V_l(x) = l (l + 1) / (2 x^2) - 1 / x
-//
-// and the exact hydrogenic energies are
-//
-//   E_n = -1 / [ 2 (n_eff)^2 ],   where  n_eff = iEn + l.
-//
-// So:
-//   l = 0:  V = -1/x,            E_n = -1 / [2 (iEn)^2]
-//   l = 1:  V = 1/x^2 - 1/x,     E_n = -1 / [2 (iEn+1)^2]
-// ------------------------------------------------------------------
-constexpr int L = 1; // <-- change this integer to 0, 1, 2, ...
+// Angular momentum quantum number (change to 0, 1, 2, ...)
+constexpr int L = 1;
 
-// Constants for maths...
-const double hbar = 1.0; // in atomic units
-const double pi = 3.14159265358979;
-const double m_e = 3.75; // in atomic units
-const double initial_position = 10.0; // initial position of the wavepacket
+// Physical parameters for the Gaussian wavepacket (atomic units)
+constexpr double HBAR             = 1.0;
+constexpr double M_E              = 3.75;
+constexpr double INITIAL_POSITION = 10.0;
+constexpr double K_SPRING         = 1.0 / 8.0;
+const     double M_OMEGA          = std::sqrt(M_E * K_SPRING);
 
-// Fortran LAPACK routine DSBGV
-extern "C"
-{
-     void dsbgv_(char *jobz, char *uplo,
-                 int *n, int *ka, int *kb,
-                 double *ab, int *ldab,
-                 double *bb, int *ldbb,
-                 double *w,
-                 double *z, int *ldz,
-                 double *work,
-                 int *info);
-}
+// B-spline basis parameters
+constexpr int    BS_NNODS = 51;
+constexpr int    BS_ORDER = 12;
+constexpr double BS_GRMIN = 0.0;
+constexpr double BS_GRMAX = 100.0;
 
-// Unity operator used in the problem (Template.f90)
-double Unity(double /*x*/, const double * /*parvec*/)
-{
-     return 1.0;
-}
-
-// Radial potential for angular momentum l:
-//
-//   V_l(x) = l(l+1) / (2 x^2) - 1/x.
-//
-// For x > 0 (radial coordinate), and integer L >= 0.
-double Potential(double x, const double * /*parvec*/)
-{
-     const double l = static_cast<double>(L);
-     return l * (l + 1.0) / (2.0 * x * x) - 1.0 / x;
-}
-
-// Gaussian local operator centered at r0 = 5 a.u. with sigma = 1 a.u.
-// f(r) = exp( - (r - r0)^2 / (2 sigma^2) )
-double Gaussian1AU(double x, const double * /*parvec*/)
-{
-     const double r0 = initial_position; // center (atomic units)
-     const double sigma = 1.0; // standard deviation (atomic units)
-     const double dx = x - r0;
-     // return std::exp(-0.5 * dx * dx / (sigma * sigma));
-
-     // Ground state of the harmonic oscillator, which is a gaussian
-     // we determine k by matching the hydrogen potential to the quadratic potential
-     const double k = 1.0/8.0;
-     const double m_omega = std::sqrt(m_e * k); // \omega = \sqrt{k/m} -to m\omega = \sqrt{k*m}
-     return std::pow(m_omega/(pi*hbar), 0.25) *
-	    std::exp(-1.0 * m_omega * dx * dx / (2.0 * hbar));
-}
-
-// Compute sumCoeffs(iBs2) = sum_{iBs1} ∫ B_{iBs1}(r) * Gaussian(r) * B_{iBs2}(r) r^2 dr
-// for iBs2 = 2..nEn+1
-// Returns a vector indexed in the *B-spline index* convention:
-//   sumCoeffs[iBs2 - 1]
-std::vector<bspline::Real>
-computeGaussianSumCoeffs(const bspline::BSpline &bspline,
-                         int nEn,
-                         int BS_ORDER)
-{
-     using bspline::D2DFun;
-     using bspline::Real;
-
-     const int nBSplines = bspline.getNBSplines();
-
-     // Allocate over full B-spline index range (1..nBSplines) mapped to [0..nBSplines-1]
-     std::vector<Real> sumCoeffs(nBSplines, 0.0);
-
-     // Function pointer to the Gaussian local operator
-     D2DFun fGauss = Gaussian1AU;
-
-     for (int iBs2 = 2; iBs2 <= nEn + 1; ++iBs2)
-     {
-          Real sum = 0.0;
-
-          // Only B-splines within BS_ORDER-1 apart can overlap (support overlap),
-          // so we restrict iBs1 accordingly, just like the Fortran code.
-          int iBs1Min = std::max(2, iBs2 - BS_ORDER + 1);
-          for (int iBs1 = iBs1Min; iBs1 <= iBs2; ++iBs1)
-          {
-               Real coeff = bspline.integral(fGauss, iBs2, iBs1);
-               sum += coeff;
-          }
-          // Original code indexes b splines starting at 1
-          sumCoeffs[iBs2 - 1] = sum;
-     }
-
-     return sumCoeffs;
-}
+// Output parameters
+constexpr double ERROR_THRESHOLD = 1.0e-10;
+constexpr int    NPTS_EIGENSTATE = 301;
+constexpr int    TIME_STEPS      = 1000;
+constexpr double DT              = 0.3;
 
 int main()
 {
-     // Bring a few types into local scope for convenience:
-     //  - BSpline : the B-spline basis class
-     //  - Real    : typedef for double
-     //  - D2DFun  : std::function<double(double,const double*)> for local operators
-     using bspline::BSpline;
-     using bspline::D2DFun;
-     using bspline::Real;
+    // ------------------------------------------------------------------
+    // Project Part 1: solve the Time-Independent Schrödinger Equation
+    // ------------------------------------------------------------------
+    tise::EigenResult er;
+    try
+    {
+        er = tise::solveTISE(BS_NNODS, BS_ORDER, BS_GRMIN, BS_GRMAX, L);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "TISE solver failed: " << e.what() << "\n";
+        return EXIT_FAILURE;
+    }
 
-     // ------------------------------------------------------------
-     // 1. Define B-spline grid and basis parameters
-     // ------------------------------------------------------------
-     // BS_NNODS : number of *distinct* radial grid points (nodes) in [BS_GRMIN, BS_GRMAX]
-     // BS_ORDER : B-spline order k. Each B-spline is a piecewise polynomial of degree k-1
-     //            that spans k intervals. Here k = 12 (order-12 splines).
-     const int BS_NNODS = 51;
-     const int BS_ORDER = 12;
+    // Rebuild the B-spline basis (needed for eigenfunction evaluation and Part 2)
+    auto grid = tise::buildUniformRadialGrid(BS_NNODS, BS_GRMIN, BS_GRMAX);
+    bspline::BSpline bs;
+    if (bs.init(BS_NNODS, BS_ORDER, grid) != 0)
+    {
+        std::cerr << "BSpline::init failed\n";
+        return EXIT_FAILURE;
+    }
+    const int nBSplines = bs.getNBSplines();
+    const int nEn       = er.dim;
 
-     // Radial domain: [BS_GRMIN, BS_GRMAX]
-     // This is the box in which we solve the radial Schrödinger equation.
-     const Real BS_GRMIN = 0.0;
-     const Real BS_GRMAX = 100.0;
-     const Real BS_INTER = BS_GRMAX - BS_GRMIN;
+    // Print accurate eigenvalues and write eigenstate files
+    std::cout << std::scientific << std::setprecision(16);
+    int iEn;
+    for (iEn = 1; iEn <= nEn; ++iEn)
+    {
+        double eig = er.values[iEn - 1];
+        double err = tise::eigenvalueError(eig, iEn, L);
+        if (err > ERROR_THRESHOLD) break;
 
-     // Construct a *uniform* grid of BS_NNODS points between BS_GRMIN and BS_GRMAX.
-     // These are the *distinct* nodes; the BSpline class will internally extend this
-     // with repeated end knots to implement the usual B-spline boundary conditions.
-     std::vector<Real> BS_GRID(BS_NNODS);
-     for (int iNode = 1; iNode <= BS_NNODS; ++iNode)
-     {
-          BS_GRID[iNode - 1] =
-              BS_GRMIN + BS_INTER * static_cast<Real>(iNode - 1) /
-                             static_cast<Real>(BS_NNODS - 1);
-     }
+        std::cout << std::setw(4) << iEn << "  "
+                  << std::setw(24) << eig << "  "
+                  << std::setw(24) << err << "\n";
 
-     // ------------------------------------------------------------
-     // 2. Initialize the B-spline basis
-     // ------------------------------------------------------------
-     BSpline bspline;
-     int info = bspline.init(BS_NNODS, BS_ORDER, BS_GRID);
-     if (info != 0)
-     {
-          // If initialization fails, print an error and exit.
-          // Possible causes: invalid node count, non-monotonic grid, etc.
-          std::cerr << "Error in BSpline::init, info = " << info << "\n";
-          return EXIT_FAILURE;
-     }
+        std::ostringstream oss;
+        oss << "EigenState_" << std::setw(3) << std::setfill('0') << iEn;
+        std::ofstream out(oss.str());
+        if (!out)
+        {
+            std::cerr << "Cannot open " << oss.str() << "\n";
+            return EXIT_FAILURE;
+        }
+        auto coeffs = tise::eigenstateCoefficients(er.vectors, iEn, nEn, nBSplines);
+        tise::writeEigenstate(out, bs, coeffs, NPTS_EIGENSTATE, BS_GRMIN, BS_GRMAX);
+    }
+    std::cout << "Number of Accurate Eigenvalues : " << (iEn - 1) << "\n";
 
-     // Total number of B-splines is Nnodes + order - 2 (as in the Fortran code).
-     const int nBSplines = bspline.getNBSplines(); // = BS_NNODS + BS_ORDER - 2
+    // ------------------------------------------------------------------
+    // Project Part 2: propagate a Gaussian wavepacket in time
+    // ------------------------------------------------------------------
+    try
+    {
+        tevol::runTimeEvolution(bs, er, nBSplines,
+                                BS_GRMIN, BS_GRMAX,
+                                TIME_STEPS, DT,
+                                INITIAL_POSITION, M_OMEGA, HBAR,
+                                TIMESTEPS_DIR);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Time evolution failed: " << e.what() << "\n";
+        return EXIT_FAILURE;
+    }
 
-     // We impose that the radial wavefunction vanishes at the edges of the interval.
-     // The first and last B-splines do not vanish at the boundaries, so we exclude them.
-     // Therefore the variational subspace uses nEn = nBSplines - 2 B-splines.
-     const int nEn = nBSplines - 2;                // exclude first and last B-spline
-
-     // ------------------------------------------------------------
-     // 3. Allocate banded Hamiltonian and overlap matrices
-     // ------------------------------------------------------------
-     // We store both H and S in *symmetric banded* storage, as required by LAPACK's DSBGV.
-     //
-     // Layout for a symmetric band matrix A of size n with upper bandwidth (ka):
-     //   - We use a 2D array AB(ka+1, n) in column-major form.
-     //   - The diagonal A(i,i) is stored at AB(ka+1, i).
-     //   - The k-th superdiagonal A(i, i+k) is stored at AB(ka+1-k, i+k).
-     //
-     // Here BS_ORDER - 1 is the half-bandwidth ka = kb.
-     //
-     // We allocate Hmat and Smat as 1D vectors of length BS_ORDER * nEn,
-     // which we will treat as (BS_ORDER x nEn) column-major arrays.
-     std::vector<Real> Hmat(BS_ORDER * nEn, 0.0); // Hamiltonian
-     std::vector<Real> Smat(BS_ORDER * nEn, 0.0); // Overlap (mass) matrix
-
-     // ------------------------------------------------------------
-     // 4. Fill H and S matrices
-     // ------------------------------------------------------------
-     {
-          // Local operator functors:
-          //  - fUni(x)  = 1            (used for overlap & kinetic energy kernel)
-          //  - fPot(x)  = V_l(x)       (radial potential)
-          D2DFun fUni = Unity;
-          D2DFun fPot = Potential;
-
-          // The Fortran interface for potential allowed a parvec array; we keep the
-          // same interface for compatibility, even though we do not use it here.
-          double parvec[1] = {0.0};
-
-          // Small helper that maps (row, col) in 1-based Fortran-like band storage
-          // into a 0-based index into our 1D vector.
-          auto bandIndex = [](int row, int col, int ld)
-          {
-               // row : 1..ld   (ld = BS_ORDER)
-               // col : 1..nEn  (matrix column index)
-               // ld  : leading dimension (number of rows = BS_ORDER)
-               return (row - 1) + (col - 1) * ld;
-          };
-
-          // Loop over column index iBs2 in the reduced basis (2 .. nEn+1).
-          // In the full B-spline set, indices run from 1 .. nBSplines.
-          // Our working basis uses indices 2 .. nBSplines-1, so the
-          // generalized eigenproblem is of size nEn.
-          for (int iBs2 = 2; iBs2 <= nEn + 1; ++iBs2)
-          {
-               // For a given column (B-spline index iBs2), only rows (iBs1)
-               // that are within (BS_ORDER - 1) of iBs2 contribute to the band,
-               // i.e., |iBs1 - iBs2| < BS_ORDER.
-               int iBs1Min = std::max(2, iBs2 - BS_ORDER + 1);
-               for (int iBs1 = iBs1Min; iBs1 <= iBs2; ++iBs1)
-               {
-                    // Overlap matrix element S_{iBs1,iBs2} = <B_iBs1 | B_iBs2>
-                    Real overlap = bspline.integral(fUni, iBs1, iBs2);
-
-                    // Kinetic energy: T = -1/2 d^2/dr^2
-                    // The matrix element is ∫ B'_i Bs'_j dr / 2 (with appropriate radial measure).
-                    // Here bspline.integral(fUni, iBs1, iBs2, 1, 1) computes
-                    // ∫ B_i^(1)(r) B_j^(1)(r) dr (with the internal r^2 factor in the module);
-                    // dividing by 2 gives the -1/2 factor in the Hamiltonian.
-                    Real kinetic = bspline.integral(fUni, iBs1, iBs2,
-                                                    /*n1=*/1, /*n2=*/1) /
-                                   2.0;
-
-                    // Potential energy: V_l(r) = l(l+1)/(2 r^2) - 1/r
-                    // The matrix element is ∫ B_i(r) V_l(r) B_j(r) dr (again with r^2 from the module).
-                    Real potential = bspline.integral(fPot, iBs1, iBs2,
-                                                      /*n1=*/0, /*n2=*/0,
-                                                      parvec);
-
-                    // Convert the pair of B-spline indices (iBs1,iBs2) to
-                    // the band-storage coordinates (row, col) of the reduced nEn x nEn matrix:
-                    //   col = iBs2 - 1  -> column index in 1..nEn
-                    //   row = iBs1 + BS_ORDER - iBs2  -> row index in 1..BS_ORDER
-                    int col = iBs2 - 1;               // 1..nEn
-                    int row = iBs1 + BS_ORDER - iBs2; // 1..BS_ORDER
-                    int idx = bandIndex(row, col, BS_ORDER);
-
-                    // Store overlap and Hamiltonian entries.
-                    Smat[idx] = overlap;
-                    Hmat[idx] = kinetic + potential;
-               }
-          }
-     }
-
-     // ------------------------------------------------------------
-     // 5. Solve the generalized eigenproblem H c = E S c using DSBGV
-     // ------------------------------------------------------------
-     {
-          // Threshold for deciding when an eigenvalue is "accurate"
-          // relative to the analytical hydrogen-like formula.
-          const Real ERROR_THRESHOLD = 1.0e-10;
-
-          // Number of radial points at which to sample each eigenfunction
-          // when writing it to a file.
-          const int npts = 301;
-
-          // LAPACK will overwrite A and B, so we work on copies of H and S.
-          std::vector<Real> A = Hmat;
-          std::vector<Real> B = Smat;
-
-          // eval: eigenvalues E_i
-          std::vector<Real> eval(nEn, 0.0);       // eigenvalues
-
-          // evec: eigenvectors Z (dimension nEn x nEn, column-major).
-          //       Column iEn corresponds to the iEn-th eigenvector.
-          int ldz = nEn;                          // no extra padding in C++
-          std::vector<Real> evec(ldz * nEn, 0.0); // eigenvectors
-
-          // Workspace array of length 3*nEn as required by DSBGV.
-          std::vector<Real> work(3 * nEn, 0.0);
-
-          // LAPACK DSBGV arguments:
-          //   jobz = 'V' -> compute eigenvalues and eigenvectors
-          //   uplo = 'U' -> upper triangle of band matrices is stored
-          char jobz = 'V';
-          char uplo = 'U';
-          int n = nEn;           // dimension of the generalized eigenproblem
-          int ka = BS_ORDER - 1; // number of superdiagonals in H
-          int kb = BS_ORDER - 1; // number of superdiagonals in S
-          int ldab = BS_ORDER;   // leading dimension of A (rows in band storage)
-          int ldbb = BS_ORDER;   // leading dimension of B
-          int infoLapack = 0;
-
-          // Call LAPACK DSBGV:
-          //
-          //   A and B are symmetric band matrices (upper storage).
-          //   On exit, eval contains eigenvalues in ascending order,
-          //   and evec contains the corresponding eigenvectors (columns of Z).
-          dsbgv_(&jobz, &uplo,
-                 &n, &ka, &kb,
-                 A.data(), &ldab,
-                 B.data(), &ldbb,
-                 eval.data(),
-                 evec.data(), &ldz,
-                 work.data(),
-                 &infoLapack);
-
-          // -----------------------------------------------------------------------------
-          // For Project Part 2
-          // -----------------------------------------------------------------------------
-
-          //   Form <B | G> into a vector of all scalars <B_i|G>
-          std::vector<bspline::Real> sumCoeffs = computeGaussianSumCoeffs(bspline, nEn, BS_ORDER);
-
-          // Map evec as an nEn x nEn column-major matrix C
-          Eigen::Map<const Eigen::MatrixXd> C(evec.data(), nEn, nEn);
-
-          // Eigen::MatrixXd C_dagger = C.adjoint(); // or C.transpose(); <- Doesn't work
-          Eigen::MatrixXd C_dagger = C.inverse(); 
-
-          // Build vector <B|G> of <B_alpha | G> for alpha = 0..nEn-1
-          Eigen::VectorXd B_G(nEn);
-
-          // sumCoeffs is padded with a 0 at the beginning and end
-          // create B_G without this padding
-          for (int alpha = 0; alpha < nEn; ++alpha)
-          {
-               int iBs = alpha + 2;           // B-spline index: 2,3,...,nEn+1
-               B_G(alpha) = sumCoeffs[iBs - 1]; 
-          }
-
-          // Compute <φ|G> = C_dagger * <B|G>
-          Eigen::VectorXd Phi_G = C_dagger * B_G;
-
-          // Time-evolve <φ|G> by applying exp(-i H t) to get V(t).
-	     // Then do CV(t)
-          int timeSteps = 1000;
-          double dt = 0.3; // time step
-          for (int step = 0; step < timeSteps; ++step)
-          {
-               double t = step * dt;
-               Eigen::VectorXcd V_t = Eigen::VectorXcd::Zero(nEn);
-               
-               // Multiply the Phi_G eigenfunction by the time-evolution matrix.
-               // create vector that represents diagonal time evolution matrix for THIS time step
-               Eigen::VectorXcd evolution = Eigen::VectorXcd::Zero(nEn);
-               for (int idx = 0; idx < nEn; idx++)
-               {
-                    // energies are in std::vector<Real> eval, was computed by diagonalization
-                    // eval is not padded with 0s, and it has nEn elements.
-                    evolution(idx) = std::exp(std::complex<double>(0, -eval[idx] * t / hbar));
-               }
-
-               // Verify at t=0 that evolution is all ones
-               if (step == 0)
-               {
-                    for (int i = 0; i < nEn; ++i)
-                    {
-                         assert(evolution(i).real() == 1.0);
-                         assert(evolution(i).imag() == 0.0 || evolution(i).imag() == -0.0);
-                    }
-               }
-
-               //  We use cwiseProduct to represent the action of the diagonal time evolution matrix.
-               V_t = evolution.cwiseProduct(Phi_G);
-
-               // Verify at t=0 that V(t) == Phi_G
-               if (step == 0)
-               {
-                    for (int i = 0; i < nEn; ++i)
-                    {
-                         assert(Phi_G(i) == V_t(i).real());
-                    }
-               }
-
-               // Multiply V(t) by C
-               // These are coeffients of the wave function in the B-spline basis,
-               // as opposed to in the eigenstate basis (V(t)).
-               Eigen::VectorXcd CV_t = Eigen::VectorXcd::Zero(nEn);
-               CV_t = C * V_t;
-               
-               // Verify at t=0 that CV(t) == Phi_G
-               if (step == 0)
-               {
-                    for (int i = 0; i < nEn; i++)
-                    {
-                         assert(abs(CV_t(i).real() - B_G(i)) < 1e-12);
-                    }
-               }
-
-               // Pad CV(t) with zeros at both ends to match B-spline basis size.
-               Eigen::VectorXcd CV_padded(nBSplines);
-               CV_padded.setZero();
-               CV_padded.segment(1, nEn) = CV_t;
-
-               // Our final wavefunction is a linear combination of 
-               // all BSplines scaled by the corresponding coefficient in CV(t)
-	          // Elements of CV(t) are complex!
-               // We separate the real and imaginary part of each coefficient, 
-               // then evaluate two different linear combinations of B-splines,
-               // one using the real parts and one using the imaginary parts.
-               // We write these evaluated points to a file as x, real, imaginary
-	       
-               std::ostringstream oss;
-               oss << TIMESTEPS_DIR << "/Timestep_" << std::setw(3) << std::setfill('0') << step;
-               std::string filename = oss.str();
-
-               std::ofstream out(filename);
-               if (!out)
-               {
-                    std::cerr << "Cannot open file " << filename << " for writing\n";
-                    return EXIT_FAILURE;
-               }
-               out << std::scientific << std::setprecision(16);
-
-               // Separate real and imaginary parts of CV_padded into two arrays.
-               std::vector<Real> real_parts(nBSplines);
-               std::vector<Real> imag_parts(nBSplines);
-               for (int i = 0; i < nBSplines; i++)
-               {
-                    real_parts[i] = CV_padded(i).real();
-                    imag_parts[i] = CV_padded(i).imag();
-               }
-
-               // Use bspline.eval to evaluate the wavefunction at npts points.
-               for (int ix = 1; ix <= npts; ++ix)
-               {
-                    Real x = BS_GRMIN +
-                             (BS_GRMAX - BS_GRMIN) *
-                                 static_cast<Real>(ix - 1) /
-                                 static_cast<Real>(npts - 1);
-
-                    double real = bspline.eval(x, real_parts.data(), nBSplines);
-                    double im = bspline.eval(x, imag_parts.data(), nBSplines);
-
-                    out << " " << std::setw(24) << x
-                        << " " << std::setw(24) << real
-                        << " " << std::setw(24) << im << "\n";
-               }
-
-               out.close();
-          }
-          // -----------------------------------------------------------------------------
-          // -----------------------------------------------------------------------------
-
-               int kd = BS_ORDER - 1;
-               int ld = BS_ORDER;
-
-               if (infoLapack != 0)
-               {
-                    std::cerr << "DSBGV info: " << infoLapack << "\n";
-                    return EXIT_FAILURE;
-               }
-
-          // Print numeric values in scientific notation with high precision.
-          std::cout << std::scientific << std::setprecision(16);
-
-          int iEn;
-          for (iEn = 1; iEn <= nEn; ++iEn)
-          {
-               // Eigenvalue for state iEn (LAPACK gives them in increasing order).
-               Real eig = eval[iEn - 1];
-
-               // ------------------------------------------------------------
-               // 5a. Compute analytic hydrogenic reference energy and error
-               // ------------------------------------------------------------
-               // Effective principal quantum number:
-               //   n_eff = iEn + L
-               // This matches the Fortran logic:
-               //   L = 0: n_eff = iEn
-               //   L = 1: n_eff = iEn + 1
-               Real n_eff = static_cast<Real>(iEn + L);
-
-               // Analytic hydrogenic energy: E_exact = -1 / [2 n_eff^2].
-               // Here we store the *difference* eig - E_exact as:
-               //   eigenvalueError = eig + 1/(2 n_eff^2)
-               // (so small |eigenvalueError| means good agreement).
-               Real eigenvalueError = eig + 1.0 / (2.0 * n_eff * n_eff);
-
-               // If the error is larger than the threshold, we stop counting
-               // further states as "accurate" (as the Fortran code does).
-               if (eigenvalueError > ERROR_THRESHOLD)
-               {
-                    break;
-               }
-
-               // Print the eigenvalue and its deviation from the analytic value.
-               std::cout << std::setw(4) << iEn << "  "
-                         << std::setw(24) << eig << "  "
-                         << std::setw(24) << eigenvalueError << "\n";
-
-               // ------------------------------------------------------------
-               // 5b. Write the eigenfunction ψ_iEn(r) to a file
-               // ------------------------------------------------------------
-               // File name: "EigenState_XXX" (e.g., EigenState_001, EigenState_002, ...)
-               std::ostringstream oss;
-               oss << "EigenState_" << std::setw(3) << std::setfill('0') << iEn;
-               std::string filename = oss.str();
-
-               std::ofstream out(filename);
-               if (!out)
-               {
-                    std::cerr << "Cannot open file " << filename << " for writing\n";
-                    return EXIT_FAILURE;
-               }
-               out << std::scientific << std::setprecision(16);
-
-               // Each column of evec is a generalized eigenvector in the reduced B-spline basis
-               // (indices 2 .. nBSplines-1). We extract column iEn as zCol.
-               const double *zCol = &evec[(iEn - 1) * ldz];
-
-               // Construct a full coefficient vector of length nBSplines for the BSpline::eval call:
-               //   coeffs[0]          = 0       -> coefficient of B-spline #1
-               //   coeffs[1..nEn]     = zCol[]  -> coefficients of B-splines #2 .. #nBSplines-1
-               //   coeffs[nEn+1]      = 0       -> coefficient of B-spline #nBSplines
-               //
-               // This matches the Fortran code, where the first and last B-splines are not used
-               // in the generalized eigenproblem but still exist in the BSpline set.
-               std::vector<Real> coeffs(nBSplines, 0.0);
-               for (int k = 0; k < nEn; ++k)
-               {
-                    coeffs[1 + k] = zCol[k];
-               }
-
-               // Sample the eigenfunction on npts uniformly spaced r-values in [BS_GRMIN, BS_GRMAX].
-               for (int ix = 1; ix <= npts; ++ix)
-               {
-                    Real x = BS_GRMIN +
-                             (BS_GRMAX - BS_GRMIN) *
-                                 static_cast<Real>(ix - 1) /
-                                 static_cast<Real>(npts - 1);
-
-                    // Evaluate ψ(r) = sum_Bs coeffs[Bs-1] * B_spline_Bs(r)
-                    Real fun = bspline.eval(x, coeffs.data(), nBSplines);
-
-                    out << " " << std::setw(24) << x
-                        << " " << std::setw(24) << fun << "\n";
-               }
-               out.close();
-          }
-
-          // iEn is incremented one past the last accepted index, so iEn-1
-          // is the number of eigenvalues that passed the accuracy threshold.
-          std::cout << "Number of Accurate Eigenvalues : " << (iEn - 1) << "\n";
-     }
-
-     return 0;
+    return 0;
 }

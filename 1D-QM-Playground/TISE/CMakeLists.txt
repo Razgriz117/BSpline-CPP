@@ -17,35 +17,47 @@ if (BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
-# B-spline library (used by both the main executable and tests)
+# B-spline library
 add_library(bspline_lib BSpline.cpp)
 target_include_directories(bspline_lib
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(bspline_lib
-    PUBLIC
-        ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
+    PUBLIC ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
 )
 
-# Utils library (used by the main executable and tests)
+# Utils library
 add_library(utils_lib utils/utils.cpp)
 target_include_directories(utils_lib
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/utils
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(utils_lib
-    PUBLIC
-        bspline_lib
+target_link_libraries(utils_lib PUBLIC bspline_lib)
+
+# TISE solver library (Project Part 1)
+add_library(tise_lib tise.cpp)
+target_include_directories(tise_lib
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
+target_link_libraries(tise_lib
+    PUBLIC bspline_lib ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
+)
+
+# Time evolution library (Project Part 2)
+add_library(time_evolution_lib time_evolution.cpp)
+target_include_directories(time_evolution_lib
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        /usr/include/eigen3
+)
+target_link_libraries(time_evolution_lib PUBLIC bspline_lib tise_lib)
 
 # Main executable
 add_executable(H-BoundStates main.cpp)
 
 target_compile_features(H-BoundStates PRIVATE cxx_std_17)
 
-# Define output directory for timesteps.
 set(TIMESTEPS_OUTPUT_DIR "${CMAKE_BINARY_DIR}/timesteps")
 add_custom_target(create_timesteps_dir ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory ${TIMESTEPS_OUTPUT_DIR}
@@ -61,7 +73,8 @@ target_include_directories(H-BoundStates PRIVATE
 )
 
 target_link_libraries(H-BoundStates PRIVATE
-    bspline_lib
+    tise_lib
+    time_evolution_lib
     utils_lib
     ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
 )
