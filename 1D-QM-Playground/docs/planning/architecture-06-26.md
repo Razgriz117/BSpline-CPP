@@ -112,8 +112,68 @@ Responsibilities:
 A single YAML file drives the entire run. Example:
 
 ```yaml
-# TBD
+# ─── Run control ──────────────────────────────────────────────────────────────
+run:
+  run_tise:     true
+  run_tdse:     false
+  run_analysis: false
+  output_dir:   "./data"
+
+# ─── Physical constants ───────────────────────────────────────────────────────
+physics:
+  mass: 1.0    # particle mass
+  hbar: 1.0    # reduced Planck constant
+
+# ─── B-spline basis ───────────────────────────────────────────────────────────
+bspline:
+  n_nodes: 51
+  order:   12
+  domain:  [0.0, 100.0]
+
+# ─── Potential (piecewise, expressions in x) ──────────────────────────────────
+# Each entry encodes a dict with two keys:
+#   domain   — interval notation: [ ] closed, ( ) open. Supports inf.
+#   function — a math expression in x with literal numeric constants only.
+potential:
+  - "{'domain': '(0, 100]', 'function': '-1/x + 1/x^2'}"
+
+# ─── TISE solver ──────────────────────────────────────────────────────────────
+tise:
+  n_states:         10        # bound states to compute (0 = all)
+  n_pts_eigenstate: 301       # spatial grid points for eigenstate output
+  error_threshold:  1.0e-10   # eigenvalue accuracy cutoff for reporting
+
+  continuum:
+    enabled:    false
+    E_max:      10.0
+    n_energies: 100
+    n_pts:      500
+
+# ─── TDSE solver ──────────────────────────────────────────────────────────────
+tdse:
+  initial_state:
+    type:  eigenstate   # eigenstate | gaussian
+    index: 0            # (eigenstate only) 0-indexed bound state
+    # position: 10.0   # (gaussian only)
+    # momentum:  0.0   # (gaussian only)
+    # width:     1.0   # (gaussian only)
+  dt:                0.3
+  t_final:         300.0
+  snapshot_interval: 10
+  chebyshev_order:   10     # M in van Dijk/Chebyshev expansion order 2M
+
+# ─── Analysis ─────────────────────────────────────────────────────────────────
+# TODO: Concretize once the open question on Analysis inputs is resolved
+# (see architecture-06-20.md — "Analysis: what to compute").
+analysis:
+  plots:
+    eigenstates:    true
+    phase_shifts:   true
+    time_evolution: true
 ```
+
+For full field descriptions, types, constraints, and potential parsing rules see
+`docs/superpowers/specs/2026-06-28-config-yaml-schema-design.md`.
 
 ---
 

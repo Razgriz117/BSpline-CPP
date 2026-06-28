@@ -1,0 +1,76 @@
+# config.yaml — 1D QM Playground
+# Single source of truth for a simulation run.
+# Read by the Python controller (controller.py) and passed to each solver binary.
+
+# ─── Run control ──────────────────────────────────────────────────────────────
+run:
+  run_tise:     true
+  run_tdse:     false
+  run_analysis: false
+  output_dir:   "./data"
+
+# ─── Physical constants ───────────────────────────────────────────────────────
+physics:
+  mass: 1.0    # particle mass
+  hbar: 1.0    # reduced Planck constant
+
+# ─── B-spline basis ───────────────────────────────────────────────────────────
+bspline:
+  n_nodes: 51
+  order:   12
+  domain:  [0.0, 100.0]
+
+# ─── Potential (piecewise, expressions in x) ──────────────────────────────────
+# Each entry is a string encoding a dict with two keys:
+#   domain   — interval notation: use [ ] for closed bounds, ( ) for open bounds.
+#              e.g. "(0, 100]" means 0 < x <= 100. Supports inf: "[0, inf)".
+#   function — a mathematical expression in x with literal numeric constants.
+#              No variable references to other config fields are supported;
+#              all constants (including centrifugal terms) must be baked in.
+#
+# Example (hydrogen-like, L=1 effective potential):
+#   - "{'domain': '(0, 100]', 'function': '-1/x + 1/x^2'}"
+#
+# Example (particle in a box with a barrier at x in [5, 6]):
+#   - "{'domain': '[0, 5)',  'function': '0'}"
+#   - "{'domain': '[5, 6]',  'function': '10'}"
+#   - "{'domain': '(6, 10]', 'function': '0'}"
+potential:
+  - "{'domain': '(0, 100]', 'function': '-1/x + 1/x^2'}"
+
+# ─── TISE solver ──────────────────────────────────────────────────────────────
+tise:
+  n_states:         10        # number of bound states to compute (0 = all)
+  n_pts_eigenstate: 301       # spatial grid points for eigenstate output
+  error_threshold:  1.0e-10   # eigenvalue accuracy cutoff for reporting
+
+  continuum:
+    enabled:    false
+    E_max:      10.0          # maximum continuum energy
+    n_energies: 100           # number of energy points on the continuum grid
+    n_pts:      500           # spatial grid points per continuum state output
+
+# ─── TDSE solver ──────────────────────────────────────────────────────────────
+tdse:
+  initial_state:
+    type:  eigenstate   # eigenstate | gaussian
+    index: 0            # (eigenstate only) 0-indexed bound state
+    # position: 10.0   # (gaussian only) wavepacket center
+    # momentum:  0.0   # (gaussian only) mean momentum
+    # width:     1.0   # (gaussian only) Gaussian width
+  dt:                0.3
+  t_final:         300.0
+  snapshot_interval: 10     # steps between wavefunction snapshot writes
+  chebyshev_order:   10     # M in van Dijk/Chebyshev expansion order 2M
+
+# ─── Analysis ─────────────────────────────────────────────────────────────────
+# TODO: Concretize this section once the open question on Analysis inputs is
+# resolved (see docs/planning/architecture-06-20.md — "Analysis: what to
+# compute", lines 298–321). The open question identifies a large set of
+# candidate quantities (phase shifts, dipole matrix elements, HHG spectra,
+# ATI maps, population dynamics, etc.) whose configuration format is TBD.
+analysis:
+  plots:
+    eigenstates:    true
+    phase_shifts:   true
+    time_evolution: true
