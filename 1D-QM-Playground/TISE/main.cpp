@@ -18,10 +18,10 @@ constexpr int L = 1;
 
 // Physical parameters for the Gaussian wavepacket (atomic units)
 constexpr double HBAR             = 1.0;
-constexpr double M_E              = 3.75;
+constexpr double PARTICLE_MASS    = 3.75;
 constexpr double INITIAL_POSITION = 10.0;
 constexpr double K_SPRING         = 1.0 / 8.0;
-const     double M_OMEGA          = std::sqrt(M_E * K_SPRING);
+const     double M_OMEGA          = std::sqrt(PARTICLE_MASS * K_SPRING);
 
 // B-spline basis parameters
 constexpr int    BS_NNODS = 51;
