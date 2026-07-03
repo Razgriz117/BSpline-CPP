@@ -190,7 +190,11 @@ protected:
         ASSERT_EQ(bs.init(nNodes, order, grid), 0);
         nBSplines = bs.getNBSplines();
         nEn       = nBSplines - 2;
-        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L);
+
+        std::map<std::string, std::string> potential = {
+            {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
         Hmat = H;
         Smat = S;
     }
@@ -267,7 +271,11 @@ protected:
         ASSERT_EQ(bs.init(nNodes, order, grid), 0);
         int nBs = bs.getNBSplines();
         nEn = nBs - 2;
-        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L);
+
+        std::map<std::string, std::string> potential = {
+            {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
         result = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
     }
 

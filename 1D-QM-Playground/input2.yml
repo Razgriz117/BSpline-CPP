@@ -1,2 +1,2 @@
 potential:
-  - '{"domain": "(-inf, inf)", "function": "1 * (1 + 1.0) / (2.0 * x * x) - 1.0 / x"}'
+  - '{"domain": "(-inf, inf)", "function": "0 * (0 + 1.0) / (2.0 * x * x) - 1.0 / x"}'

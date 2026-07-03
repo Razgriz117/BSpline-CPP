@@ -44,8 +44,9 @@ add_library(tise_lib tise.cpp)
 target_include_directories(tise_lib
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(tise_lib
-    PUBLIC bspline_lib ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
+target_link_libraries(tise_lib PUBLIC 
+    bspline_lib ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
+    muparser::muparser
 )
 
 # Time evolution library (Project Part 2)
@@ -81,6 +82,5 @@ target_link_libraries(H-BoundStates PRIVATE
     time_evolution_lib
     utils_lib
     nlohmann_json::nlohmann_json
-    muparser::muparser
     ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
 )

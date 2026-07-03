@@ -116,6 +116,9 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::m
     bspline::D2DFun fPot = [potential](double x, const double *) {
         return evaluateFunction(potential, x);
     };
+    // bspline::D2DFun fPot = [L](double x, const double *) {
+    //     return radialPotential(x, L);
+    // };
     double parvec[1] = {0.0};
 
     auto bandIndex = [&](int row, int col) {
