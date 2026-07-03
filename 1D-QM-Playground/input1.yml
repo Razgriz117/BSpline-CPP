@@ -1,0 +1,3 @@
+potential:
+  - '{"domain": "[0, 20)", "function": "x"}'
+  - '{"domain": "[20, 40]", "function": "x^2"}'

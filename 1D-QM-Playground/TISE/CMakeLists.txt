@@ -10,6 +10,10 @@ option(BUILD_TESTING "Build the testing tree." OFF)
 
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
+find_package(nlohmann_json 3.10.5 REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MUPARSER REQUIRED IMPORTED_TARGET muparser)
+add_library(muparser::muparser ALIAS PkgConfig::MUPARSER)
 
 if (BUILD_TESTING)
     enable_testing()
@@ -76,5 +80,7 @@ target_link_libraries(H-BoundStates PRIVATE
     tise_lib
     time_evolution_lib
     utils_lib
+    nlohmann_json::nlohmann_json
+    muparser::muparser
     ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
 )

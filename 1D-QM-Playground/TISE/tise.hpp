@@ -2,6 +2,7 @@
 
 #include <iosfwd>
 #include <vector>
+#include <map>
 #include "BSpline.hpp"
 
 namespace tise
@@ -27,7 +28,7 @@ double radialPotential(double x, int L);
 // Fill symmetric banded Hamiltonian H and overlap S matrices (LAPACK 'U' storage).
 // Returns {Hmat, Smat}, each of size order * nEn.
 std::pair<std::vector<Real>, std::vector<Real>>
-fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L);
+fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::map<std::string, std::string> potential);
 
 // Solve H c = E S c via LAPACK DSBGV.
 // H and S are consumed (overwritten); pass by value intentionally.
@@ -59,6 +60,6 @@ void writeEigenstate(std::ostream &out,
                      Real rMax);
 
 // Top-level TISE solver: build grid, fill matrices, diagonalise.
-EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L);
+EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential);
 
 } // namespace tise

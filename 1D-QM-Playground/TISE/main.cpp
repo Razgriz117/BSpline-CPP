@@ -4,7 +4,9 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <map>
 
+#include <nlohmann/json.hpp>
 #include "BSpline.hpp"
 #include "tise.hpp"
 #include "time_evolution.hpp"
@@ -35,15 +37,34 @@ constexpr int    NPTS_EIGENSTATE = 301;
 constexpr int    TIME_STEPS      = 1000;
 constexpr double DT              = 0.3;
 
-int main()
+std::map<std::string, std::string> parsePiecewise(const std::string& arg) {
+    nlohmann::json j = nlohmann::json::parse(arg);          // arg must be valid JSON array
+    std::map<std::string, std::string> domainToFunction;
+
+    for (const auto& piece : j) {
+        domainToFunction[piece.at("domain").get<std::string>()] =
+            piece.at("function").get<std::string>();
+    }
+    return domainToFunction;
+}
+
+int main(int argc, char *argv[])
 {
+    // Parse the potential input string into a map
+    auto potential = parsePiecewise(argv[1]);
+
+    std::cout << "Potential is: " << std::endl;
+    for (const auto& [domain, fn] : potential) {
+        std::cout << "\t" << domain << ": " << fn << "\n";
+    }
+
     // ------------------------------------------------------------------
     // Project Part 1: solve the Time-Independent Schrödinger Equation
     // ------------------------------------------------------------------
     tise::EigenResult er;
     try
     {
-        er = tise::solveTISE(BS_NNODS, BS_ORDER, BS_GRMIN, BS_GRMAX, L);
+        er = tise::solveTISE(BS_NNODS, BS_ORDER, BS_GRMIN, BS_GRMAX, L, potential);
     }
     catch (const std::exception &e)
     {

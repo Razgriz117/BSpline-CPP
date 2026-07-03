@@ -7,6 +7,10 @@
 #include <ostream>
 #include <stdexcept>
 #include <vector>
+#include <map>
+#include <regex>
+#include "muParser.h"
+#include <sstream>
 
 extern "C"
 {
@@ -38,15 +42,79 @@ double radialPotential(double x, int L)
     return l * (l + 1.0) / (2.0 * x * x) - 1.0 / x;
 }
 
+// given a string, e.g. [0, 20), return true if input x falls in the bounds and false otherwise
+bool inInterval(double x, const std::string& interval)
+{
+    static const std::regex re(
+        R"(^\s*([\[\(])\s*(-?(?:\d+(?:\.\d+)?)|[+-]?(?:inf|infinity))\s*,\s*(-?(?:\d+(?:\.\d+)?)|[+-]?(?:inf|infinity))\s*([\]\)])\s*$)",
+        std::regex_constants::icase
+    );
+
+    std::smatch m;
+    if (!std::regex_match(interval, m, re)) {
+        throw std::runtime_error("Invalid interval: " + interval);
+    }
+
+    auto parseBound = [](const std::string& s) {
+        std::string t;
+        t.reserve(s.size());
+        for (char c : s)
+            t += std::tolower(static_cast<unsigned char>(c));
+
+        if (t == "inf" || t == "+inf" ||
+            t == "infinity" || t == "+infinity")
+            return std::numeric_limits<double>::infinity();
+
+        if (t == "-inf" || t == "-infinity")
+            return -std::numeric_limits<double>::infinity();
+
+        return std::stod(s);
+    };
+
+    bool leftInclusive = m[1] == "[";
+    bool rightInclusive = m[4] == "]";
+
+    double left = parseBound(m[2]);
+    double right = parseBound(m[3]);
+
+    bool leftOK = leftInclusive ? (x >= left) : (x > left);
+    bool rightOK = rightInclusive ? (x <= right) : (x < right);
+
+    return leftOK && rightOK;
+}
+
+double evaluateFunction(std::map<std::string, std::string> function, double x)
+{
+    // given a map from domain to function, evaluate function for input x
+    // for now, this naively assumes that the first match is the correct one
+    // TODO: add error checking in case input x fits in multiple pieces, or function is not defined in terms of x
+    for (const auto& [domain, fn] : function) {
+        if (inInterval(x, domain))
+        {
+            // evaluate function
+            mu::Parser p;
+            p.DefineVar("x", &x); 
+            p.SetExpr(fn);
+
+            // return result
+            return p.Eval();
+        }
+    }
+    std::ostringstream oss;
+    oss << "Function domain does not cover x = "
+        << x ;
+    throw std::runtime_error(oss.str());
+}
+
 std::pair<std::vector<Real>, std::vector<Real>>
-fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L)
+fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::map<std::string, std::string> potential)
 {
     std::vector<Real> Hmat(order * nEn, 0.0);
     std::vector<Real> Smat(order * nEn, 0.0);
 
     bspline::D2DFun fUni = [](double, const double *) { return 1.0; };
-    bspline::D2DFun fPot = [L](double x, const double *) {
-        return radialPotential(x, L);
+    bspline::D2DFun fPot = [potential](double x, const double *) {
+        return evaluateFunction(potential, x);
     };
     double parvec[1] = {0.0};
 
@@ -155,7 +223,7 @@ void writeEigenstate(std::ostream &out,
     }
 }
 
-EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L)
+EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential)
 {
     auto grid = buildUniformRadialGrid(nNodes, rMin, rMax);
 
@@ -168,7 +236,7 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L)
     int nBSplines = bs.getNBSplines();
     int nEn       = nBSplines - 2;
 
-    auto [H, S] = fillBandedMatrices(bs, nEn, order, L);
+    auto [H, S] = fillBandedMatrices(bs, nEn, order, L, potential);
     return solveGeneralizedEigenproblem(std::move(H), std::move(S), nEn, order);
 }
 
