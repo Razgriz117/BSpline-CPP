@@ -40,15 +40,15 @@ potential:
 
 # ─── TISE solver ──────────────────────────────────────────────────────────────
 tise:
-  n_states:         10        # number of bound states to compute (0 = all)
   n_pts_eigenstate: 301       # spatial grid points for eigenstate output
   error_threshold:  1.0e-10   # eigenvalue accuracy cutoff for reporting
 
   continuum:
-    enabled:    false
-    E_max:      10.0          # maximum continuum energy
-    n_energies: 100           # number of energy points on the continuum grid
-    n_pts:      500           # spatial grid points per continuum state output
+    enabled:     false
+    E_threshold: 0.0          # lower bound of continuum spectrum range
+    E_max:       10.0         # upper bound of continuum spectrum range
+    n_energies:  100          # number of energy points in [E_threshold, E_max]
+    n_pts:       500          # spatial grid points per continuum state output
 
 # ─── TDSE solver ──────────────────────────────────────────────────────────────
 tdse:
@@ -58,17 +58,19 @@ tdse:
     # position: 10.0   # (gaussian only) wavepacket center
     # momentum:  0.0   # (gaussian only) mean momentum
     # width:     1.0   # (gaussian only) Gaussian width
-  dt:                0.3
+  dt:                0.3     # output time resolution (snapshot written every dt)
   t_final:         300.0
-  snapshot_interval: 10     # steps between wavefunction snapshot writes
-  chebyshev_order:   10     # M in van Dijk/Chebyshev expansion order 2M
+  snapshot_interval: 10     # steps of dt between wavefunction snapshot writes
 
 # ─── Analysis ─────────────────────────────────────────────────────────────────
-# TODO: Concretize this section once the open question on Analysis inputs is
-# resolved (see docs/planning/architecture-06-20.md — "Analysis: what to
-# compute", lines 298–321). The open question identifies a large set of
-# candidate quantities (phase shifts, dipole matrix elements, HHG spectra,
-# ATI maps, population dynamics, etc.) whose configuration format is TBD.
+# TODO: Concretize this section's config format once decided. The set of
+# computable quantities is resolved (see architecture-06-20.md — "Analysis:
+# what to compute", stakeholder feedback 2026-07-03):
+#   1. Bound-state populations as a function of time |<ψ_n|ψ(t)>|²
+#   2. Spectral distribution across channels at end of simulation
+#   3. Expectation values <x̂>(t), <p̂>(t), <T̂>(t), <V̂>(t), <Ĥ>(t)
+#   4. Interval probability P_[xa,xb](t) (optional)
+# The YAML schema for selecting and parameterizing these quantities is TBD.
 analysis:
   plots:
     eigenstates:    true

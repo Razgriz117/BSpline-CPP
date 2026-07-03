@@ -139,15 +139,15 @@ potential:
 
 # ─── TISE solver ──────────────────────────────────────────────────────────────
 tise:
-  n_states:         10        # bound states to compute (0 = all)
   n_pts_eigenstate: 301       # spatial grid points for eigenstate output
   error_threshold:  1.0e-10   # eigenvalue accuracy cutoff for reporting
 
   continuum:
-    enabled:    false
-    E_max:      10.0
-    n_energies: 100
-    n_pts:      500
+    enabled:     false
+    E_threshold: 0.0          # lower bound of continuum spectrum range
+    E_max:       10.0         # upper bound of continuum spectrum range
+    n_energies:  100          # number of energy points in [E_threshold, E_max]
+    n_pts:       500
 
 # ─── TDSE solver ──────────────────────────────────────────────────────────────
 tdse:
