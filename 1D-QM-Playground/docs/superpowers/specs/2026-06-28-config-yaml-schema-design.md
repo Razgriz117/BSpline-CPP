@@ -112,11 +112,10 @@ potential:
 
 ### `tise`
 
-Settings for the TISE solver.
+Settings for the TISE solver. The solver always computes all bound states below the ionization threshold — this count is output, not input.
 
 | Field | Type | Description |
 |---|---|---|
-| `n_states` | int | Number of bound states to compute. `0` means compute all. |
 | `n_pts_eigenstate` | int | Number of spatial grid points for eigenstate wavefunction output |
 | `error_threshold` | float | Eigenvalue accuracy cutoff for reporting (not a solver tolerance) |
 
@@ -125,15 +124,16 @@ Settings for the TISE solver.
 | Field | Type | Description |
 |---|---|---|
 | `enabled` | bool | Whether to compute continuum pseudostates and phase shifts |
-| `E_max` | float | Maximum continuum energy |
-| `n_energies` | int | Number of energy grid points in `[0, E_max]` |
+| `E_threshold` | float | Lower bound of the continuum spectrum range |
+| `E_max` | float | Upper bound of the continuum spectrum range |
+| `n_energies` | int | Number of energy grid points in `[E_threshold, E_max]` |
 | `n_pts` | int | Spatial grid points per continuum state output |
 
 ---
 
 ### `tdse`
 
-Settings for the TDSE solver (van Dijk / Chebyshev propagation).
+Settings for the TDSE solver (eigenstate expansion).
 
 #### `tdse.initial_state`
 
@@ -149,18 +149,22 @@ Settings for the TDSE solver (van Dijk / Chebyshev propagation).
 
 | Field | Type | Description |
 |---|---|---|
-| `dt` | float | Time step Δt |
+| `dt` | float | Output time resolution — a snapshot is written at t = 0, dt, 2dt, … |
 | `t_final` | float | Total propagation time |
-| `snapshot_interval` | int | Number of steps between wavefunction snapshot writes |
-| `chebyshev_order` | int | M in the van Dijk Chebyshev expansion of sin(HΔt/ℏ) to order 2M |
+| `snapshot_interval` | int | Number of dt steps between wavefunction snapshot writes |
 
 ---
 
 ### `analysis`
 
-> **TODO:** This section is currently a placeholder. Concretize once the open question on Analysis inputs is resolved — see `docs/planning/architecture-06-20.md`, "Analysis: what to compute" (lines 298–321).
+> **TODO:** Concretize this section's config format once decided. The set of computable quantities is now resolved (see `docs/planning/architecture-06-20.md` — "Analysis: what to compute", stakeholder feedback 2026-07-03):
 >
-> That section identifies a large set of candidate quantities, including: bound-state probability densities, transition dipole matrix elements, oscillator strengths, photoionization cross-sections, phase shifts δ(E), density of states ρ(E), time-dependent norm and energy, ionization probability, dipole moment ⟨r̂⟩(t), HHG spectrum, ATI spectrum, population dynamics |⟨ψₙ|ψ(t)⟩|², and heatmaps of |ψ(x,t)|². The configuration format for selecting and parameterizing these quantities is TBD.
+> 1. **Bound-state populations as a function of time** — |⟨ψₙ|ψ(t)⟩|² for each bound eigenstate n
+> 2. **Spectral distribution across channels at end of simulation** — energy-resolved probability distribution at t = t_final
+> 3. **Expectation values of key observables** — ⟨x̂⟩(t), ⟨p̂⟩(t), ⟨T̂⟩(t), ⟨V̂⟩(t), ⟨Ĥ⟩(t)
+> 4. **Interval probability** (optional) — P_{[xa,xb]}(t) = ∫_{xa}^{xb} |ψ(x,t)|² dx for user-specified [xa, xb]
+>
+> The YAML schema for selecting and parameterizing these quantities is TBD.
 
 Current stub:
 
@@ -182,5 +186,6 @@ Current stub:
 | Centrifugal / angular momentum | Fully user-defined in `potential` | No special-casing for radial vs. Cartesian; general 1D problem space |
 | `bspline` placement | Top-level | Shared infrastructure used by both TISE and TDSE; not solver-specific |
 | `continuum` placement | Nested under `tise` | Continuum states are computed by the TISE solver; nesting expresses that dependency |
-| `n_states: 0` sentinel | Compute all bound states | Avoids a separate `all: true` flag; natural for the zero-truncation case |
-| Analysis section | Stub + TODO | Open question in architecture doc; defer detail until resolved |
+| `tise.n_states` | Removed | Bound state count is output, not input; solver always computes all sub-threshold states |
+| `tdse.chebyshev_order` | Removed | TDSE uses eigenstate expansion (exact), not Chebyshev propagation |
+| Analysis section | Stub + TODO | Quantities resolved (2026-07-03); config format TBD |

@@ -69,15 +69,15 @@ Solves the Time-Independent Schrödinger Equation on a finite interval $[0, R]$ 
 
 ### 2.3 TDSE Solver (`tdse_solver` binary, C++)
 
-Propagates a wavefunction forward in time using the explicit van Dijk method (Askar-Cakmak generalization). Uses the Hamiltonian assembled by the TISE solver rather than reassembling it.
+Propagates a wavefunction forward in time using **eigenstate expansion** in the B-spline basis. The initial state is expanded in the eigenstates computed by the TISE solver; each component acquires a time-dependent phase:
 
-$$\psi^{n+1} = \psi^{n-1} - 2i \sin\!\left(\frac{H \Delta t}{\hbar}\right) \psi^n$$
+$$\psi(x, t) = \sum_n \alpha_n(0)\, e^{-i E_n t / \hbar}\, \phi_n(x), \qquad \alpha_n(0) = \langle \phi_n \mid \psi(0) \rangle$$
 
-approximated via the Chebyshev polynomial expansion to order $2M$.
+The inner products are evaluated in B-spline coefficient space using the overlap matrix $\mathbf{S}$ from the TISE. This approach is exact within the basis and requires neither finite-difference spatial discretization nor iterative time-stepping.
 
 **Inputs**:
-- `data/tise/` output (H, S matrices; optionally an initial eigenstate)
-- Time evolution parameters ($\Delta t$, $t_\text{final}$, $M$, $r$) from `config.yaml`
+- `data/tise/` output (eigenvalues $E_n$, eigenvectors $\mathbf{c}_n$, overlap matrix $\mathbf{S}$)
+- Time evolution parameters ($\Delta t$, $t_\text{final}$, `snapshot_interval`) from `config.yaml`
 - Initial state specification (e.g., a bound eigenstate index, or a Gaussian wave packet)
 
 **Outputs** (to `data/tdse/`):
@@ -139,15 +139,15 @@ potential:
 
 # ─── TISE solver ──────────────────────────────────────────────────────────────
 tise:
-  n_states:         10        # bound states to compute (0 = all)
   n_pts_eigenstate: 301       # spatial grid points for eigenstate output
   error_threshold:  1.0e-10   # eigenvalue accuracy cutoff for reporting
 
   continuum:
-    enabled:    false
-    E_max:      10.0
-    n_energies: 100
-    n_pts:      500
+    enabled:     false
+    E_threshold: 0.0          # lower bound of continuum spectrum range
+    E_max:       10.0         # upper bound of continuum spectrum range
+    n_energies:  100          # number of energy points in [E_threshold, E_max]
+    n_pts:       500
 
 # ─── TDSE solver ──────────────────────────────────────────────────────────────
 tdse:
@@ -160,7 +160,6 @@ tdse:
   dt:                0.3
   t_final:         300.0
   snapshot_interval: 10
-  chebyshev_order:   10     # M in van Dijk/Chebyshev expansion order 2M
 
 # ─── Analysis ─────────────────────────────────────────────────────────────────
 # TODO: Concretize once the open question on Analysis inputs is resolved

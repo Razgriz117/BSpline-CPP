@@ -197,6 +197,8 @@ The notes identify several design choices that remain to be resolved. Each is ex
 
 ### Operators: what and whether to expose them
 
+#### Initial analysis
+
 In 1D quantum mechanics the Hamiltonian is always
 
 $$\hat{H} = \frac{\hat{p}^2}{2m} + V(\hat{r})$$
@@ -218,9 +220,42 @@ Beyond the field coupling, other operators appear naturally as **observables** d
 
 **Recommendation:** The dipole operator gauge (length vs. velocity) is a sensible user input for the TDSE since it affects both accuracy and performance in ways that depend on the field parameters. Arbitrary operator input is probably out of scope at this stage. A reasonable approach is to hard-code the standard set of observables listed above and let the user select which to compute via the Analysis input (see below).
 
+#### Stakeholder feedback (2026-07-03)
+
+*Updated 2026-07-03 — stakeholder feedback incorporated.*
+
+There are two distinct sets of operators to consider: those **governing the dynamics** and those **associated with measurement** (observables).
+
+#### Dynamics operators
+
+For the dynamics, the central design decision is dimensionality. Going to 2D or 3D (e.g., the hydrogen atom) would require a substantially more complex code and demanding simulations. **Stakeholder recommendation: stay with 1D.** This keeps the program simple: there is only one discrete symmetry (parity), at most two escape channels (left/right, or even/odd for symmetric potentials), and the dynamics operator is just the Hamiltonian
+
+$$\hat{H} = \frac{\hat{p}^2}{2m} + V(\hat{x})$$
+
+fully determined by the user's choice of $V(x)$ — there is nothing else to expose. In 1D without driving fields, a user can compute bound and scattering states of any central potential but not driven time evolution. The most interesting time-domain problem accessible in this regime is preparing Rydberg wave packets and observing their radial periodicity.
+
+The relevant operator set is therefore restricted to: $\hat{H}$, $\hat{x}$, and $\hat{p}_x$.
+
+#### Observables (post-processing)
+
+To be handled by the Analysis layer after simulation:
+
+1. **Asymptotic observables** — projection of the final state onto scattering states
+2. **Bound-state populations and amplitudes** — projection onto bound eigenstates
+3. **Expectation values** of $\hat{x}$, $\hat{p}$, $\hat{T}$ (kinetic energy), $\hat{V}$ (potential energy), and $\hat{H}$ as functions of time
+4. **Interval probability** — probability of finding the particle within a user-specified spatial interval, computable via B-spline integrals between arbitrary boundaries
+
+#### Future directions (deferred)
+
+Potential expansions for pedagogical purposes include two interacting particles (which opens entanglement, correlation, exchange symmetry, and decoherence) before adding 3D complexity. These are explicitly deferred.
+
+**Decision: keep it simple.** Work toward a clean, self-contained publication first. Expansions can follow depending on where the project stands at completion.
+
 ---
 
 ### Number of bound states: input or computed?
+
+#### Initial analysis
 
 The number of bound states is not a free parameter — it is determined by the potential and the box size. A finite confining box always produces a finite number of pseudobound states below the ionization threshold, and a Coulomb potential in a box of size $r_\text{max}$ has roughly $n_\text{max} \sim \sqrt{r_\text{max}/2}$ bound states (from the hydrogen energy levels $E_n = -1/2n^2$ au).
 
@@ -232,9 +267,38 @@ The architecture diagram labels this as a STRUCTURAL input, which most likely me
 
 **Recommendation:** Compute all eigenstates automatically from the diagonalization; expose $N_b$ as an optional truncation parameter for TDSE and analysis. The program should label eigenstates by energy and let the user specify either a count or an energy cutoff (e.g., "all states below $2E_\text{ion}$").
 
+#### Stakeholder feedback (2026-07-03)
+
+*Updated 2026-07-03 — stakeholder feedback incorporated.*
+
+#### Is it a valid input?
+
+The number of bound states is **not known a priori** — a user asking for 10 may find there are only 3, or none. Conversely, the diagonalization will produce all sub-threshold states regardless, so arbitrarily withholding them serves no purpose. Taking this as a mandatory input is therefore not appropriate.
+
+The count depends on the asymptotics of the potential:
+
+- Potentials decaying as $1/r$ (Coulomb) or $1/r^2$ have **infinitely many** bound states, with energies converging to the threshold as $1/n^2$ and $e^{-n}$ respectively.
+- Attractive potentials that taper off faster than $1/r^2$ have a **finite** number of bound states.
+
+#### Accuracy within the box
+
+Not all sub-threshold states the diagonalization produces are reliable. States well-contained within the quantization box are accurate. States that "collide" with the boundary are not — if analytically continued past the box, they would carry a diverging irregular component. One could in principle extend the box boundary condition to match the logarithmic derivative of the known asymptotic regular solution (turning the box boundary into a transcendental equation), but this adds significant implementation complexity for unclear gain.
+
+A practical quality metric: **check the derivative of the eigenstate at the box boundary.** If $\psi'(x_\text{max}) \neq 0$, that is a red flag indicating the state is not well-contained and its energy and wavefunction may be inaccurate. This diagnostic should be computed and reported alongside each state.
+
+#### Decision: bound state count is output, not input
+
+List all states with energy below the ionization threshold as output, with the caveat that some energies and wavefunctions may be inaccurate if the state is not well-contained in the box. The user selects whichever states they want from that list.
+
+#### Visualization and analysis
+
+Tabulate whichever states are the box a user asks for, and optionally allow the user to restrict the number of states visualized to a subset. The analysis program should additionally allow the user to request any specific state by index or energy, regardless of the default display limit.
+
 ---
 
 ### Extra boundary conditions
+
+#### Initial analysis
 
 The standard boundary conditions are Dirichlet at both endpoints: $\psi(x_\text{min}) = 0$ and $\psi(x_\text{max}) = 0$. "Extra boundary conditions" in the notes likely refers to physical constraints beyond this baseline. The relevant options depend significantly on whether the solver is being used for a hydrogenic (radial) system or a general 1D problem.
 
@@ -254,9 +318,56 @@ The domain geometry should be a user input, since it determines which boundary c
 
 **Recommendation:** Expose the domain geometry (half-line, full line, finite box) as a user input, since it determines which BCs are physical. For the initial implementation, Dirichlet walls at both ends are recommended for all domain types. For the radial (half-line) case, $l$ should be a user input since it enters the Hamiltonian. CAP support at the outer boundary is the recommended next addition for continuum and ionization calculations, since it does not require changes to the real-valued eigensolver. Outgoing-wave BCs and ECS are deferred to a later stage.
 
+#### Stakeholder feedback (2026-07-03)
+
+*Updated 2026-07-03 — stakeholder feedback incorporated.*
+
+#### Domain specification
+
+The user specifies which sides of the domain are bounded. Three configurations are supported:
+
+| Configuration | Left boundary | Right boundary | Example use case |
+|---|---|---|---|
+| Finite box $[a, b]$ | bounded (Dirichlet) | bounded (Dirichlet) | Particle in a box with non-uniform potential |
+| Half-line $[0, \infty)$ | bounded (Dirichlet at origin) | unbounded | Radial equation, scattering potential |
+| Full line $(-\infty, \infty)$ | unbounded | unbounded | Symmetric well, free-particle problems |
+
+At every **bounded** side, the program applies a Dirichlet condition ($\psi = 0$) at the wall. This is the only user-facing boundary condition choice for bounded sides.
+
+#### Handling unbounded sides: automatic asymptote analysis
+
+For any **unbounded** side, the program is responsible for determining the behavior of the potential at that boundary. The potential is specified as a sum of terms, each defined over a user-supplied support interval (allowing piecewise or compact-support potentials). The program evaluates the asymptote of the assembled potential at the unbounded edge and selects the appropriate treatment from three cases:
+
+**Case 1 — No finite asymptote** (potential diverges or grows without bound, e.g., $x^2$, $x$):
+
+The potential is not bounded at the edge, so no scattering states exist in that channel. The program places a hard wall (Dirichlet condition) at the quantization box boundary $R$. All states produced are discrete pseudostates confined to $[0, R]$.
+
+**Case 2 — Known asymptote with analytic solutions** (flat potential or Coulomb $\sim 1/r$):
+
+The program can treat bound and continuum states separately:
+- **Bound states**: diagonalize the Hamiltonian with Dirichlet BC at $R$ as usual.
+- **Continuum states**: normalize by matching the B-spline solution inside $[0, R]$ to the analytically known asymptotic solutions at the boundary (Coulomb functions for a $1/r$ tail; a shifted sine $\sin(kx + \delta)$ for a flat asymptote). This matching extracts the normalization constant $A_E$ and phase shift $\delta(E)$.
+
+**Case 3 — Unknown or irregular asymptote** (e.g., $1/r^{3/2}$, or any potential not covered by Case 2):
+
+The program approximates the potential as flat beyond $R$:
+
+$$V'(x) = \begin{cases} V(x) & x < R \\ V(\infty) & x \geq R \end{cases}$$
+
+and matches continuum solutions to a shifted sine, as in the flat-asymptote branch of Case 2. **The user is warned** that this introduces a discontinuity in the potential at $x = R$, and that continuum normalizations are approximate.
+
+#### Use cases
+
+- **Bounded domain** $[a, b]$: any particle-in-a-box problem with a non-uniform internal potential. All states are discrete; no asymptote analysis is needed.
+- **Unbounded right, potential grows** (e.g., harmonic oscillator $V \sim x^2$, linear $V \sim x$): Case 1 applies — Dirichlet at $R$, all states are box-confined pseudostates.
+- **Unbounded right, Coulomb tail** ($V \sim 1/x$): Case 2 applies — bound states from diagonalization, continuum states normalized against Coulomb functions.
+- **Unbounded right, fast decay** (e.g., $V \sim e^{-x^2}$): Case 3 applies — asymptote treated as flat, continuum matched to a shifted sine, user cautioned about the approximation.
+
 ---
 
 ### Continuum range
+
+#### Initial analysis
 
 This is a genuine physical input. The energy range of continuum pseudostates the solver produces is set by the box size $r_\text{max}$ and the B-spline grid density: a box of size $r_\text{max}$ produces pseudostates with density
 
@@ -273,9 +384,33 @@ where $I_p$ is the ionization potential. Including enough continuum states to co
 
 **Recommendation:** Expose $r_\text{max}$ and the desired maximum continuum energy $E_\text{max}$ as user inputs. The program can then compute the required pseudostate density and warn if the current grid is insufficient.
 
+#### Stakeholder feedback (2026-07-03)
+
+There are two distinct ranges to separate:
+
+**1. Range of the state functions** — determined when specifying the physical problem. This is $R$, the size of the quantization box. It controls the density of continuum pseudostates and is set as part of the problem's spatial domain, not as a spectral parameter.
+
+**2. Range of the computed spectrum** — how much of the continuum the user actually wants to compute scattering states for. This is a user-specified energy interval $[E_\text{threshold}, E_\text{max}]$, and is always a subset of what $R$ can support. The user may, for example, only need scattering states up to a few eV above threshold even if the basis can produce pseudostates at much higher energies.
+
+#### Basis accuracy limit
+
+The B-spline basis imposes a natural upper bound on accurately representable energies, independent of $R$. States whose half de Broglie wavelength is commensurate with or smaller than the separation between B-spline nodes cannot be accurately represented:
+
+$$\frac{\lambda}{2} = \frac{\pi}{k} \lesssim \Delta x_\text{node} \implies k \gtrsim \frac{\pi}{\Delta x_\text{node}} \implies E \gtrsim \frac{\pi^2}{2m\,\Delta x_\text{node}^2}$$
+
+This sets a hard accuracy ceiling $E_\text{acc}$ for the spectrum. If the user requests scattering states at energies above $E_\text{acc}$, the program should issue a warning that results are unreliable.
+
+#### Decision
+
+- $R$ (box size) is part of the spatial domain specification, determined when setting up the problem.
+- $[E_\text{threshold},\, E_\text{max}]$ is a separate user input for the continuum spectrum, allowing the user to compute only the scattering states they need.
+- The program computes $E_\text{acc}$ from the node spacing and warns if $E_\text{max} > E_\text{acc}$.
+
 ---
 
 ### Collocation scheme
+
+#### Initial analysis
 
 How to distribute B-spline knot points along the coordinate. Uniform spacing is the simplest choice but is rarely optimal: regions where the wavefunction oscillates rapidly or the potential varies strongly need denser knot placement, while smooth asymptotic regions need far fewer points. Four strategies are on the table:
 
@@ -293,9 +428,44 @@ How to distribute B-spline knot points along the coordinate. Uniform spacing is 
 
 **Recommendation:** The mixed exponential+linear scheme is the right default for hydrogenic (Coulomb-singular) systems, but it should not be the default for a general 1D solver. For the general case, WKB is the recommended default — it adapts to any potential and is the most principled choice without the chicken-and-egg problem of derivative-adaptive schemes. A user-facing interface should offer a named selection (e.g., `grid: uniform | wkb | exponential-linear`), with WKB as the general default and exponential-linear available explicitly for Coulomb-type systems. For WKB, the reference energy should also be user-configurable.
 
+#### Stakeholder feedback (2026-07-03)
+
+The program should select a node distribution heuristically based on the potential, but leave open the option for the user to supply an arbitrary sequence of points via a formula $x(n)$.
+
+Node placement breaks naturally into two independent concerns: **strategic placement** driven by potential structure, and **density distribution** driven by accuracy requirements.
+
+##### Strategic node placement
+
+The potential type dictates where knot degeneracy is required or where B-splines must be removed entirely:
+
+| Potential type | Required treatment |
+|---|---|
+| **Delta potential** $\delta(x - x_0)$ | Pile up degenerate knots at $x_0$ to capture the discontinuity in the first derivative of $\psi$ |
+| **Potential step** | Pile up degenerate knots at the step location to capture the discontinuity in $\psi''$ |
+| **Stitched potentials with continuous derivative** | Include knot degeneracy at the join point to guarantee the discontinuity in $\psi'''$ is represented |
+| **Singular potentials** (e.g., $1/r$) | Remove B-splines at the singular point to enforce regularity of $\psi$ at the divergence |
+
+These strategic knots are determined automatically by the program from the user's potential specification; they are not something the user needs to set manually.
+
+##### Node density distribution
+
+On top of strategic placement, the overall density of nodes across the domain can follow different schemes. Two natural options:
+
+- **Uniform**: equal spacing everywhere. Simplest to implement; a reasonable default for smooth potentials.
+
+- **WKB-proportional**: node density proportional to the local classical momentum at a reference energy $E$,
+
+$$n(x) = \alpha\,\sqrt{2m\bigl(E - V(x)\bigr)}, \qquad N(x) = \alpha\int_a^x \sqrt{2m\bigl(E - V(x')\bigr)}\,dx'$$
+
+  Nodes $x_i$ are then placed so that $N(x_i)$ is an integer, concentrating resolution where the wavefunction oscillates fastest. This is the most principled general scheme but requires choosing a reference energy.
+
+**Decision for initial implementation:** Use a uniform B-spline basis as the default, augmented only by the strategic nodes dictated by the potential structure (degeneracies and removals listed above). WKB-proportional spacing is noted as a natural upgrade path but is considered overkill for the initial version.
+
 ---
 
 ### Analysis: what to compute
+
+#### Initial analysis
 
 The "Analysis" block in the diagram is the most open-ended input. Its role is to specify which post-processing quantities to extract from the TISE and TDSE outputs without rerunning the solvers. Organizing by source:
 
@@ -318,3 +488,19 @@ The "Analysis" block in the diagram is the most open-ended input. Its role is to
 - Heatmaps of $|\psi(r,t)|^2$ over the full space-time grid
 
 **Recommendation:** Define the Analysis input as a configuration block (e.g., a section of a YAML, TOML or JSON input file) that lists which quantities to compute, with parameters for each. All Python post-processing scripts read the same output file format regardless of which quantities were requested; uncomputed quantities simply have no entry. This keeps the C++ solvers agnostic about plotting and lets the Python layer evolve independently.
+
+#### Stakeholder feedback (2026-07-03)
+
+The following is the agreed set of computable quantities, ordered from core to optional:
+
+1. **Bound-state populations as a function of time** — $|\langle \psi_n | \psi(t) \rangle|^2$ for each bound eigenstate $n$, tracking how population flows between bound levels during the simulation.
+
+2. **Spectral distribution across available channels at end of simulation** — projection of the final state $\psi(t_f)$ onto all available scattering channels (bound and continuum), giving the energy-resolved probability distribution at the conclusion of the run.
+
+3. **Expectation values of key observables as a function of time** — $\langle \hat{x} \rangle(t)$, $\langle \hat{p} \rangle(t)$, $\langle \hat{T} \rangle(t)$ (kinetic energy), $\langle \hat{V} \rangle(t)$ (potential energy), and $\langle \hat{H} \rangle(t)$ (total energy).
+
+4. **Interval probability as a function of time** *(optional)* — probability of finding the particle within a user-specified spatial interval $[x_a, x_b]$:
+
+$$P_{[x_a,\,x_b]}(t) = \int_{x_a}^{x_b} |\psi(x,t)|^2\, dx$$
+
+computable via B-spline integrals between arbitrary boundaries.
