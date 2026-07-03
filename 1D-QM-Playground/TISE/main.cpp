@@ -16,7 +16,7 @@
 #endif
 
 // Angular momentum quantum number (change to 0, 1, 2, ...)
-constexpr int L = 1;
+constexpr int L = 0;
 
 // Physical parameters for the Gaussian wavepacket (atomic units)
 constexpr double HBAR             = 1.0;
