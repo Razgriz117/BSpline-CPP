@@ -133,7 +133,7 @@ Settings for the TISE solver.
 
 ### `tdse`
 
-Settings for the TDSE solver (van Dijk / Chebyshev propagation).
+Settings for the TDSE solver (eigenstate expansion).
 
 #### `tdse.initial_state`
 
@@ -149,10 +149,9 @@ Settings for the TDSE solver (van Dijk / Chebyshev propagation).
 
 | Field | Type | Description |
 |---|---|---|
-| `dt` | float | Time step Δt |
+| `dt` | float | Time step Δt (used as the output sampling interval when reconstructing ψ(x,t) from the expansion) |
 | `t_final` | float | Total propagation time |
 | `snapshot_interval` | int | Number of steps between wavefunction snapshot writes |
-| `chebyshev_order` | int | M in the van Dijk Chebyshev expansion of sin(HΔt/ℏ) to order 2M |
 
 ---
 
