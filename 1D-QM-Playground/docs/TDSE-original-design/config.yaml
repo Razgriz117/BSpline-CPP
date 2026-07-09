@@ -58,18 +58,9 @@ tdse:
     # position: 10.0   # (gaussian only) wavepacket center
     # momentum:  0.0   # (gaussian only) mean momentum
     # width:     1.0   # (gaussian only) Gaussian width
-
-  operator:
-    gauge: length        # length (x_hat coupling) | velocity (p_hat coupling)
-
-  field:                 # time-dependent driving field E(t); optional
-    enabled: false
-    # literal-constant math expression in t, same rule as `potential.function`
-    expression: "0.05 * exp(-((t-50)^2)/(2*10^2)) * cos(0.2*t)"
-
-  dt:                0.3     # integration time step (numerical propagation, not just output cadence)
+  dt:                0.3     # output time resolution (snapshot written every dt)
   t_final:         300.0
-  snapshot_interval: 10      # steps of dt between wavefunction snapshot writes
+  snapshot_interval: 10     # steps of dt between wavefunction snapshot writes
 
 # ─── Analysis (computed from TISE + TDSE output) ──────────────────────────────
 # Requires run_tdse: true — all quantities are functions of |Psi(t)>.

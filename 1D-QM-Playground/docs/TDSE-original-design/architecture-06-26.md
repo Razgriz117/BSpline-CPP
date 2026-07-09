@@ -69,22 +69,14 @@ Solves the Time-Independent Schrödinger Equation on a finite interval $[0, R]$ 
 
 ### 2.3 TDSE Solver (`tdse_solver` binary, C++)
 
-Propagates a wavefunction forward in time under the driven Hamiltonian
-
-$$\hat{H}(t) = \hat{H}_0 + \hat{H}_\text{int}(t), \qquad \hat{H}_\text{int}(t) = -\hat{O}\,\mathcal{E}(t)$$
-
-where $\hat{H}_0$ is the field-free Hamiltonian diagonalized by the TISE solver, $\mathcal{E}(t)$ is the user-supplied time-dependent field, and $\hat{O}$ is the coupling operator selected by gauge ($\hat{x}$ in length gauge, $\hat{p}_x$ in velocity gauge). The initial state is expanded in the $\hat{H}_0$ eigenbasis and numerically integrated forward in time — the specific propagation scheme (Magnus, Crank-Nicolson, RK4, etc.) is an implementation detail, not user-configurable.
-
-When no field is supplied ($\mathcal{E}(t) \equiv 0$), propagation reduces to the field-free special case, which the solver supports directly: it propagates a wavefunction forward in time using **eigenstate expansion** in the B-spline basis. The initial state is expanded in the eigenstates computed by the TISE solver; each component acquires a time-dependent phase:
+Propagates a wavefunction forward in time using **eigenstate expansion** in the B-spline basis. The initial state is expanded in the eigenstates computed by the TISE solver; each component acquires a time-dependent phase:
 
 $$\psi(x, t) = \sum_n \alpha_n(0)\, e^{-i E_n t / \hbar}\, \phi_n(x), \qquad \alpha_n(0) = \langle \phi_n \mid \psi(0) \rangle$$
 
-and populations $|\alpha_n(t)|^2$ are conserved — no population transfer occurs between $\hat{H}_0$ eigenstates. This is the mode relevant to, e.g., observing Rydberg wave-packet dephasing and revivals. The general driven case, by contrast, produces genuine population transfer between bound levels and into the continuum, which is what makes bound-state population vs. time a meaningful (non-constant) analysis output.
+The inner products are evaluated in B-spline coefficient space using the overlap matrix $\mathbf{S}$ from the TISE. This approach is exact within the basis and requires neither finite-difference spatial discretization nor iterative time-stepping.
 
 **Inputs**:
 - `data/tise/` output (eigenvalues $E_n$, eigenvectors $\mathbf{c}_n$, overlap matrix $\mathbf{S}$)
-- Coupling operator / gauge selection (`tdse.operator.gauge`) from `config.yaml`
-- Time-dependent field $\mathcal{E}(t)$ (`tdse.field`) from `config.yaml` — optional
 - Time evolution parameters ($\Delta t$, $t_\text{final}$, `snapshot_interval`) from `config.yaml`
 - Initial state specification (e.g., a bound eigenstate index, or a Gaussian wave packet)
 
@@ -165,15 +157,7 @@ tdse:
     # position: 10.0   # (gaussian only)
     # momentum:  0.0   # (gaussian only)
     # width:     1.0   # (gaussian only)
-
-  operator:
-    gauge: length        # length (x_hat coupling) | velocity (p_hat coupling)
-
-  field:                 # time-dependent driving field E(t); optional
-    enabled: false
-    expression: "0.05 * exp(-((t-50)^2)/(2*10^2)) * cos(0.2*t)"
-
-  dt:                0.3     # integration time step
+  dt:                0.3
   t_final:         300.0
   snapshot_interval: 10
 
