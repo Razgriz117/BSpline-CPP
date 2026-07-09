@@ -134,7 +134,7 @@ Settings for the TISE solver. The solver always computes all bound states below 
 
 ### `tdse`
 
-Settings for the TDSE solver. Propagates under the driven Hamiltonian $H(t) = H_0 + H_\text{int}(t)$, where $H_0$ is the TISE-diagonalized Hamiltonian and $H_\text{int}(t) = -\hat{O}\,\mathcal{E}(t)$, with $\hat{O}$ selected by `tdse.operator.gauge` and $\mathcal{E}(t)$ given by `tdse.field`. Numerical propagation method (Magnus, Crank-Nicolson, RK4, etc.) is left to the implementation — not exposed in the schema, consistent with `tdse.chebyshev_order` having been removed earlier. When `field.enabled: false`, propagation reduces to field-free eigenstate expansion (static phases, no population transfer between $H_0$ eigenstates).
+Settings for the TDSE solver (eigenstate expansion).
 
 #### `tdse.initial_state`
 
@@ -146,28 +146,13 @@ Settings for the TDSE solver. Propagates under the driven Hamiltonian $H(t) = H_
 | `momentum` | float | *(gaussian only)* Mean momentum k₀ |
 | `width` | float | *(gaussian only)* Gaussian width σ |
 
-#### `tdse.operator`
-
-| Field | Type | Description |
-|---|---|---|
-| `gauge` | string | `length` (coupling via $\hat{x}$) or `velocity` (coupling via $\hat{p}_x$). Default `length`. |
-
-#### `tdse.field`
-
-The time-dependent driving field $\mathcal{E}(t)$. Optional — a field-free run is a fully valid TDSE run (e.g., Rydberg wave-packet dephasing/revivals from a superposition `initial_state`).
-
-| Field | Type | Description |
-|---|---|---|
-| `enabled` | bool | Whether a driving field is applied. Default `false`. |
-| `expression` | string | A mathematical expression in `t` with literal numeric constants only — same rule as `potential`'s `function` field. No references to other config fields. |
-
 #### Other `tdse` fields
 
 | Field | Type | Description |
 |---|---|---|
-| `dt` | float | Numerical integration time step — a real propagation step, not just an output sampling interval, since $H(t)$ is time-dependent when a field is active |
+| `dt` | float | Output time resolution — a snapshot is written at t = 0, dt, 2dt, … |
 | `t_final` | float | Total propagation time |
-| `snapshot_interval` | int | Number of `dt` steps between wavefunction snapshot writes |
+| `snapshot_interval` | int | Number of dt steps between wavefunction snapshot writes |
 
 ---
 
@@ -217,10 +202,7 @@ What to plot. Spans raw solver output (TISE, TDSE) and `analysis`-computed quant
 | `bspline` placement | Top-level | Shared infrastructure used by both TISE and TDSE; not solver-specific |
 | `continuum` placement | Nested under `tise` | Continuum states are computed by the TISE solver; nesting expresses that dependency |
 | `tise.n_states` | Removed | Bound state count is output, not input; solver always computes all sub-threshold states |
-| `tdse.chebyshev_order` | Removed | Propagator method (Magnus, Crank-Nicolson, RK4, etc.) is an implementation detail, not a user-facing config field |
+| `tdse.chebyshev_order` | Removed | TDSE uses eigenstate expansion (exact), not Chebyshev propagation |
 | Split `analysis` → `analysis` + `visualization` | Two top-level blocks | `analysis` = quantities Analysis computes from TISE+TDSE output; `visualization` = what to plot (raw solver output or analysis output). Conflating them mislabeled TISE/TDSE raw outputs as "analysis". |
-| `tdse.field` format | Literal math expression in `t` | Mirrors `potential`'s convention; reuses the same expression-parsing mechanism instead of a named-envelope enum |
-| `tdse.operator.gauge` | Two-value enum (`length` \| `velocity`) | Matches the two dipole-coupling operators in the "relevant operator set" ($\hat{H}, \hat{x}, \hat{p}_x$); default `length` |
-| `tdse.field.enabled` default | `false` | Field-free dynamics (e.g. Rydberg wave-packet revivals) is a fully valid run; consistent with other optional gates (`tise.continuum.enabled`, `analysis.interval_probability.enabled`) |
 | `expectation_values` format | Per-operator boolean flags | Consistent with existing flag style (`run`, `tise.continuum`); explicit and self-documenting |
 | `visualization` scope | Boolean toggles only | Plot parameters (ranges, subsets) deferred to analysis.py / later schema iteration |
