@@ -1,0 +1,16 @@
+# Architecture Decision Records
+
+This directory records decisions to **defer** a design alternative rather than adopt it now. Each ADR captures the context that was considered, the decision, and — critically — the condition under which the decision should be revisited. Decisions that were **adopted** live as numbered requirements (REQ-F-/REQ-NF-) in the [SDD](../SDD.md) [§3](../SDD.md#3-requirements), not here.
+
+| ID | Title | Status | Summary |
+|---|---|---|---|
+| [0001](0001-defer-fedvr-basis.md) | Defer FEDVR as an Alternative Basis | Accepted (deferred) | Finish and validate the B-spline solvers before adding FEDVR as a configurable basis option. |
+| [0002](0002-defer-wkb-collocation.md) | Defer WKB/Phase-Angle-Proportional Collocation | Accepted (deferred) | Use uniform + strategic-node knot placement by default; WKB-proportional spacing is a future upgrade. |
+| [0003](0003-defer-multiparticle-3d-extension.md) | Defer Multi-Particle / 3D Extension | Accepted (deferred) | Stay strictly 1D, single-particle for this project; multi-particle/3D is future pedagogical work. |
+| [0004](0004-defer-visualization-plot-parameters.md) | Defer Visualization Plot-Parameter Schema | Accepted (deferred) | Keep `visualization` boolean-only until the Analysis module's detailed design (SDD [§5.4](../SDD.md#54-analysis-module)) is complete. |
+
+See also [SDD Appendix B](../SDD.md#b-open-design-questions) for design questions that are still genuinely unresolved (no decision, not even a decision to defer).
+
+## Format
+
+Each ADR uses the same five fields: **Status**, **Date**, **Context**, **Decision**, **Consequences** (including an explicit revisit trigger), and **Source**.

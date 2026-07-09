@@ -289,7 +289,7 @@ All constants, "including centrifugal terms, must be baked in" — there is no c
 
 ## 6. TISE Solver Internal Flow (`flowchart`)
 
-*Source: `docs/planning/architecture-06-26.md` §2.2, and Layer 2 + the bound-state stakeholder decision in `docs/planning/architecture-06-20.md`.*
+*Source: `docs/planning/architecture-06-26.md` §2.2, and Layer 2 + the bound-state stakeholder decision in `docs/planning/architecture-06-20.md`; continuum-construction mechanism (closed-form expansion in the confined eigenbasis) per `PHY5606_F25_ContinuumEigenstates.pdf`.*
 
 ```mermaid
 flowchart TD
@@ -300,18 +300,20 @@ flowchart TD
     CLASSIFY{"E_n below\nionization threshold?"}
     BOUND["Bound state\nreport E_n, phi_n(x)\ncheck psi'(x_max): if != 0,\nflag as not well-contained"]
     CONTEN{"tise.continuum.enabled?"}
+    PRECOMP["Precompute boundary-coupling elements\n(phi_n | H | B_N), (phi_n | B_N)\n(once, reusing the confined eigenbasis)"]
     LOOP["Loop energy grid\neps_i = E_max / N_E * i"]
-    MATCH["Compute psi_bar_E,\nextract A_E, delta(E), d(delta)/dE"]
+    BUILDPSI["Build psi_bar_E = sum_n(phi_n * c_n) + B_N\nc_n = [(phi_n|H|B_N) - E(phi_n|B_N)] / (E - E_n)"]
+    MATCH["Match psi_bar_E(R), psi_bar_E'(R) to sin(kx+delta)\nextract A_E, delta(E), stable d(delta)/dE"]
     WRITE["Write to data/tise/:\neigenvalues, eigenvectors, H, S,\ncontinuum states, phase_shifts"]
 
     START --> BUILD --> ASSEMBLE --> SOLVE --> CLASSIFY
     CLASSIFY -->|yes| BOUND --> WRITE
     CLASSIFY -->|no, above threshold| CONTEN
-    CONTEN -->|yes| LOOP --> MATCH --> WRITE
+    CONTEN -->|yes| PRECOMP --> LOOP --> BUILDPSI --> MATCH --> WRITE
     CONTEN -->|no| WRITE
 ```
 
-Bound-state count is an **output**, not an input: "the solver always computes all sub-threshold states." The well-containment check (`psi'(x_max) != 0`) is the documented diagnostic for flagging states whose energy/wavefunction may be inaccurate.
+Bound-state count is an **output**, not an input: "the solver always computes all sub-threshold states." The well-containment check (`psi'(x_max) != 0`) is the documented diagnostic for flagging states whose energy/wavefunction may be inaccurate. The continuum branch (Precompute → Loop → Build → Match) reuses the confined eigenbasis in closed form, without a second diagonalization per energy; see `PHY5606_F25_ContinuumEigenstates.pdf` and SDD §5.2.3 for the full derivation.
 
 ---
 
@@ -376,16 +378,16 @@ This is the mode that makes bound-state population vs. time a *meaningful, non-c
 
 ```mermaid
 flowchart LR
-    d0["Initial state\nin B-spline coords\n$$\mathbf{d}_0$$"]
-    a0["Eigenstate\ncoefficients\n$$\boldsymbol{\alpha}(0)$$"]
-    at["Time-evolved\neigenstate coeffs\n$$\boldsymbol{\alpha}(t)$$"]
-    dt["B-spline coeffs\nat time t\n$$\mathbf{d}(t)$$"]
-    psi["Real-space\nwavefunction\n$$\Psi(r,t)$$"]
+    d0["Initial state<br/>in B-spline coords<br/>$$\mathbf{d}_0$$"]
+    a0["Eigenstate<br/>coefficients<br/>$$\boldsymbol{\alpha}(0)$$"]
+    at["Time-evolved<br/>eigenstate coeffs<br/>$$\boldsymbol{\alpha}(t)$$"]
+    dt["B-spline coeffs<br/>at time t<br/>$$\mathbf{d}(t)$$"]
+    psi["Real-space<br/>wavefunction<br/>$$\Psi(r,t)$$"]
 
     d0 -->|"$$C^{-1}$$"| a0
-    a0 -->|"$$e^{-iE_n t}$$\ncomponent-wise"| at
+    a0 -->|"$$e^{-iE_n t}$$<br/>component-wise"| at
     at -->|"$$C$$"| dt
-    dt -->|"evaluate\nB-splines"| psi
+    dt -->|"evaluate<br/>B-splines"| psi
 ```
 
 This is the concrete algorithm behind Diagram 8's field-free special case, as implemented (prototype) in `TISE/main.cpp`: `Phi_G = C_dagger * B_G` → `V_t = evolution.cwiseProduct(Phi_G)` → `CV_t = C * V_t` → `bspline.eval`. It closes only because the eigenstates live in the B-spline subspace by construction, making `C` a well-defined, invertible change-of-basis matrix.
