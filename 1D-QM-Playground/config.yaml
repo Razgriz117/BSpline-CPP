@@ -62,17 +62,31 @@ tdse:
   t_final:         300.0
   snapshot_interval: 10     # steps of dt between wavefunction snapshot writes
 
-# ─── Analysis ─────────────────────────────────────────────────────────────────
-# TODO: Concretize this section's config format once decided. The set of
-# computable quantities is resolved (see architecture-06-20.md — "Analysis:
-# what to compute", stakeholder feedback 2026-07-03):
-#   1. Bound-state populations as a function of time |<ψ_n|ψ(t)>|²
-#   2. Spectral distribution across channels at end of simulation
-#   3. Expectation values <x̂>(t), <p̂>(t), <T̂>(t), <V̂>(t), <Ĥ>(t)
-#   4. Interval probability P_[xa,xb](t) (optional)
-# The YAML schema for selecting and parameterizing these quantities is TBD.
+# ─── Analysis (computed from TISE + TDSE output) ──────────────────────────────
+# Requires run_tdse: true — all quantities are functions of |Psi(t)>.
+# See docs/planning/architecture-07-02.md for the underlying math.
 analysis:
-  plots:
-    eigenstates:    true
-    phase_shifts:   true
-    time_evolution: true
+  bound_state_populations: true   # p_n(t)      = |<phi_n|Psi(t)>|^2
+  asymptotic_populations:  true   # p_n(inf)    = |<phi_n|Psi(t_final)>|^2
+  asymptotic_distribution: true   # dP_a/dE     = |<psi^-_{a,E}|Psi(t_final)>|^2
+                                   #   (requires tise.continuum.enabled: true)
+  expectation_values:
+    x: true    # <x_hat>(t)
+    p: true    # <p_hat>(t)
+    T: true    # <T_hat>(t)  kinetic energy
+    V: true    # <V_hat>(t)  potential energy
+    H: true    # <H_hat>(t)  total energy
+  interval_probability:           # optional: P_[xa,xb](t) = integral_xa^xb |psi(x,t)|^2 dx
+    enabled: false
+    intervals:
+      - [0.0, 5.0]
+
+# ─── Visualization (what to plot; boolean toggles only) ───────────────────────
+visualization:
+  eigenstates:               true   # TISE:     |phi_n(x)|^2 for bound states
+  phase_shifts:              true   # TISE:     delta(E), d(delta)/dE (requires tise.continuum.enabled)
+  time_evolution:            true   # TDSE:     |Psi(x,t)|^2 heatmap/animation (requires run_tdse)
+  bound_state_populations:   true   # Analysis: p_n(t)
+  asymptotic_populations:    true   # Analysis: p_n(inf) bar chart
+  asymptotic_distribution:   true   # Analysis: dP_a/dE (requires tise.continuum.enabled)
+  expectation_values:        true   # Analysis: <O>(t) for each enabled operator

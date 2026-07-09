@@ -12,13 +12,14 @@ The canonical example file lives at `BSpline-CPP/1D-QM-Playground/config.yaml`.
 ## Top-Level Structure
 
 ```
-run       — orchestration flags and output directory
-physics   — physical constants (mass, hbar)
-bspline   — B-spline basis parameters (shared by all solvers)
-potential — piecewise potential definition
-tise      — TISE solver settings (includes continuum sub-block)
-tdse      — TDSE solver settings
-analysis  — post-processing and plot selection (see TODO below)
+run           — orchestration flags and output directory
+physics       — physical constants (mass, hbar)
+bspline       — B-spline basis parameters (shared by all solvers)
+potential     — piecewise potential definition
+tise          — TISE solver settings (includes continuum sub-block)
+tdse          — TDSE solver settings
+analysis      — quantities computed from TISE + TDSE output
+visualization — what to plot (raw solver output and analysis output)
 ```
 
 ---
@@ -157,22 +158,36 @@ Settings for the TDSE solver (eigenstate expansion).
 
 ### `analysis`
 
-> **TODO:** Concretize this section's config format once decided. The set of computable quantities is now resolved (see `docs/planning/architecture-06-20.md` — "Analysis: what to compute", stakeholder feedback 2026-07-03):
->
-> 1. **Bound-state populations as a function of time** — |⟨ψₙ|ψ(t)⟩|² for each bound eigenstate n
-> 2. **Spectral distribution across channels at end of simulation** — energy-resolved probability distribution at t = t_final
-> 3. **Expectation values of key observables** — ⟨x̂⟩(t), ⟨p̂⟩(t), ⟨T̂⟩(t), ⟨V̂⟩(t), ⟨Ĥ⟩(t)
-> 4. **Interval probability** (optional) — P_{[xa,xb]}(t) = ∫_{xa}^{xb} |ψ(x,t)|² dx for user-specified [xa, xb]
->
-> The YAML schema for selecting and parameterizing these quantities is TBD.
-
-Current stub:
+Quantities computed from TISE + TDSE output, per `docs/planning/architecture-07-02.md`. All fields require `run_tdse: true` — every quantity is a function of the propagated state $|\Psi(t)\rangle$.
 
 | Field | Type | Description |
 |---|---|---|
-| `plots.eigenstates` | bool | Plot bound-state probability densities |
-| `plots.phase_shifts` | bool | Plot δ(E) and dδ/dE (requires `tise.continuum.enabled: true`) |
-| `plots.time_evolution` | bool | Plot or animate |ψ(x,t)|² (requires `run_tdse: true`) |
+| `bound_state_populations` | bool | $p_n(t) = |\langle\phi_n|\Psi(t)\rangle|^2$ — population of each bound eigenstate over time |
+| `asymptotic_populations` | bool | $p_n(\infty) = |\langle\phi_n|\Psi(t_\text{final})\rangle|^2$ — final-time population of each bound eigenstate |
+| `asymptotic_distribution` | bool | $dP_\alpha/dE = |\langle\psi^-_{\alpha E}|\Psi(t_\text{final})\rangle|^2$ — energy-resolved population density in the continuum. Requires `tise.continuum.enabled: true`. |
+| `expectation_values.x` | bool | $\langle\hat{x}\rangle(t)$ |
+| `expectation_values.p` | bool | $\langle\hat{p}\rangle(t)$ |
+| `expectation_values.T` | bool | $\langle\hat{T}\rangle(t)$ — kinetic energy |
+| `expectation_values.V` | bool | $\langle\hat{V}\rangle(t)$ — potential energy |
+| `expectation_values.H` | bool | $\langle\hat{H}\rangle(t)$ — total energy |
+| `interval_probability.enabled` | bool | Whether to compute interval probability (optional quantity) |
+| `interval_probability.intervals` | list of [float, float] | $P_{[x_a,x_b]}(t) = \int_{x_a}^{x_b} |\psi(x,t)|^2\, dx$ for each `[x_a, x_b]` pair listed |
+
+---
+
+### `visualization`
+
+What to plot. Spans raw solver output (TISE, TDSE) and `analysis`-computed quantities alike — this is deliberately a separate block from `analysis` because `eigenstates`, `phase_shifts`, and `time_evolution` are not computed by Analysis; they are raw TISE/TDSE output being displayed. Boolean toggles only; plot parameters (ranges, state subsets) are not yet part of the schema.
+
+| Field | Type | Description |
+|---|---|---|
+| `eigenstates` | bool | TISE: plot $|\phi_n(x)|^2$ for bound states |
+| `phase_shifts` | bool | TISE: plot $\delta(E)$ and $d\delta/dE$. Requires `tise.continuum.enabled: true`. |
+| `time_evolution` | bool | TDSE: plot/animate $|\Psi(x,t)|^2$. Requires `run_tdse: true`. |
+| `bound_state_populations` | bool | Analysis: plot $p_n(t)$ |
+| `asymptotic_populations` | bool | Analysis: plot $p_n(\infty)$ |
+| `asymptotic_distribution` | bool | Analysis: plot $dP_\alpha/dE$. Requires `tise.continuum.enabled: true`. |
+| `expectation_values` | bool | Analysis: plot $\langle\hat{O}\rangle(t)$ for each operator enabled under `analysis.expectation_values` |
 
 ---
 
@@ -188,4 +203,6 @@ Current stub:
 | `continuum` placement | Nested under `tise` | Continuum states are computed by the TISE solver; nesting expresses that dependency |
 | `tise.n_states` | Removed | Bound state count is output, not input; solver always computes all sub-threshold states |
 | `tdse.chebyshev_order` | Removed | TDSE uses eigenstate expansion (exact), not Chebyshev propagation |
-| Analysis section | Stub + TODO | Quantities resolved (2026-07-03); config format TBD |
+| Split `analysis` → `analysis` + `visualization` | Two top-level blocks | `analysis` = quantities Analysis computes from TISE+TDSE output; `visualization` = what to plot (raw solver output or analysis output). Conflating them mislabeled TISE/TDSE raw outputs as "analysis". |
+| `expectation_values` format | Per-operator boolean flags | Consistent with existing flag style (`run`, `tise.continuum`); explicit and self-documenting |
+| `visualization` scope | Boolean toggles only | Plot parameters (ranges, subsets) deferred to analysis.py / later schema iteration |

@@ -161,14 +161,32 @@ tdse:
   t_final:         300.0
   snapshot_interval: 10
 
-# ─── Analysis ─────────────────────────────────────────────────────────────────
-# TODO: Concretize once the open question on Analysis inputs is resolved
-# (see architecture-06-20.md — "Analysis: what to compute").
+# ─── Analysis (computed from TISE + TDSE output) ──────────────────────────────
+# Requires run_tdse: true. See architecture-07-02.md for the underlying math.
 analysis:
-  plots:
-    eigenstates:    true
-    phase_shifts:   true
-    time_evolution: true
+  bound_state_populations: true   # p_n(t)   = |<phi_n|Psi(t)>|^2
+  asymptotic_populations:  true   # p_n(inf) = |<phi_n|Psi(t_final)>|^2
+  asymptotic_distribution: true   # dP_a/dE  (requires tise.continuum.enabled)
+  expectation_values:
+    x: true
+    p: true
+    T: true
+    V: true
+    H: true
+  interval_probability:
+    enabled: false
+    intervals:
+      - [0.0, 5.0]
+
+# ─── Visualization (what to plot; boolean toggles only) ───────────────────────
+visualization:
+  eigenstates:              true   # TISE
+  phase_shifts:              true   # TISE (requires tise.continuum.enabled)
+  time_evolution:            true   # TDSE (requires run_tdse)
+  bound_state_populations:   true   # Analysis
+  asymptotic_populations:    true   # Analysis
+  asymptotic_distribution:   true   # Analysis (requires tise.continuum.enabled)
+  expectation_values:        true   # Analysis
 ```
 
 For full field descriptions, types, constraints, and potential parsing rules see
