@@ -919,6 +919,7 @@ Continuum-state construction ([§5.2.3](#523-internal-design)) additionally requ
 | `data/tise/overlap.dat` | Plain text or binary | $\mathbf{S}$ matrix (banded) |
 | `data/tise/phase_shifts.dat` | Plain text (3-col) | $\varepsilon_i$, $\delta(\varepsilon_i)$, $d\delta/dE$ |
 | `data/tise/continuum_state_NNN.dat` | Plain text (2-col) | $x$, $\psi_{\varepsilon_i}(x)$ per energy |
+| `data/tise/warnings.json` | JSON array | Array of `{"category": "physics"\|"operational", "message": "..."}` objects; always present after successful run |
 | `data/tdse/snapshot_NNNNN.dat` | Plain text (3-col) | $x$, $\text{Re}(\psi)$, $\text{Im}(\psi)$ per time step |
 | `data/tdse/observables.dat` | Plain text (4-col) | $t$, norm, $\langle E\rangle$, $P(t)$ |
 
@@ -1024,7 +1025,7 @@ This policy is synthesized from responsibilities stated across the source planni
 - *Physics warnings* — the computation completed but a result may be approximate or should be scrutinized: the Case-3 boundary-discontinuity warning (REQ-F-030), the `E_max > E_acc` continuum-accuracy warning (REQ-F-040), and the per-state well-containment flag ($\psi'(x_\text{max}) \neq 0$, [§5.2.3](#523-internal-design)).
 - *Operational warnings* — e.g., an optional upstream artifact was absent and Analysis skipped a quantity that depends on it ([§5.4.4](#544-error-handling), [§7.2.2](#722-tise-solver-to-analysis)/[§7.2.5](#725-tdse-solver-to-analysis)).
 
-**Destination.** Warnings and errors go to `stderr`, consistently across the C++ binaries and Python scripts, keeping `stdout` free for any data a tool might pipe. Whether physics/operational warnings should *also* be written to a machine-readable sidecar file (so Analysis or the Controller can programmatically surface them, rather than requiring a human to read solver `stderr`) is not yet decided — this should be settled as part of defining the Controller↔TISE contract in [§10](#10-implementation-roadmap-and-phasing) Phase 1, since it changes what "output" means for that interface.
+**Destination.** Warnings and errors go to `stderr`, consistently across the C++ binaries and Python scripts, keeping `stdout` free for any data a tool might pipe. Physics and operational warnings are also written to a machine-readable sidecar file, `data/tise/warnings.json`, as a JSON array of objects shaped `{"category": "physics"|"operational", "message": "..."}` ([§6.3](#63-persistent-storage-format)). This allows downstream stages (Analysis or the Controller) to programmatically surface warnings rather than requiring a human to parse solver `stderr`. The Controller must read `data/tise/warnings.json` after a successful TISE run and report its contents, degrading gracefully (treating it as zero warnings) if the file is missing or malformed. This sidecar-file convention was established as part of the Phase 1 Controller↔TISE contract ([§7.2.1](#721-controller-to-tise-solver)); the TDSE solver is expected to follow the same pattern (`data/tdse/warnings.json`) once implemented in Phase 5 ([§7.2.4](#724-controller-to-tdse-solver)).
 
 ---
 
