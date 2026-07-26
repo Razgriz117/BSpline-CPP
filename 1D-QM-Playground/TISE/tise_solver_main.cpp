@@ -114,9 +114,13 @@ void writeCoreOutputs(const std::filesystem::path &outputDir)
     warnings << "[]\n";
 }
 
-// Write phase_shifts.dat plus one continuum_state_NNN.dat per energy point.
-// Only called when config["tise"]["continuum"]["enabled"] is true.
-void writeContinuumOutputs(const std::filesystem::path &outputDir, const YAML::Node &continuumNode)
+// Validate and extract config["tise"]["continuum"]["n_energies"]. Deliberately
+// separated from writeContinuumOutputs() and called BEFORE writeCoreOutputs()
+// in main(): the Controller<->TISE contract (docs/SDD.md §7.2.1) treats any
+// non-zero exit as a "hard failure" that must leave no partial output behind,
+// so everything that could invalidate this run has to be validated before the
+// first byte of any output file is written.
+int validateNEnergies(const YAML::Node &continuumNode)
 {
     // Missing or wrong-typed n_energies throws YAML::TypedBadConversion<int>
     // (or YAML::InvalidNode if the key is absent entirely) -- both derive
@@ -124,7 +128,14 @@ void writeContinuumOutputs(const std::filesystem::path &outputDir, const YAML::N
     const int nEnergies = continuumNode["n_energies"].as<int>();
     if (nEnergies <= 0)
         throw std::runtime_error("tise.continuum.n_energies must be a positive integer");
+    return nEnergies;
+}
 
+// Write phase_shifts.dat plus one continuum_state_NNN.dat per energy point.
+// Only called when config["tise"]["continuum"]["enabled"] is true, with an
+// nEnergies already validated by validateNEnergies().
+void writeContinuumOutputs(const std::filesystem::path &outputDir, int nEnergies)
+{
     writeStubDataFile(outputDir / "phase_shifts.dat", "phase_shifts.dat: eps_i, delta(eps_i), d(delta)/dE");
 
     for (int i = 1; i <= nEnergies; ++i)
@@ -150,8 +161,6 @@ int main(int argc, char *argv[])
         std::filesystem::create_directories(args.outputDir);
         const std::filesystem::path outputDir(args.outputDir);
 
-        writeCoreOutputs(outputDir);
-
         // yaml-cpp idiom: an undefined/missing Node converts to false
         // without throwing, so configs that omit tise.continuum entirely,
         // or set enabled: false, correctly skip this branch.
@@ -159,8 +168,19 @@ int main(int argc, char *argv[])
                                        config["tise"]["continuum"]["enabled"] &&
                                        config["tise"]["continuum"]["enabled"].as<bool>();
 
+        // Validate everything this run will need BEFORE writing anything:
+        // if continuum is enabled but n_energies is missing/invalid, fail
+        // here, before writeCoreOutputs() has written a single file (see
+        // docs/SDD.md §7.2.1: a non-zero exit is a "hard failure" and must
+        // not leave partial output on disk).
+        int nEnergies = 0;
         if (continuumEnabled)
-            writeContinuumOutputs(outputDir, config["tise"]["continuum"]);
+            nEnergies = validateNEnergies(config["tise"]["continuum"]);
+
+        writeCoreOutputs(outputDir);
+
+        if (continuumEnabled)
+            writeContinuumOutputs(outputDir, nEnergies);
     }
     catch (const std::exception &e)
     {
