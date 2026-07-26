@@ -191,6 +191,8 @@ protected:
         nBSplines = bs.getNBSplines();
         nEn       = nBSplines - 2;
 
+        // TODO: Use a more general potential for testing, e.g. a piecewise linear function.
+        // TODO: Make a separate test for this specific potential, and test that the matrices are filled correctly for that case.
         // Single-piece potential covering all of x, reproducing the old
         // hardcoded radialPotential(x, L) via a muparser expression string.
         std::map<std::string, std::string> potential = {
@@ -274,6 +276,8 @@ protected:
         int nBs = bs.getNBSplines();
         nEn = nBs - 2;
 
+        // TODO: Use a more general potential for testing, e.g. a piecewise linear function.
+        // TODO: Make a separate test for this specific potential, and test that the matrices are filled correctly for that case.
         // Single-piece potential covering all of x, reproducing the old
         // hardcoded radialPotential(x, L) via a muparser expression string.
         std::map<std::string, std::string> potential = {
