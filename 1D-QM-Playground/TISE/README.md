@@ -67,13 +67,15 @@ Set `L` to the desired (\ell) value and rebuild. Both the potential and the anal
 ## Dependencies
 
 * A C++ compiler with C++17 support (e.g. `g++ >= 7`)
+* [nlohmann's C++ JSON library](https://github.com/nlohmann/json#quick-reference)
+* [Function Parser Library](https://beltoforion.de/en/muparser/)
 * LAPACK and BLAS libraries (for `dsbgv_`)
 * Eigen C++ library.
 
 On many Linux systems these can be installed with your package manager, e.g.:
 
 ```bash
-sudo apt-get install liblapack-dev libblas-dev libeigen3-dev
+sudo apt-get install liblapack-dev libblas-dev libeigen3-dev nlohmann-json3-dev libmuparser-dev
 ```
 
 ---

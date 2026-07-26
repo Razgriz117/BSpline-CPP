@@ -1,0 +1,4 @@
+# Single-piece potential equivalent to the old hardcoded radialPotential(x, L)
+# for L=0 (see TISE/tise.cpp:radialPotential); covers all of x.
+potential:
+  - '{"domain": "[0, inf)", "function": "0 * (0 + 1.0) / (2.0 * x * x) - 1.0 / x"}'

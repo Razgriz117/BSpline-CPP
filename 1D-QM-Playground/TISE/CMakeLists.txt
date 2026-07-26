@@ -10,6 +10,12 @@ option(BUILD_TESTING "Build the testing tree." OFF)
 
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
+# nlohmann_json: parses the JSON-encoded piecewise potential passed as input.
+find_package(nlohmann_json 3.10.5 REQUIRED)
+# muparser: evaluates the per-piece potential expression strings at runtime.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MUPARSER REQUIRED IMPORTED_TARGET muparser)
+add_library(muparser::muparser ALIAS PkgConfig::MUPARSER)
 
 if (BUILD_TESTING)
     enable_testing()
@@ -40,8 +46,9 @@ add_library(tise_lib tise.cpp)
 target_include_directories(tise_lib
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(tise_lib
-    PUBLIC bspline_lib ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
+target_link_libraries(tise_lib PUBLIC 
+    bspline_lib ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
+    muparser::muparser
 )
 
 # Time evolution library (Project Part 2)
@@ -76,5 +83,6 @@ target_link_libraries(H-BoundStates PRIVATE
     tise_lib
     time_evolution_lib
     utils_lib
+    nlohmann_json::nlohmann_json
     ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
 )

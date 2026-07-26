@@ -190,7 +190,15 @@ protected:
         ASSERT_EQ(bs.init(nNodes, order, grid), 0);
         nBSplines = bs.getNBSplines();
         nEn       = nBSplines - 2;
-        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L);
+
+        // Generic two-piece potential (unrelated to hydrogen physics), used only to
+        // exercise fillBandedMatrices' multi-domain string/muparser mechanics.
+        // Continuous at the split (x=5: "x"->5, "x*x-20.0"->5).
+        std::map<std::string, std::string> potential = {
+            {"[0.1, 5.0)",  "x"},
+            {"[5.0, 10.0]", "x * x - 20.0"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
         Hmat = H;
         Smat = S;
     }
@@ -252,6 +260,72 @@ TEST_F(FillBandedMatricesTest, OverlapMatchesDirectIntegral)
 }
 
 // ---------------------------------------------------------------------------
+// fillBandedMatrices — regression test for the exact radial potential
+// ---------------------------------------------------------------------------
+
+class FillBandedMatricesRadialPotentialTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        // Muparser encoding of tise::radialPotential(x, L).
+        std::map<std::string, std::string> potential = {
+            {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        Hmat = H;
+        Smat = S;
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 11, order = 4, L = 1; // L=1 so the centrifugal term is nontrivial
+    double rMin = 0.1, rMax = 10.0;
+    int nBSplines = 0, nEn = 0;
+    std::vector<double> Hmat, Smat;
+
+    double bandElem(const std::vector<double> &mat, int row, int col) const
+    {
+        if (row > col) std::swap(row, col);
+        if (col - row >= order) return 0.0;
+        int brow = row + order - col;
+        int bcol = col;
+        return mat[(brow - 1) + (bcol - 1) * order];
+    }
+};
+
+TEST_F(FillBandedMatricesRadialPotentialTest, HamiltonianMatchesDirectRadialPotentialIntegral)
+{
+    auto unity = [](double, const double *) { return 1.0; };
+    auto directPotential = [this](double x, const double *) {
+        return tise::radialPotential(x, L);
+    };
+
+    // nEn-index band entry (i,j) <-> B-spline indices (iBs1,iBs2)=(i+1,j+1),
+    // per fillBandedMatrices' index algebra (same relation OverlapMatchesDirectIntegral
+    // uses implicitly for i=j=1 -> bs.integral(unity,2,2)).
+    for (int i = 1; i <= nEn; ++i)
+    {
+        for (int j = i; j <= std::min(i + order - 1, nEn); ++j)
+        {
+            int iBs1 = i + 1;
+            int iBs2 = j + 1;
+            double kinetic   = bs.integral(unity, iBs1, iBs2, 1, 1) / 2.0;
+            double potential = bs.integral(directPotential, iBs1, iBs2);
+            double expected  = kinetic + potential;
+            EXPECT_NEAR(bandElem(Hmat, i, j), expected, 1e-11)
+                << "H mismatch at (" << i << "," << j << ")";
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // solveGeneralizedEigenproblem
 // ---------------------------------------------------------------------------
 
@@ -267,7 +341,17 @@ protected:
         ASSERT_EQ(bs.init(nNodes, order, grid), 0);
         int nBs = bs.getNBSplines();
         nEn = nBs - 2;
-        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L);
+
+        // Split into two domains with the identical formula, so this test exercises
+        // multi-piece domain matching while the analytic-eigenvalue checks below
+        // remain valid unchanged.
+        double rMid = rMin + (rMax - rMin) / 2.0; // = 30.0, exactly a grid node
+        std::string expr = std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x";
+        std::map<std::string, std::string> potential = {
+            {"[" + std::to_string(rMin) + ", " + std::to_string(rMid) + ")", expr},
+            {"[" + std::to_string(rMid) + ", " + std::to_string(rMax) + "]", expr}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
         result = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
     }
 
