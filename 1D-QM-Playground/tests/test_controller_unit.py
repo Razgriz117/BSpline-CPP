@@ -352,7 +352,9 @@ class TestRunStage:
             with pytest.raises(SolverStageError) as excinfo:
                 _run_stage("TISE solver", ["tise_solver"])
 
-        assert "TISE solver" in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "TISE solver" in message
+        assert "No such file or directory" in message
 
     def test_generic_os_error_reraised_as_solver_stage_error(self):
         # Hardening added after an earlier code review: any bare OSError
