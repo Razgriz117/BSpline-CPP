@@ -191,6 +191,8 @@ protected:
         nBSplines = bs.getNBSplines();
         nEn       = nBSplines - 2;
 
+        // Single-piece potential covering all of x, reproducing the old
+        // hardcoded radialPotential(x, L) via a muparser expression string.
         std::map<std::string, std::string> potential = {
             {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
         };
@@ -272,6 +274,8 @@ protected:
         int nBs = bs.getNBSplines();
         nEn = nBs - 2;
 
+        // Single-piece potential covering all of x, reproducing the old
+        // hardcoded radialPotential(x, L) via a muparser expression string.
         std::map<std::string, std::string> potential = {
             {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
         };

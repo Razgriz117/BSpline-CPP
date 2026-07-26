@@ -37,6 +37,10 @@ constexpr int    NPTS_EIGENSTATE = 301;
 constexpr int    TIME_STEPS      = 1000;
 constexpr double DT              = 0.3;
 
+// Parse a JSON array of {"domain": ..., "function": ...} objects (as produced by
+// the controller module from a YAML "potential" list) into a domain-string -> expression-string
+// map. Each entry describes one piece of a piecewise-defined potential; the
+// expression is evaluated later by muparser in tise::evaluateFunction.
 std::map<std::string, std::string> parsePiecewise(const std::string& arg) {
     nlohmann::json function_array = nlohmann::json::parse(arg);  // arg: valid JSON array
     std::map<std::string, std::string> domainToFunction;
@@ -51,7 +55,8 @@ std::map<std::string, std::string> parsePiecewise(const std::string& arg) {
 
 int main(int argc, char *argv[])
 {
-    // Parse the potential input string into a map
+    // argv[1]: JSON-encoded array describing the piecewise potential, e.g.
+    // [{"domain": "[0, 20)", "function": "x"}, {"domain": "[20, 40]", "function": "x^2"}]
     auto potential = parsePiecewise(argv[1]);
 
     std::cout << "Potential is: " << std::endl;

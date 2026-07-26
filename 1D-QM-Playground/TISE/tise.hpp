@@ -27,6 +27,8 @@ double radialPotential(double x, int L);
 
 // Fill symmetric banded Hamiltonian H and overlap S matrices (LAPACK 'U' storage).
 // Returns {Hmat, Smat}, each of size order * nEn.
+// `potential` maps domain strings (e.g. "[0, inf)") to muparser expressions in
+// `x`; the piece whose domain contains a given x is evaluated to give V(x).
 std::pair<std::vector<Real>, std::vector<Real>>
 fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::map<std::string, std::string> potential);
 
@@ -60,6 +62,7 @@ void writeEigenstate(std::ostream &out,
                      Real rMax);
 
 // Top-level TISE solver: build grid, fill matrices, diagonalise.
+// `potential` is the piecewise potential passed through to fillBandedMatrices.
 EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential);
 
 } // namespace tise

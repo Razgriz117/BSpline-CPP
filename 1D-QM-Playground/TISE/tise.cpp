@@ -43,6 +43,8 @@ double radialPotential(double x, int L)
 }
 
 // given a string, e.g. [0, 20), return true if input x falls in the bounds and false otherwise
+// Bounds may be finite numbers or (+/-)inf/infinity (case-insensitive); brackets
+// select inclusive ([, ]) vs. exclusive ((, )) endpoints.
 bool inInterval(double x, const std::string& interval)
 {
     static const std::regex re(
@@ -92,8 +94,10 @@ double evaluateFunction(std::map<std::string, std::string> function, double x)
         if (inInterval(x, domain))
         {
             // evaluate function
+            // muparser expression using "x" as the sole variable, bound to a
+            // fresh Parser each call since the expression string varies per piece
             mu::Parser p;
-            p.DefineVar("x", &x); 
+            p.DefineVar("x", &x);
             p.SetExpr(fn);
 
             // return result
@@ -113,9 +117,13 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::m
     std::vector<Real> Smat(order * nEn, 0.0);
 
     bspline::D2DFun fUni = [](double, const double *) { return 1.0; };
+    // Piecewise potential supplied by the caller, evaluated per-x via muparser.
+    // `L` is no longer used to select the potential here; it is retained for
+    // eigenvalueError()'s comparison against the analytic hydrogen spectrum.
     bspline::D2DFun fPot = [potential](double x, const double *) {
         return evaluateFunction(potential, x);
     };
+    // Previous hardcoded radial hydrogen-like potential, kept for reference:
     // bspline::D2DFun fPot = [L](double x, const double *) {
     //     return radialPotential(x, L);
     // };

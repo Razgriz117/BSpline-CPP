@@ -10,7 +10,9 @@ option(BUILD_TESTING "Build the testing tree." OFF)
 
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
+# nlohmann_json: parses the JSON-encoded piecewise potential passed as input.
 find_package(nlohmann_json 3.10.5 REQUIRED)
+# muparser: evaluates the per-piece potential expression strings at runtime.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MUPARSER REQUIRED IMPORTED_TARGET muparser)
 add_library(muparser::muparser ALIAS PkgConfig::MUPARSER)

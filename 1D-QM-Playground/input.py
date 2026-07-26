@@ -30,6 +30,10 @@ def load_input(input_path: str) -> dict:
     for potential_piece in data["potential"]:
         assert isinstance(potential_piece, str), f"Elements of 'potential' in file {input_path} must be strings."
 
+    # Each list element is already a JSON object string, e.g.
+    # '{"domain": "[0, 20)", "function": "x"}'; join them into a single JSON
+    # array string to pass as one argv argument to TISE executable, which parses
+    # it back into a domain -> function map (see main.cpp:parsePiecewise).
     input["potential"] = "[" + ", ".join(data["potential"]) + "]"
 
     return input
@@ -67,9 +71,10 @@ if __name__ == "__main__":
         sys.exit(e.returncode)
 
     # call main.cpp with input-- each input must be a string
+    # potential is passed as argv[1]: a single JSON-array string
     res = subprocess.run([
         "./TISE/build/H-BoundStates",
-        input["potential"] 
+        input["potential"]
     ], capture_output=True, text=True)
 
     print(res.stdout)

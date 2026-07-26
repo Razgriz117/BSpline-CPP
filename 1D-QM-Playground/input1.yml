@@ -1,3 +1,6 @@
+# Piecewise potential: list of JSON objects, each with a "domain" interval
+# (e.g. "[0, 20)") and a muparser "function" expression in x. Consumed by
+# input.py, which forwards it as one JSON array argument to the TISE executable.
 potential:
   - '{"domain": "[0, 20)", "function": "x"}'
   - '{"domain": "[20, 40]", "function": "x^2"}'
