@@ -16,6 +16,8 @@ find_package(nlohmann_json 3.10.5 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MUPARSER REQUIRED IMPORTED_TARGET muparser)
 add_library(muparser::muparser ALIAS PkgConfig::MUPARSER)
+# yaml-cpp: parses config.yaml for the tise_solver subprocess CLI.
+find_package(yaml-cpp REQUIRED)
 
 if (BUILD_TESTING)
     enable_testing()
@@ -86,3 +88,8 @@ target_link_libraries(H-BoundStates PRIVATE
     nlohmann_json::nlohmann_json
     ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
 )
+
+# TISE solver subprocess CLI stub (Controller<->TISE contract, docs/SDD.md §7.2.1)
+add_executable(tise_solver tise_solver_main.cpp)
+target_compile_features(tise_solver PRIVATE cxx_std_17)
+target_link_libraries(tise_solver PRIVATE yaml-cpp)
