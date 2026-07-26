@@ -314,6 +314,35 @@ class TestValidateConfig:
         with pytest.raises(ConfigValidationError):
             validate_config(cfg)
 
+    def test_missing_run_section_raises(self):
+        # Regression test: run() indexes cfg["run"] directly (raw `[...]`,
+        # not `.get()`), so a config missing 'run' entirely used to crash
+        # with an uncaught KeyError instead of a clean ConfigValidationError.
+        cfg = _minimal_cfg()
+        del cfg["run"]
+        with pytest.raises(ConfigValidationError, match="run"):
+            validate_config(cfg)
+
+    def test_run_not_a_mapping_raises(self):
+        cfg = _minimal_cfg()
+        cfg["run"] = "not a mapping"
+        with pytest.raises(ConfigValidationError, match="run"):
+            validate_config(cfg)
+
+    def test_missing_run_tise_key_raises(self):
+        # Regression test: run() reads cfg["run"]["run_tise"] directly.
+        cfg = _minimal_cfg()
+        del cfg["run"]["run_tise"]
+        with pytest.raises(ConfigValidationError, match="run_tise"):
+            validate_config(cfg)
+
+    def test_missing_output_dir_key_raises(self):
+        # Regression test: run() reads cfg["run"]["output_dir"] directly.
+        cfg = _minimal_cfg()
+        del cfg["run"]["output_dir"]
+        with pytest.raises(ConfigValidationError, match="output_dir"):
+            validate_config(cfg)
+
 
 # ─── _run_stage (subprocess.run mocked) ─────────────────────────────────────
 
@@ -431,6 +460,27 @@ class TestReadWarnings:
 
     def test_non_list_json_returns_empty_list_and_notes_stderr(self, tmp_path, capsys):
         (tmp_path / "warnings.json").write_text(json.dumps({"not": "a list"}))
+        result = read_warnings(tmp_path)
+        assert result == []
+        captured = capsys.readouterr()
+        assert "warnings.json" in captured.err
+
+    def test_list_of_non_dicts_returns_empty_list_and_notes_stderr(self, tmp_path, capsys):
+        # Regression test: a JSON array whose elements are NOT dicts (e.g.
+        # bare strings) used to pass read_warnings unchanged, then crash
+        # print_warnings with an unhandled AttributeError on `.get(...)`.
+        (tmp_path / "warnings.json").write_text(json.dumps(["a", "b"]))
+        result = read_warnings(tmp_path)
+        assert result == []
+        captured = capsys.readouterr()
+        assert "warnings.json" in captured.err
+
+    def test_list_with_mixed_dict_and_non_dict_elements_returns_empty_list(self, tmp_path, capsys):
+        # Even one bad element among otherwise well-formed dicts must still
+        # degrade the whole list to [], not pass the mix through.
+        (tmp_path / "warnings.json").write_text(
+            json.dumps([{"category": "info", "message": "ok"}, "bad"])
+        )
         result = read_warnings(tmp_path)
         assert result == []
         captured = capsys.readouterr()
