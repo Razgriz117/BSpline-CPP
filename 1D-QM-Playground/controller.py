@@ -92,11 +92,30 @@ def load_config(config_path: str) -> dict:
 def validate_config(cfg: dict) -> None:
     """Validate `cfg`.
 
+    Checks that the 'run' section exists and is a mapping containing the
+    'run_tise' and 'output_dir' keys -- the two run() indexes directly with
+    raw `[...]` (as opposed to 'run_tdse'/'run_analysis', which run() reads
+    via `.get()` and are genuinely optional) -- so a config missing either
+    fails here with a clear ConfigValidationError instead of run() raising
+    an uncaught KeyError later.
+
     Phase 1 scope: parses every `potential` piece and checks that,
     together, they tile `bspline.domain` with no gaps and no ambiguous
     overlaps (validate_potential_tiling) -- the one piece of real
     validation logic this module implements.
     """
+    try:
+        run_cfg = cfg["run"]
+    except KeyError as e:
+        raise ConfigValidationError("config missing required 'run' section") from e
+
+    if not isinstance(run_cfg, dict):
+        raise ConfigValidationError(f"'run' must be a mapping, got {type(run_cfg).__name__}")
+
+    for key in ("run_tise", "output_dir"):
+        if key not in run_cfg:
+            raise ConfigValidationError(f"config missing required 'run.{key}'")
+
     try:
         potential_cfg = cfg["potential"]
     except KeyError as e:
@@ -301,6 +320,14 @@ def read_warnings(tise_output_dir: Path) -> list[dict]:
         print(
             f"controller.py: warning: {path} has invalid contents "
             f"(expected a JSON array, got {type(data).__name__}); skipping",
+            file=sys.stderr,
+        )
+        return []
+
+    if not all(isinstance(w, dict) for w in data):
+        print(
+            f"controller.py: warning: {path} has invalid contents "
+            f"(expected a JSON array of objects); skipping",
             file=sys.stderr,
         )
         return []
