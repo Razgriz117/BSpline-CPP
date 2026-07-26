@@ -38,10 +38,11 @@ constexpr int    TIME_STEPS      = 1000;
 constexpr double DT              = 0.3;
 
 std::map<std::string, std::string> parsePiecewise(const std::string& arg) {
-    nlohmann::json j = nlohmann::json::parse(arg);          // arg must be valid JSON array
+    nlohmann::json function_array = nlohmann::json::parse(arg);  // arg: valid JSON array
     std::map<std::string, std::string> domainToFunction;
 
-    for (const auto& piece : j) {
+    for (const auto &piece : function_array)
+    {
         domainToFunction[piece.at("domain").get<std::string>()] =
             piece.at("function").get<std::string>();
     }
