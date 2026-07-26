@@ -28,6 +28,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from controller import SolverStageError, run, run_tise_solver
 
@@ -75,6 +76,44 @@ class TestRunTiseSolverRealSubprocess:
         # but the real tise_solver binary fails at YAML::LoadFile (config
         # doesn't exist) before it creates its own output dir or writes any
         # file, so tise_dir must hold nothing regardless.
+        assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
+    def test_continuum_enabled_missing_n_energies_raises_and_leaves_no_partial_files(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """Regression guard for the fix validating tise.continuum.n_energies
+        before any output is written (docs/SDD.md Sec 7.2.1).
+
+        main() used to call writeCoreOutputs() unconditionally and only
+        validate tise.continuum.n_energies afterwards, while extracting the
+        continuum settings -- so continuum.enabled: true with a missing (or
+        otherwise invalid) n_energies exited non-zero but still left the 5
+        core files (eigenvalues.dat, etc.) sitting in the output directory.
+        n_energies is now validated before writeCoreOutputs() runs, so this
+        config must both raise SolverStageError AND leave tise_dir holding
+        zero files -- the same "non-zero exit == no partial output"
+        guarantee the config-missing test above checks for a different
+        failure path.
+        """
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["tise"]["continuum"]["enabled"] = True
+        cfg["tise"]["continuum"].pop("n_energies", None)
+        bad_config = tmp_path / "config_continuum_missing_n_energies.yaml"
+        with open(bad_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_tise_solver(str(bad_config), tise_dir, binary=tise_solver_binary)
+
+        assert "TISE solver" in str(excinfo.value)
+
+        # This is the actual regression guard: before the fix, main() wrote
+        # the 5 core files unconditionally, before ever validating
+        # n_energies, so this assertion would have failed (tise_dir held 5
+        # files, not 0) against the pre-fix binary.
         assert not tise_dir.exists() or not any(tise_dir.iterdir())
 
 
