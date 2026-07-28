@@ -25,9 +25,11 @@ TiseData. Deliberately NOT implemented here (all later phases):
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 # Matches continuum_state_NNN.dat filenames, capturing the numeric index.
 # Deliberately \d+ rather than \d{3}: Sec 6.3 documents zero-padded 3-digit
@@ -52,6 +54,28 @@ class TiseOutputError(AnalysisError):
     """
 
 
+class EigenvalueRow(NamedTuple):
+    """One eigenvalues.dat row: a basis-state index and its energy E_n."""
+
+    index: int
+    energy: float
+
+
+class PhaseShiftRow(NamedTuple):
+    """One phase_shifts.dat row: eps_i, delta(eps_i), and d(delta)/dE."""
+
+    energy: float
+    delta: float
+    ddelta_dE: float
+
+
+class ContinuumPoint(NamedTuple):
+    """One row of a continuum_state_NNN.dat file: a grid point x, psi_eps(x)."""
+
+    x: float
+    psi: float
+
+
 @dataclass(frozen=True)
 class TiseData:
     """Bundled result of reading every file under one data/tise/ directory.
@@ -60,14 +84,21 @@ class TiseData:
     was false for the run that produced tise_dir (see
     read_phase_shifts/read_continuum_states) -- an empty list here is a
     normal, successful result, not a sentinel for "not read yet".
+
+    Note: frozen=True stops a field from being REASSIGNED (e.g.
+    `some_tise_data.eigenvalues = [...]` raises FrozenInstanceError), but
+    does not deep-freeze its contents -- every field here is a plain,
+    still-mutable Python list (only the per-row tuples are the immutable,
+    self-documenting NamedTuple types below). Nothing in this module
+    mutates them after construction, but a caller technically could.
     """
 
-    eigenvalues: list[tuple[int, float]]
+    eigenvalues: list[EigenvalueRow]
     eigenvectors: list[list[float]]
     hamiltonian: list[list[float]]
     overlap: list[list[float]]
-    phase_shifts: list[tuple[float, float, float]]
-    continuum_states: list[tuple[int, list[tuple[float, float]]]]
+    phase_shifts: list[PhaseShiftRow]
+    continuum_states: list[tuple[int, list[ContinuumPoint]]]
 
 
 # ─── Generic .dat row parsing ───────────────────────────────────────────────
@@ -85,10 +116,16 @@ def _read_data_rows(path: Path, description: str) -> list[list[float]]:
 
     Raises TiseOutputError if `path` doesn't exist, can't be read as text,
     has a data row with a different field count than the first data row,
-    or has a data row containing a non-numeric field. A single except
-    clause covers "missing" and "otherwise unreadable" together (both are
-    OSError subclasses, e.g. FileNotFoundError/PermissionError/
-    IsADirectoryError) since str(e) already carries the OS's own reason.
+    has a data row containing a non-numeric field, or has a field that
+    parses but isn't finite (NaN/Infinity, e.g. Python's own float("nan")/
+    float("inf") both parse without raising, so this needs an explicit
+    math.isfinite() check of its own -- a solver that failed to converge
+    could plausibly write one of these once Phase 4 lands real numerics,
+    and it should be caught here rather than flow silently downstream). A
+    single except clause covers "missing" and "otherwise unreadable"
+    together (both are OSError subclasses, e.g. FileNotFoundError/
+    PermissionError/IsADirectoryError) since str(e) already carries the
+    OS's own reason.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -113,12 +150,21 @@ def _read_data_rows(path: Path, description: str) -> list[list[float]]:
                 f"field(s), expected {ncols} (from the first data row)"
             )
 
-        try:
-            rows.append([float(field) for field in fields])
-        except ValueError as e:
-            raise TiseOutputError(
-                f"malformed {description} at {path}: line {lineno} has a non-numeric field: {e}"
-            ) from e
+        row: list[float] = []
+        for field in fields:
+            try:
+                value = float(field)
+            except ValueError as e:
+                raise TiseOutputError(
+                    f"malformed {description} at {path}: line {lineno} has a non-numeric field: {e}"
+                ) from e
+            if not math.isfinite(value):
+                raise TiseOutputError(
+                    f"malformed {description} at {path}: line {lineno} has a non-finite field "
+                    f"(NaN/Infinity not permitted): {field!r}"
+                )
+            row.append(value)
+        rows.append(row)
 
     return rows
 
@@ -141,14 +187,29 @@ def _check_row_width(rows: list[list[float]], width: int, path: Path, descriptio
 # ─── Required-file readers (always present after a successful TISE run) ────
 
 
-def read_eigenvalues(path: Path) -> list[tuple[int, float]]:
+def read_eigenvalues(path: Path) -> list[EigenvalueRow]:
     """Read eigenvalues.dat: 2 columns per row, (index, E_n).
+
+    The index field must be a whole number (its file representation may
+    still be e.g. "2" or "2.0" -- either parses fine). A fractional index
+    (e.g. "2.9") is treated as malformed and raises, rather than being
+    silently truncated by int(), consistent with this reader's "corruption
+    is not tolerated" stance on its other fields.
 
     Raises TiseOutputError if `path` is missing, unreadable, or malformed.
     """
     rows = _read_data_rows(path, "eigenvalues.dat")
     _check_row_width(rows, 2, path, "eigenvalues.dat")
-    return [(int(row[0]), row[1]) for row in rows]
+
+    result: list[EigenvalueRow] = []
+    for row in rows:
+        index_value = row[0]
+        if not index_value.is_integer():
+            raise TiseOutputError(
+                f"malformed eigenvalues.dat at {path}: index field {index_value!r} is not a whole number"
+            )
+        result.append(EigenvalueRow(int(index_value), row[1]))
+    return result
 
 
 def read_eigenvectors(path: Path) -> list[list[float]]:
@@ -156,7 +217,8 @@ def read_eigenvectors(path: Path) -> list[list[float]]:
 
     Each row is one basis-coefficient row; each column is one eigenstate's
     coefficient. Raises TiseOutputError if `path` is missing, unreadable,
-    or malformed (rows of inconsistent width, or a non-numeric field).
+    or malformed (rows of inconsistent width, a non-numeric field, or a
+    non-finite field).
     """
     return _read_data_rows(path, "eigenvectors.dat")
 
@@ -185,7 +247,7 @@ def read_overlap(path: Path) -> list[list[float]]:
 # ─── Continuum-tolerant readers (absent when tise.continuum.enabled: false) ─
 
 
-def read_phase_shifts(path: Path) -> list[tuple[float, float, float]]:
+def read_phase_shifts(path: Path) -> list[PhaseShiftRow]:
     """Read phase_shifts.dat: 3 columns per row, (eps_i, delta_i, ddelta_dE_i).
 
     Only written when tise.continuum.enabled: true. Returns [] (does NOT
@@ -200,10 +262,10 @@ def read_phase_shifts(path: Path) -> list[tuple[float, float, float]]:
 
     rows = _read_data_rows(path, "phase_shifts.dat")
     _check_row_width(rows, 3, path, "phase_shifts.dat")
-    return [(row[0], row[1], row[2]) for row in rows]
+    return [PhaseShiftRow(row[0], row[1], row[2]) for row in rows]
 
 
-def read_continuum_states(tise_dir: Path) -> list[tuple[int, list[tuple[float, float]]]]:
+def read_continuum_states(tise_dir: Path) -> list[tuple[int, list[ContinuumPoint]]]:
     """Read every continuum_state_NNN.dat file under `tise_dir`.
 
     Each matching file holds 2 columns per row, (x, psi). Returns a list of
@@ -234,11 +296,11 @@ def read_continuum_states(tise_dir: Path) -> list[tuple[int, list[tuple[float, f
 
     matches.sort(key=lambda pair: pair[0])
 
-    result: list[tuple[int, list[tuple[float, float]]]] = []
+    result: list[tuple[int, list[ContinuumPoint]]] = []
     for index, path in matches:
         rows = _read_data_rows(path, path.name)
         _check_row_width(rows, 2, path, path.name)
-        result.append((index, [(row[0], row[1]) for row in rows]))
+        result.append((index, [ContinuumPoint(row[0], row[1]) for row in rows]))
 
     return result
 
