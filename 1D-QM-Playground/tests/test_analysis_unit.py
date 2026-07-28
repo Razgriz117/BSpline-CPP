@@ -161,12 +161,13 @@ class TestReadEigenvectors:
     """read_eigenvectors, read_hamiltonian, and read_overlap all delegate
     straight to the same _read_data_rows() with no extra per-function logic
     on top (unlike read_eigenvalues, which layers its own index-integer
-    check on the result) -- so the missing-file/ragged-row/non-numeric/NaN/
-    Infinity error paths are byte-for-byte identical across all three, and
-    are tested exhaustively HERE, once, rather than being re-tested per
-    file. This mirrors test_controller_unit.py's TestRunStage, which tests
-    _run_stage's error handling exhaustively in one place rather than
-    re-testing it through every caller that goes through it.
+    check on the result) -- so the missing-file/invalid-encoding/
+    ragged-row/non-numeric/NaN/Infinity error paths are byte-for-byte
+    identical across all three, and are tested exhaustively HERE, once,
+    rather than being re-tested per file. This mirrors
+    test_controller_unit.py's TestRunStage, which tests _run_stage's error
+    handling exhaustively in one place rather than re-testing it through
+    every caller that goes through it.
     TestReadHamiltonian/TestReadOverlap below still each get their own
     happy-path test, since eigenvectors.dat/hamiltonian.dat/overlap.dat are
     semantically distinct files.
@@ -213,6 +214,19 @@ class TestReadEigenvectors:
 
     def test_infinity_field_raises(self, tmp_path):
         path = _write_dat(tmp_path / "eigenvectors.dat", "# eigenvectors.dat", "0.1  inf")
+        with pytest.raises(TiseOutputError):
+            read_eigenvectors(path)
+
+    def test_invalid_utf8_bytes_raises_tise_output_error(self, tmp_path):
+        # 0xFF is never a valid UTF-8 leading byte, so path.read_text(encoding=
+        # "utf-8") is guaranteed to raise UnicodeDecodeError on this fixture --
+        # exercising _read_data_rows's `except UnicodeDecodeError` branch
+        # specifically (a binary/corrupted file that can't be read as text),
+        # distinct from the `except OSError` branch already covered by
+        # test_missing_file_raises above. Must surface as TiseOutputError, not
+        # let the raw UnicodeDecodeError propagate.
+        path = tmp_path / "eigenvectors.dat"
+        path.write_bytes(b"\xff\xfe\x00\x01\x02\x03")
         with pytest.raises(TiseOutputError):
             read_eigenvectors(path)
 
