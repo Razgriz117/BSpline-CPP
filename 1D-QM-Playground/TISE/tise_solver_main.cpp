@@ -27,6 +27,17 @@ namespace
 
 constexpr const char *USAGE = "usage: tise_solver --config <path> --output-dir <path>";
 
+// Placeholder dimensions for the matrix-shaped stub outputs (see
+// writeGridFile() below), kept as named constants so the made-up dimensions
+// are consistent across files instead of each being independently guessed.
+// These are shape-only choices for a Phase-1 contract stub -- they do NOT
+// encode any real LAPACK banded-storage convention (undocumented until a
+// later phase; see docs/SDD.md §10.2 Phase 4) and are not physically
+// meaningful basis sizes.
+constexpr int kPlaceholderNumEigenstates = 5; // eigenvalues.dat rows; eigenvectors.dat cols
+constexpr int kPlaceholderBasisSize = 8;      // eigenvectors.dat rows; hamiltonian.dat/overlap.dat cols
+constexpr int kPlaceholderBandwidth = 3;      // hamiltonian.dat/overlap.dat rows (< basis size: suggests banded/compact storage)
+
 struct CliArgs
 {
     std::string configPath;
@@ -73,18 +84,65 @@ CliArgs parseArgs(int argc, char *argv[])
     return CliArgs{configPath, outputDir};
 }
 
-// Write a minimal placeholder data file: a header comment line plus a couple
-// of placeholder rows. Content is not physically meaningful -- this is a
-// Phase-1 contract stub, not real physics (see docs/SDD.md §10.2 Phase 4).
-void writeStubDataFile(const std::filesystem::path &path, const std::string &description)
+// Write a 2-column (index, value) placeholder file: `numRows` rows of
+// "<index>  0.0" beneath a header comment line. This is the original
+// writeStubDataFile() body, parameterized by row count instead of hardcoded
+// to 2. Used for outputs that docs/SDD.md §6.3 documents as genuinely
+// index/value pairs: eigenvalues.dat (index, E_n) and
+// continuum_state_NNN.dat (x, psi_eps(x)). Content is not physically
+// meaningful -- this is a Phase-1 contract stub, not real physics (see
+// docs/SDD.md §10.2 Phase 4).
+void writeIndexValueFile(const std::filesystem::path &path, const std::string &description, int numRows)
 {
     std::ofstream out(path);
     if (!out)
         throw std::runtime_error("failed to open '" + path.string() + "' for writing");
 
     out << "# " << description << " -- Phase 1 stub, no physics yet\n";
-    out << "0  0.0\n";
-    out << "1  0.0\n";
+    for (int i = 0; i < numRows; ++i)
+        out << i << "  0.0\n";
+}
+
+// Write a `numRows` x `numCols` rectangular grid of placeholder 0.0 values,
+// whitespace-separated with no index column, beneath the same header-comment
+// style as writeIndexValueFile(). Used for the files §6.3 documents as
+// matrix/banded-matrix content -- eigenvectors.dat, hamiltonian.dat,
+// overlap.dat -- so their on-disk shape is structurally a matrix rather than
+// an index-value list. This deliberately does NOT encode any real LAPACK
+// banded-storage convention (bandwidth formula, compact-storage layout) --
+// that's undocumented until a later phase (real TISE numerics); only the
+// row/column shape is meaningful here, the placeholder values stay
+// meaningless zeros.
+void writeGridFile(const std::filesystem::path &path, const std::string &description, int numRows, int numCols)
+{
+    std::ofstream out(path);
+    if (!out)
+        throw std::runtime_error("failed to open '" + path.string() + "' for writing");
+
+    out << "# " << description << " -- Phase 1 stub, no physics yet\n";
+    for (int r = 0; r < numRows; ++r)
+    {
+        for (int c = 0; c < numCols; ++c)
+            out << (c == 0 ? "" : "  ") << "0.0";
+        out << "\n";
+    }
+}
+
+// Write phase_shifts.dat's 3-column (eps_i, delta(eps_i), d(delta)/dE)
+// placeholder: `numRows` rows of "0.0  0.0  0.0" beneath the same
+// header-comment style. `numRows` must be the same n_energies value that
+// drives the continuum_state_NNN.dat file count in writeContinuumOutputs()
+// below -- §6.3 documents one phase_shifts.dat row per energy point,
+// mirroring one continuum_state file per energy point.
+void writePhaseShiftsFile(const std::filesystem::path &path, int numRows)
+{
+    std::ofstream out(path);
+    if (!out)
+        throw std::runtime_error("failed to open '" + path.string() + "' for writing");
+
+    out << "# phase_shifts.dat: eps_i, delta(eps_i), d(delta)/dE -- Phase 1 stub, no physics yet\n";
+    for (int i = 0; i < numRows; ++i)
+        out << "0.0  0.0  0.0\n";
 }
 
 // Zero-pad `value` to at least `width` digits, e.g. zeroPadded(1, 3) == "001".
@@ -99,10 +157,13 @@ std::string zeroPadded(int value, int width)
 // §7.2.1) always expects, regardless of continuum settings.
 void writeCoreOutputs(const std::filesystem::path &outputDir)
 {
-    writeStubDataFile(outputDir / "eigenvalues.dat", "eigenvalues.dat: index, E_n");
-    writeStubDataFile(outputDir / "eigenvectors.dat", "eigenvectors.dat: columns are c_n coefficient vectors");
-    writeStubDataFile(outputDir / "hamiltonian.dat", "hamiltonian.dat: H matrix (banded)");
-    writeStubDataFile(outputDir / "overlap.dat", "overlap.dat: S matrix (banded)");
+    writeIndexValueFile(outputDir / "eigenvalues.dat", "eigenvalues.dat: index, E_n", kPlaceholderNumEigenstates);
+    writeGridFile(outputDir / "eigenvectors.dat", "eigenvectors.dat: columns are c_n coefficient vectors",
+                  kPlaceholderBasisSize, kPlaceholderNumEigenstates);
+    writeGridFile(outputDir / "hamiltonian.dat", "hamiltonian.dat: H matrix (banded)",
+                  kPlaceholderBandwidth, kPlaceholderBasisSize);
+    writeGridFile(outputDir / "overlap.dat", "overlap.dat: S matrix (banded)",
+                  kPlaceholderBandwidth, kPlaceholderBasisSize);
 
     const std::filesystem::path warningsPath = outputDir / "warnings.json";
     std::ofstream warnings(warningsPath);
@@ -136,12 +197,12 @@ int validateNEnergies(const YAML::Node &continuumNode)
 // nEnergies already validated by validateNEnergies().
 void writeContinuumOutputs(const std::filesystem::path &outputDir, int nEnergies)
 {
-    writeStubDataFile(outputDir / "phase_shifts.dat", "phase_shifts.dat: eps_i, delta(eps_i), d(delta)/dE");
+    writePhaseShiftsFile(outputDir / "phase_shifts.dat", nEnergies);
 
     for (int i = 1; i <= nEnergies; ++i)
     {
         const std::string filename = "continuum_state_" + zeroPadded(i, 3) + ".dat";
-        writeStubDataFile(outputDir / filename, filename + ": x, psi_eps(x)");
+        writeIndexValueFile(outputDir / filename, filename + ": x, psi_eps(x)", 2);
     }
 }
 
