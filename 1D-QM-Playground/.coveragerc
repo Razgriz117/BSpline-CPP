@@ -1,6 +1,6 @@
 [run]
 branch = True
-source = controller
+source = controller, analysis
 
 [report]
 fail_under = 80
