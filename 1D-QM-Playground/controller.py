@@ -3,11 +3,11 @@
 Loads config.yaml, validates it, and invokes solver subprocesses per
 docs/SDD.md Sec 5.1 (Controller) and Sec 7.2 (Inter-Component Interfaces).
 
-Phase 1 scope only (docs/SDD.md Sec 10.2): this module implements the
-Controller <-> TISE Solver contract (Sec 7.2.1). TDSE (Sec 7.2.4, Phase 5)
-and Analysis (Sec 7.2.3, Phase 3) orchestration are future phases and are
-deliberately NOT implemented here -- run() raises a clear error if a config
-asks for either rather than silently no-op-ing.
+This module implements the Controller <-> TISE Solver contract (Sec 7.2.1,
+Phase 1) and the Controller <-> Analysis contract (Sec 7.2.3, Phase 3). TDSE
+orchestration (Sec 7.2.4, Phase 5) is a future phase and is deliberately NOT
+implemented here -- run() raises a clear error if a config asks for it
+rather than silently no-op-ing.
 """
 
 from __future__ import annotations
@@ -33,6 +33,9 @@ EPS = 1e-9
 # ./build/tise_solver layout -- that directory-layout migration is a
 # separate, out-of-scope concern.
 DEFAULT_TISE_SOLVER = Path(__file__).resolve().parent / "TISE" / "build" / "tise_solver"
+
+# analysis.py resolved the same way, for the same reason (see above).
+DEFAULT_ANALYSIS_SCRIPT = Path(__file__).resolve().parent / "analysis.py"
 
 
 class ControllerError(Exception):
@@ -293,6 +296,28 @@ def run_tise_solver(config_path: str, tise_output_dir: Path, binary: Path = DEFA
     )
 
 
+def run_analysis_stage(
+    config_path: str,
+    tise_dir: Path,
+    tdse_dir: Path,
+    script: Path = DEFAULT_ANALYSIS_SCRIPT,
+) -> None:
+    """Invoke the Analysis subprocess per docs/SDD.md Sec 7.2.3.
+
+    Unlike run_tise_solver, this does NOT create tise_dir/tdse_dir -- both
+    are Analysis's INPUT paths (read, not written; see ADR-0005,
+    docs/adr/0005-defer-analysis-output-artifact-format.md), and a missing
+    one is Analysis's own contract to handle (Sec 5.4.4: absent tdse_dir
+    tolerated; absent/malformed tise_dir a hard TiseOutputError), not
+    something the Controller should paper over.
+    """
+    _run_stage(
+        "Analysis",
+        [sys.executable, str(script), "--config", config_path,
+         "--tise-dir", str(tise_dir), "--tdse-dir", str(tdse_dir)],
+    )
+
+
 def read_warnings(tise_output_dir: Path) -> list[dict]:
     """Best-effort read of tise_output_dir/warnings.json.
 
@@ -362,13 +387,17 @@ def run(config_path: str) -> None:
 
     if cfg["run"].get("run_tdse"):
         raise ControllerError("run.run_tdse is not yet supported (Phase 5); set run.run_tdse: false")
-    if cfg["run"].get("run_analysis"):
-        raise ControllerError("run.run_analysis is not yet supported (Phase 3); set run.run_analysis: false")
+
+    output_dir = Path(cfg["run"]["output_dir"])
+    tise_dir = output_dir / "tise"
+    tdse_dir = output_dir / "tdse"
 
     if cfg["run"]["run_tise"]:
-        tise_dir = Path(cfg["run"]["output_dir"]) / "tise"
         run_tise_solver(config_path, tise_dir)
         print_warnings(read_warnings(tise_dir))
+
+    if cfg["run"].get("run_analysis"):
+        run_analysis_stage(config_path, tise_dir, tdse_dir)
 
 
 def main(argv: list[str] | None = None) -> int:
