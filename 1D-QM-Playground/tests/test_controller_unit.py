@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,6 +28,7 @@ import yaml
 from controller import (
     ConfigValidationError,
     ControllerError,
+    DEFAULT_ANALYSIS_SCRIPT,
     Interval,
     SolverStageError,
     _run_stage,
@@ -37,6 +39,7 @@ from controller import (
     print_warnings,
     read_warnings,
     run,
+    run_analysis_stage,
     run_tise_solver,
     validate_config,
     validate_potential_tiling,
@@ -432,6 +435,92 @@ class TestRunTiseSolver:
         mock_run.assert_not_called()
 
 
+# ─── run_analysis_stage (subprocess.run mocked) ─────────────────────────────
+
+
+class TestRunAnalysisStage:
+    def test_success_invokes_stage_with_expected_argv(self, tmp_path):
+        tise_dir = tmp_path / "tise"
+        tdse_dir = tmp_path / "tdse"
+        with patch("controller.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=["x"], returncode=0, stdout="", stderr="")
+            run_analysis_stage("c.yaml", tise_dir, tdse_dir, script=Path("/fake/analysis.py"))
+
+        mock_run.assert_called_once_with(
+            [sys.executable, "/fake/analysis.py", "--config", "c.yaml",
+             "--tise-dir", str(tise_dir), "--tdse-dir", str(tdse_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_success_does_not_create_tise_or_tdse_dirs(self, tmp_path):
+        # The key asymmetry vs. run_tise_solver (which DOES mkdir its output
+        # directory): tise_dir/tdse_dir are Analysis's own INPUT paths (read,
+        # not written -- see run_analysis_stage's own docstring and
+        # ADR-0005), so a successful call must leave both exactly as it
+        # found them: absent. Neither directory is created ahead of time
+        # here (unlike TestRunTiseSolver's tmp_path usage, which only
+        # asserts a dir IS created), so if run_analysis_stage ever grew a
+        # tise_dir.mkdir(...)/tdse_dir.mkdir(...) call, this test would
+        # catch it.
+        tise_dir = tmp_path / "tise"
+        tdse_dir = tmp_path / "tdse"
+        with patch("controller.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=["x"], returncode=0, stdout="", stderr="")
+            run_analysis_stage("c.yaml", tise_dir, tdse_dir, script=Path("/fake/analysis.py"))
+
+        assert not tise_dir.exists()
+        assert not tdse_dir.exists()
+
+    def test_called_process_error_reraised_as_solver_stage_error(self, tmp_path):
+        tise_dir = tmp_path / "tise"
+        tdse_dir = tmp_path / "tdse"
+        with patch("controller.subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.CalledProcessError(
+                returncode=1, cmd=["analysis.py"], output="", stderr="TiseOutputError: missing hamiltonian.dat"
+            )
+            with pytest.raises(SolverStageError) as excinfo:
+                run_analysis_stage("c.yaml", tise_dir, tdse_dir, script=Path("/fake/analysis.py"))
+
+        message = str(excinfo.value)
+        assert "Analysis" in message
+        assert "TiseOutputError: missing hamiltonian.dat" in message
+
+    def test_os_error_reraised_as_solver_stage_error(self, tmp_path):
+        # Simulates e.g. a missing/non-executable interpreter -- an OSError
+        # subprocess.run() raises itself before any child process starts
+        # (see _run_stage's own comment on this), not a CalledProcessError.
+        tise_dir = tmp_path / "tise"
+        tdse_dir = tmp_path / "tdse"
+        with patch("controller.subprocess.run") as mock_run:
+            mock_run.side_effect = OSError("Exec format error")
+            with pytest.raises(SolverStageError) as excinfo:
+                run_analysis_stage("c.yaml", tise_dir, tdse_dir, script=Path("/fake/analysis.py"))
+
+        message = str(excinfo.value)
+        assert "Analysis" in message
+        assert "Exec format error" in message
+
+    def test_default_script_is_default_analysis_script(self, tmp_path):
+        # Confirms script= genuinely defaults to DEFAULT_ANALYSIS_SCRIPT
+        # (controller.py's real analysis.py, resolved relative to
+        # controller.py's own location) when the caller doesn't override it.
+        tise_dir = tmp_path / "tise"
+        tdse_dir = tmp_path / "tdse"
+        with patch("controller.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=["x"], returncode=0, stdout="", stderr="")
+            run_analysis_stage("c.yaml", tise_dir, tdse_dir)  # no script= override
+
+        mock_run.assert_called_once_with(
+            [sys.executable, str(DEFAULT_ANALYSIS_SCRIPT), "--config", "c.yaml",
+             "--tise-dir", str(tise_dir), "--tdse-dir", str(tdse_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
 # ─── read_warnings ───────────────────────────────────────────────────────────
 
 
@@ -538,12 +627,6 @@ class TestRunOrchestrationGuards:
         with pytest.raises(ControllerError, match="run_tdse"):
             run(str(path))
 
-    def test_run_analysis_true_raises_controller_error(self, tmp_path):
-        cfg = _minimal_cfg(run_analysis=True)
-        path = _write_yaml(tmp_path / "config.yaml", cfg)
-        with pytest.raises(ControllerError, match="run_analysis"):
-            run(str(path))
-
     def test_all_stages_disabled_is_a_silent_no_op(self, tmp_path):
         cfg = _minimal_cfg()  # run_tise/run_tdse/run_analysis all False
         path = _write_yaml(tmp_path / "config.yaml", cfg)
@@ -559,13 +642,62 @@ class TestRunOrchestrationGuards:
 
         with patch("controller.run_tise_solver") as mock_solver, \
                 patch("controller.read_warnings") as mock_read, \
-                patch("controller.print_warnings") as mock_print:
+                patch("controller.print_warnings") as mock_print, \
+                patch("controller.run_analysis_stage") as mock_analysis:
             mock_read.return_value = [{"category": "info", "message": "hi"}]
             run(str(path))
 
         mock_solver.assert_called_once_with(str(path), output_dir / "tise")
         mock_read.assert_called_once_with(output_dir / "tise")
         mock_print.assert_called_once_with([{"category": "info", "message": "hi"}])
+        # run_analysis defaults to False in _minimal_cfg -- guards against a
+        # future regression where Analysis dispatch becomes unconditional
+        # (i.e. no longer actually gated on run.run_analysis).
+        mock_analysis.assert_not_called()
+
+    def test_run_analysis_dispatches_independent_of_run_tise(self, tmp_path):
+        # run_analysis_stage is mocked here -- no real subprocess call.
+        # run_tise is False: this is the scenario proving Analysis is
+        # dispatched even when TISE did NOT run as part of THIS invocation
+        # (e.g. a prior invocation already populated tise_dir) -- the real,
+        # current, intentional behavior. See run_analysis_stage's own
+        # docstring and the rationale comment directly above the dispatch
+        # line in run() for why this is correct, not a bug.
+        output_dir = tmp_path / "outdir"
+        cfg = _minimal_cfg(run_tise=False, run_analysis=True, output_dir=str(output_dir))
+        path = _write_yaml(tmp_path / "config.yaml", cfg)
+
+        with patch("controller.run_tise_solver") as mock_solver, \
+                patch("controller.run_analysis_stage") as mock_analysis:
+            run(str(path))
+
+        mock_solver.assert_not_called()
+        mock_analysis.assert_called_once_with(str(path), output_dir / "tise", output_dir / "tdse")
+
+    def test_run_tise_and_run_analysis_dispatch_with_shared_tise_dir(self, tmp_path):
+        # Both run_tise_solver and run_analysis_stage are mocked -- no real
+        # subprocess call. Proves the tise_dir/tdse_dir computation in run()
+        # is hoisted once and shared between both dispatch sites, rather
+        # than independently recomputed per stage with potential drift: both
+        # mocks must see the exact same tise_dir value.
+        output_dir = tmp_path / "outdir"
+        cfg = _minimal_cfg(run_tise=True, run_analysis=True, output_dir=str(output_dir))
+        path = _write_yaml(tmp_path / "config.yaml", cfg)
+
+        with patch("controller.run_tise_solver") as mock_solver, \
+                patch("controller.read_warnings") as mock_read, \
+                patch("controller.print_warnings") as mock_print, \
+                patch("controller.run_analysis_stage") as mock_analysis:
+            mock_read.return_value = []
+            run(str(path))
+
+        mock_solver.assert_called_once_with(str(path), output_dir / "tise")
+        mock_print.assert_called_once_with([])
+        mock_analysis.assert_called_once_with(str(path), output_dir / "tise", output_dir / "tdse")
+
+        tise_dir_seen_by_solver = mock_solver.call_args.args[1]
+        tise_dir_seen_by_analysis = mock_analysis.call_args.args[1]
+        assert tise_dir_seen_by_solver == tise_dir_seen_by_analysis == output_dir / "tise"
 
 
 # ─── main() CLI wrapper ──────────────────────────────────────────────────────
