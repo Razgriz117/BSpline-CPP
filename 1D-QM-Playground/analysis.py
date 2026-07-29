@@ -76,7 +76,12 @@ class ConfigError(AnalysisError):
     module's load_config() performs none of controller.py's solver-specific
     schema checks (potential-piece tiling, bspline.domain, run.run_tise/
     output_dir) -- Phase 3 doesn't read or act on the `analysis`/
-    `visualization` blocks' contents yet (see ADR-0005, docs/adr/0005-defer-analysis-output-artifact-format.md).
+    `visualization` blocks' contents yet (their REQ-F-060 quantities all
+    require TDSE output, unavailable until Phase 8 -- see this module's
+    top docstring). That's a separate point from ADR-0005
+    (docs/adr/0005-defer-analysis-output-artifact-format.md), which defers
+    only Phase 3's own output-artifact format/location, not input
+    validation.
     """
 
 
@@ -375,6 +380,8 @@ def load_config(config_path: str) -> dict:
         raise ConfigError(f"config file not found: {config_path}") from e
     except OSError as e:
         raise ConfigError(f"could not read config file {config_path}: {e}") from e
+    except UnicodeDecodeError as e:
+        raise ConfigError(f"config file {config_path} is not valid text: {e}") from e
     except yaml.YAMLError as e:
         raise ConfigError(f"failed to parse config file {config_path}: {e}") from e
 
@@ -402,7 +409,7 @@ def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
 
     if not Path(tdse_dir).is_dir():
         print(
-            f"analysis.py: info: --tdse-dir {tdse_dir} not found; "
+            f"analysis.py: info: --tdse-dir {tdse_dir} not found or not a directory; "
             f"proceeding without TDSE-derived analysis (run_tdse: false is expected until Phase 8)",
             file=sys.stderr,
         )
