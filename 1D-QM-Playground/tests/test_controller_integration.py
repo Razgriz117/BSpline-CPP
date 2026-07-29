@@ -11,7 +11,10 @@ boundary (real binaries, real files)" that SDD Sec 9.2 calls for in addition
 to the pure-mock unit-test suite; unit tests with mocked subprocess.run
 cannot prove the real CLI flags or file contract actually line up between
 the real programs involved. (analysis.py's OWN CLI behavior, independent of
-controller.py, is proven separately by test_analysis_integration.py -- this
+controller.py, is intended to be proven separately by a future dedicated
+test file -- test_analysis_integration.py today only covers Sec 7.2.2
+file-shape parity between the real tise_solver binary and analysis.py's
+readers, called in-process, not analysis.py's CLI/subprocess behavior; this
 module only proves controller.py's correct usage of each contract.)
 
 CRITICAL test-hygiene note: the real config.yaml has run.output_dir:
@@ -130,9 +133,12 @@ class TestRunAnalysisStageRealSubprocess:
     above but for the Analysis stage. controller.run_analysis_stage's `script=`
     parameter is never overridden below, so it resolves
     controller.DEFAULT_ANALYSIS_SCRIPT -- the real analysis.py sitting next to
-    controller.py -- meaning every subprocess.run call in this class launches
-    the genuine analysis.py CLI, exactly as controller.run() would in
-    production. No mocking anywhere, matching this module's own convention.
+    controller.py -- meaning every run_analysis_stage/run() call below
+    launches the genuine analysis.py CLI, exactly as controller.run() would
+    in production. (The first two tests also subprocess-invoke the real
+    tise_solver binary first, to produce genuine fixture input -- see each
+    test's own comments.) No mocking anywhere, matching this module's own
+    convention.
     """
 
     def test_success_with_real_tise_output_and_missing_tdse_dir(
