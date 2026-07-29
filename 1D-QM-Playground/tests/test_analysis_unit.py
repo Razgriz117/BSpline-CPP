@@ -1,11 +1,13 @@
-"""Unit tests for analysis.py (docs/SDD.md Sec 7.2.2, Sec 10.2 Phase 2).
+"""Unit tests for analysis.py (docs/SDD.md Sec 7.2.2/7.2.3, Sec 10.2 Phase 2/3).
 
-Pure unit tests only: every fixture here is a hand-written .dat file written
-directly into pytest's tmp_path, shaped to match the file formats documented
-in docs/SDD.md Sec 6.3 (Persistent Storage Format) and analysis.py's own
-reader docstrings. No real subprocess invocation, and no real tise_solver
-binary is built or run anywhere in this file -- real-subprocess integration
-tests against actual TISE solver output are a separate, later task's job, in
+Pure unit tests only: every fixture here is a hand-written .dat/YAML file
+written directly into pytest's tmp_path, shaped to match the file formats
+documented in docs/SDD.md Sec 6.3 (Persistent Storage Format) and
+analysis.py's own reader docstrings. No real subprocess invocation, and no
+real tise_solver binary is built or run anywhere in this file --
+real-subprocess integration tests against actual TISE solver output (and
+against a real `analysis.py --config ... --tise-dir ... --tdse-dir ...`
+invocation) are a separate, later task's job, in
 tests/test_analysis_integration.py.
 
 Organized into one test class per analysis.py function, in the same order
@@ -16,21 +18,33 @@ error-path testing economy is handled across those three classes, mirroring
 test_controller_unit.py's own handling of shared-implementation testing (its
 TestRunStage tests _run_stage's error paths exhaustively once, rather than
 re-testing them through every caller).
+
+TestLoadConfig/TestRun/TestMain (Phase 3, Sec 7.2.3) cover the
+Controller-to-Analysis CLI added on top of the Phase 2 reader functions
+above. TestMain mocks analysis.run via unittest.mock.patch (mirroring
+test_controller_unit.py's own TestMain, which mocks controller.run the same
+way) since it exercises only argparse wiring and the AnalysisError ->
+exit-code-1 translation, not real config loading or TISE-output reading.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+import yaml
 
 from analysis import (
     AnalysisError,
+    ConfigError,
     ContinuumPoint,
     EigenvalueRow,
     PhaseShiftRow,
     TiseData,
     TiseOutputError,
+    load_config,
+    main,
     read_continuum_states,
     read_eigenvalues,
     read_eigenvectors,
@@ -38,6 +52,7 @@ from analysis import (
     read_overlap,
     read_phase_shifts,
     read_tise_output,
+    run,
 )
 
 
@@ -50,6 +65,17 @@ def _write_dat(path: Path, *lines: str) -> Path:
     field spacing, and any blank lines are all under the caller's control.
     Lines are joined with a newline plus a trailing newline at the end."""
     path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _write_yaml(path: Path, data: dict) -> Path:
+    """Write `path` as a YAML file via yaml.safe_dump -- used by the
+    TestLoadConfig/TestRun fixtures below. analysis.load_config performs no
+    schema validation (see ConfigError's docstring: Phase 3 doesn't read or
+    act on the analysis/visualization blocks' contents yet), so these
+    fixtures' `data` just needs to be some valid YAML mapping, not a
+    real/complete config.yaml."""
+    path.write_text(yaml.safe_dump(data))
     return path
 
 
@@ -522,3 +548,209 @@ class TestReadTiseOutput:
         missing_dir = tmp_path / "does_not_exist"
         with pytest.raises(TiseOutputError, match="eigenvalues"):
             read_tise_output(missing_dir)
+
+
+# ─── load_config ────────────────────────────────────────────────────────────
+
+
+class TestLoadConfig:
+    def test_valid_yaml_mapping_loads_correctly(self, tmp_path):
+        cfg = {
+            "run": {"run_tise": True, "output_dir": "out"},
+            "bspline": {"domain": [0.0, 10.0]},
+            "potential": ["{'domain': '[0, 10]', 'function': '0'}"],
+        }
+        path = _write_yaml(tmp_path / "config.yaml", cfg)
+
+        assert load_config(str(path)) == cfg
+
+    def test_missing_file_raises_config_error(self, tmp_path):
+        missing = tmp_path / "does_not_exist.yaml"
+        with pytest.raises(ConfigError, match="not found"):
+            load_config(str(missing))
+
+    def test_unparseable_yaml_raises_config_error(self, tmp_path):
+        path = tmp_path / "bad.yaml"
+        path.write_text("key: [1, 2\n")  # unclosed flow sequence -> YAMLError
+        with pytest.raises(ConfigError, match="failed to parse"):
+            load_config(str(path))
+
+    def test_non_mapping_yaml_list_raises_config_error(self, tmp_path):
+        path = tmp_path / "list.yaml"
+        path.write_text("- 1\n- 2\n")  # parses fine, but to a list, not a dict
+        with pytest.raises(ConfigError, match="did not parse to a mapping"):
+            load_config(str(path))
+
+    def test_non_mapping_yaml_scalar_raises_config_error(self, tmp_path):
+        path = tmp_path / "scalar.yaml"
+        path.write_text("just a plain scalar string\n")  # parses to a str
+        with pytest.raises(ConfigError, match="did not parse to a mapping"):
+            load_config(str(path))
+
+    def test_unreadable_path_raises_config_error(self, tmp_path):
+        # A directory is not FileNotFoundError -- open() raises
+        # IsADirectoryError, a *different* OSError subclass, exercising the
+        # generic `except OSError` branch (distinct from the
+        # FileNotFoundError-specific one above), mirroring
+        # test_controller_unit.py's TestLoadConfig test of the same shape
+        # against controller.py's own (separate) load_config.
+        with pytest.raises(ConfigError, match="could not read config file"):
+            load_config(str(tmp_path))
+
+    def test_invalid_utf8_bytes_raises_config_error_not_raw_unicode_decode_error(self, tmp_path):
+        # Regression test for a real bug caught and fixed in a prior review
+        # cycle (commit e249b89): load_config's `open(config_path, "r")`
+        # decodes lazily -- yaml.safe_load(f) is what actually triggers the
+        # decode as it reads the stream -- so invalid bytes raise
+        # UnicodeDecodeError from *inside* that call, still within this
+        # function's try block. UnicodeDecodeError is a ValueError subclass,
+        # NOT an OSError subclass, so the `except OSError` branch alone does
+        # NOT catch it; without its own `except UnicodeDecodeError` clause
+        # (mirroring _read_data_rows's identical handling for .dat files
+        # elsewhere in this module), this would propagate as a raw,
+        # uncaught UnicodeDecodeError instead of the documented ConfigError.
+        # Verified genuine by temporarily removing that except clause: this
+        # test then fails with an unhandled UnicodeDecodeError escaping
+        # pytest.raises(ConfigError), rather than a clean assertion failure.
+        path = tmp_path / "config.yaml"
+        path.write_bytes(b"\xff\xfe\x00\x01")
+        with pytest.raises(ConfigError):
+            load_config(str(path))
+
+    def test_config_error_is_subclass_of_analysis_error(self, tmp_path):
+        # Static fact about the exception hierarchy, confirmed once here
+        # rather than in every test above -- mirrors
+        # TestReadEigenvalues.test_missing_file_raises_tise_output_error's
+        # analogous one-time confirmation for TiseOutputError.
+        missing = tmp_path / "does_not_exist.yaml"
+        with pytest.raises(ConfigError) as excinfo:
+            load_config(str(missing))
+        assert isinstance(excinfo.value, AnalysisError)
+
+
+# ─── run (Controller-to-Analysis CLI, Sec 7.2.3) ────────────────────────────
+
+
+class TestRun:
+    def test_tdse_dir_missing_prints_info_note_to_stderr_and_does_not_raise(self, tmp_path, capsys):
+        config_path = _write_yaml(tmp_path / "config.yaml", {"placeholder": True})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        tdse_dir = tmp_path / "does_not_exist_tdse"  # never created
+
+        run(str(config_path), str(tise_dir), str(tdse_dir))  # must not raise
+
+        captured = capsys.readouterr()
+        assert str(tdse_dir) in captured.err
+        assert "not found or not a directory" in captured.err
+
+    def test_tdse_dir_present_is_silent_zero_stderr(self, tmp_path, capsys):
+        # The key discriminating test: an EXISTING (even empty) --tdse-dir
+        # must produce genuinely NO stderr output at all, not merely "does
+        # not raise" -- Path.is_dir() is true, so run()'s `if not
+        # Path(tdse_dir).is_dir():` note is skipped entirely.
+        config_path = _write_yaml(tmp_path / "config.yaml", {"placeholder": True})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        tdse_dir = tmp_path / "tdse"
+        tdse_dir.mkdir()  # exists, but empty -- Phase 6 doesn't read its content yet
+
+        run(str(config_path), str(tise_dir), str(tdse_dir))
+
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+
+    def test_bad_config_and_bad_tise_dir_raises_config_error_not_tise_output_error(self, tmp_path):
+        # Both config_path and tise_dir are nonexistent here -- either one
+        # alone would be enough to make run() raise. Which specific
+        # exception type comes out proves the internal call order: run()
+        # calls load_config(config_path) BEFORE read_tise_output(tise_dir),
+        # so ConfigError must fire first. pytest.raises(ConfigError) would
+        # NOT catch a TiseOutputError (they're sibling AnalysisError
+        # subclasses, neither a subclass of the other) -- if the call order
+        # were ever reversed, this test would fail with an unhandled
+        # TiseOutputError escaping instead of a clean assertion failure.
+        config_path = tmp_path / "does_not_exist.yaml"
+        tise_dir = tmp_path / "does_not_exist_tise"
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        with pytest.raises(ConfigError):
+            run(str(config_path), str(tise_dir), str(tdse_dir))
+
+    def test_missing_tise_dir_raises_tise_output_error(self, tmp_path):
+        config_path = _write_yaml(tmp_path / "config.yaml", {"placeholder": True})
+        tise_dir = tmp_path / "does_not_exist_tise"  # never created
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        with pytest.raises(TiseOutputError):
+            run(str(config_path), str(tise_dir), str(tdse_dir))
+
+    def test_tise_dir_missing_required_file_raises_tise_output_error(self, tmp_path):
+        config_path = _write_yaml(tmp_path / "config.yaml", {"placeholder": True})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        (tise_dir / "eigenvalues.dat").unlink()  # remove one required file
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        with pytest.raises(TiseOutputError, match="eigenvalues"):
+            run(str(config_path), str(tise_dir), str(tdse_dir))
+
+
+# ─── main (CLI entry point) ─────────────────────────────────────────────────
+
+
+class TestMain:
+    """analysis.run is mocked here (via unittest.mock.patch, mirroring
+    test_controller_unit.py's own TestMain against controller.run) -- these
+    tests only exercise argparse wiring and the AnalysisError ->
+    exit-code-1 translation, not any real config loading or TISE-output
+    reading."""
+
+    def test_success_returns_zero(self):
+        with patch("analysis.run") as mock_run:
+            rc = main(["--config", "config.yaml", "--tise-dir", "tise", "--tdse-dir", "tdse"])
+        assert rc == 0
+        mock_run.assert_called_once_with("config.yaml", "tise", "tdse")
+
+    def test_tise_output_error_returns_one_and_prints_to_stderr(self, capsys):
+        with patch("analysis.run") as mock_run:
+            mock_run.side_effect = TiseOutputError("boom: eigenvalues.dat missing")
+            rc = main(["--config", "config.yaml", "--tise-dir", "tise", "--tdse-dir", "tdse"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "boom: eigenvalues.dat missing" in captured.err
+
+    def test_config_error_also_returns_one_via_shared_analysis_error_catch(self, capsys):
+        # ConfigError and TiseOutputError are two DIFFERENT AnalysisError
+        # subclasses (neither a subclass of the other) -- using ConfigError
+        # here, distinct from TiseOutputError above, proves main()'s `except
+        # AnalysisError` genuinely catches the shared base class, not just
+        # TiseOutputError by coincidence.
+        with patch("analysis.run") as mock_run:
+            mock_run.side_effect = ConfigError("boom: config.yaml not found")
+            rc = main(["--config", "config.yaml", "--tise-dir", "tise", "--tdse-dir", "tdse"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "boom: config.yaml not found" in captured.err
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["--tise-dir", "tise", "--tdse-dir", "tdse"],       # --config omitted
+            ["--config", "config.yaml", "--tdse-dir", "tdse"],  # --tise-dir omitted
+            ["--config", "config.yaml", "--tise-dir", "tise"],  # --tdse-dir omitted
+        ],
+        ids=["missing_config", "missing_tise_dir", "missing_tdse_dir"],
+    )
+    def test_missing_required_flag_raises_system_exit(self, args):
+        # argparse's own standard behavior for a missing required argument:
+        # parser.parse_args() calls parser.error(), which prints usage and
+        # calls sys.exit(2) -- raising SystemExit before main() ever reaches
+        # its try/run() block. Not caught/suppressed here; that's genuinely
+        # what argparse does, and main() has no reason to intercept it.
+        with pytest.raises(SystemExit):
+            main(args)
