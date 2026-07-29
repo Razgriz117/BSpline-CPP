@@ -1,17 +1,22 @@
-"""analysis.py -- TISE-output reading layer for the 1D QM Playground.
+"""analysis.py -- TISE-output reading layer and CLI for the 1D QM Playground.
 
 Reads the files the TISE solver writes under data/tise/ and parses them
 into plain Python containers, per docs/SDD.md Sec 7.2.2 (TISE Solver to
-Analysis) and Sec 6.3 (Persistent Storage Format).
+Analysis) and Sec 6.3 (Persistent Storage Format). Also implements the
+Controller-to-Analysis subprocess CLI (Sec 7.2.3):
 
-Phase 2 scope only (docs/SDD.md Sec 10.2): this module implements ONLY the
-data-reading side of the TISE-to-Analysis contract -- six reader functions
-plus read_tise_output(), the aggregator that bundles their results into one
-TiseData. Deliberately NOT implemented here (all later phases):
-  - No CLI, no main(), no argparse, no `if __name__ == "__main__":` block
-    -- the Controller-to-Analysis subprocess invocation (Sec 7.2.3,
-    `analysis.py --config <path> --tise-dir <path> --tdse-dir <path>`) is
-    a future phase.
+    analysis.py --config <config.yaml> --tise-dir <data/tise/> --tdse-dir <data/tdse/>
+
+Phase 3 scope (docs/SDD.md Sec 10.2, Sec 7.2.3): main()/run()/load_config()
+implement that CLI's subprocess/exit-code contract -- load config.yaml
+independently of controller.py, read the required data/tise/ output (the
+six reader functions plus read_tise_output(), from Phase 2, unchanged
+here), and tolerate --tdse-dir not existing (Sec 5.4.4: run_tdse: false is
+expected until Phase 8). Deliberately still NOT implemented here (later
+phases):
+  - No reading of data/tdse/ *content* -- only --tdse-dir's existence is
+    checked; actually reading snapshot_NNNNN.dat/observables.dat (Sec
+    7.2.5) is Phase 6's job.
   - No reading of data/tise/warnings.json -- that sidecar is a
     Controller-facing artifact (Sec 8), not one of Sec 7.2.2's Analysis
     inputs.
@@ -20,16 +25,25 @@ TiseData. Deliberately NOT implemented here (all later phases):
   - No plotting.
   - No computation of any REQ-F-060 quantity (bound-state populations,
     expectation values, spectral distributions, etc.) -- those require
-    TDSE output (Sec 7.2.5) too and are a much later phase.
+    TDSE output (Sec 7.2.5) too and are Phase 8's job.
+  - No output artifact of any kind: no plot files, no derived-data files,
+    no data/analysis/ directory, no placeholder stdout payload. run()
+    computes and writes nothing -- deliberately deferred per ADR-0005
+    (docs/adr/0005-defer-analysis-output-artifact-format.md), not an
+    oversight.
 """
 
 from __future__ import annotations
 
+import argparse
 import math
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
+
+import yaml
 
 # Matches continuum_state_NNN.dat filenames, capturing the numeric index.
 # Deliberately \d+ rather than \d{3}: Sec 6.3 documents zero-padded 3-digit
@@ -51,6 +65,18 @@ class TiseOutputError(AnalysisError):
     Raised by read_phase_shifts/read_continuum_states only when their
     file(s) are PRESENT but malformed -- both tolerate their file(s) being
     simply absent (see those functions' docstrings) by returning [] instead.
+    """
+
+
+class ConfigError(AnalysisError):
+    """config.yaml could not be loaded for Analysis (missing, unreadable,
+    unparseable, or not a mapping).
+
+    Deliberately narrower than controller.ConfigValidationError: this
+    module's load_config() performs none of controller.py's solver-specific
+    schema checks (potential-piece tiling, bspline.domain, run.run_tise/
+    output_dir) -- Phase 3 doesn't read or act on the `analysis`/
+    `visualization` blocks' contents yet (see ADR-0005, docs/adr/0005-defer-analysis-output-artifact-format.md).
     """
 
 
@@ -331,3 +357,74 @@ def read_tise_output(tise_dir: Path) -> TiseData:
         phase_shifts=phase_shifts,
         continuum_states=continuum_states,
     )
+
+
+# ─── Controller-to-Analysis CLI (Sec 7.2.3) ─────────────────────────────────
+
+
+def load_config(config_path: str) -> dict:
+    """Load and parse config.yaml, independently of controller.py.
+
+    Raises ConfigError (never a raw exception) if the file doesn't exist,
+    can't be read, fails to parse as YAML, or doesn't parse to a mapping.
+    """
+    try:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+    except FileNotFoundError as e:
+        raise ConfigError(f"config file not found: {config_path}") from e
+    except OSError as e:
+        raise ConfigError(f"could not read config file {config_path}: {e}") from e
+    except yaml.YAMLError as e:
+        raise ConfigError(f"failed to parse config file {config_path}: {e}") from e
+
+    if not isinstance(cfg, dict):
+        raise ConfigError(
+            f"config file {config_path} did not parse to a mapping (got {type(cfg).__name__})"
+        )
+    return cfg
+
+
+def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
+    """Run Analysis's Phase 3 scope (Sec 7.2.3, Sec 10.2 Phase 3).
+
+    Loads `config_path`, reads the required data/tise/ output at
+    `tise_dir` (raises TiseOutputError if missing/malformed -- Sec 7.2.2's
+    required files are non-optional), and tolerates `tdse_dir` not
+    existing (Sec 5.4.4: run_tdse: false is expected until Phase 8) with a
+    stderr note rather than raising. Computes and writes nothing (ADR-0005).
+
+    Raises AnalysisError (ConfigError or TiseOutputError) on failure;
+    never a raw exception.
+    """
+    load_config(config_path)
+    read_tise_output(Path(tise_dir))
+
+    if not Path(tdse_dir).is_dir():
+        print(
+            f"analysis.py: info: --tdse-dir {tdse_dir} not found; "
+            f"proceeding without TDSE-derived analysis (run_tdse: false is expected until Phase 8)",
+            file=sys.stderr,
+        )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="analysis.py",
+        description="Analysis for the 1D QM Playground: reads TISE/TDSE output per config.yaml (Sec 7.2.3).",
+    )
+    parser.add_argument("--config", required=True, help="path to config.yaml")
+    parser.add_argument("--tise-dir", required=True, help="path to data/tise/ (required)")
+    parser.add_argument("--tdse-dir", required=True, help="path to data/tdse/ (tolerated absent)")
+    args = parser.parse_args(argv)
+
+    try:
+        run(args.config, args.tise_dir, args.tdse_dir)
+    except AnalysisError as e:
+        print(f"analysis.py: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
