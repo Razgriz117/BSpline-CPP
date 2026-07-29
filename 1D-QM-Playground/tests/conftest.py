@@ -6,12 +6,13 @@ root is on sys.path. This shim makes that import work regardless of the
 directory pytest is invoked from.
 
 This file also hosts the fixtures shared by the real-subprocess integration
-suite (tests/test_controller_integration.py, Task 5): `tise_solver_binary`
-(builds/locates the real tise_solver binary) and `tmp_config` (a tmp_path-
-scoped copy of the real config.yaml with run.output_dir redirected away from
-the real project's ./data). test_controller_unit.py does not use either
-fixture -- it mocks subprocess.run and never touches a real binary or the
-real config.yaml.
+suites (tests/test_controller_integration.py, Task 5, and
+tests/test_analysis_integration.py): `tise_solver_binary` (builds/locates
+the real tise_solver binary) and `tmp_config` (a tmp_path-scoped copy of the
+real config.yaml with run.output_dir redirected away from the real
+project's ./data). test_controller_unit.py does not use either fixture --
+it mocks subprocess.run and never touches a real binary or the real
+config.yaml.
 """
 
 import subprocess

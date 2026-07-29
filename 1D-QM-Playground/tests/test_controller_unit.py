@@ -1,16 +1,24 @@
-"""Unit tests for controller.py (docs/SDD.md Sec 7.2.1, Sec 10.2 Phase 1).
+"""Unit tests for controller.py (docs/SDD.md Sec 7.2.1/7.2.3, Sec 10.2 Phase 1/3).
 
-Pure unit tests only: no real subprocess invocation of tise_solver, and no
-real filesystem writes that stand in for the solver's own output. Wherever
-controller.py talks to a subprocess (`_run_stage`, `run_tise_solver`),
-`subprocess.run` is mocked via `unittest.mock.patch`; where run_tise_solver's
-own `Path.mkdir` call needs to fail, `Path.mkdir` itself is patched instead
-of touching a real binary. Real-subprocess integration tests against the
-actual tise_solver binary are Task 5's job, in a separate test module in
-this same tests/ directory.
+Pure unit tests only: no real subprocess invocation of tise_solver or
+analysis.py, and no real filesystem writes that stand in for either
+subprocess's own output. Wherever controller.py talks to a subprocess
+(`_run_stage`, `run_tise_solver`, `run_analysis_stage`), `subprocess.run` is
+mocked via `unittest.mock.patch`; where run_tise_solver's own `Path.mkdir`
+call needs to fail, `Path.mkdir` itself is patched instead of touching a
+real binary. Real-subprocess integration tests against the actual
+tise_solver binary (Task 5's job) and, added this phase, against the real
+analysis.py script (Sec 7.2.3) both live in a separate test module in this
+same tests/ directory, test_controller_integration.py.
 
 Organized into one test class per controller.py function, in roughly the
 same order those functions appear in controller.py.
+
+TestRunAnalysisStage (Sec 7.2.3, Phase 3) covers run_analysis_stage's own
+mocked-subprocess dispatch, mirroring TestRunTiseSolver's structure
+immediately above it. The Analysis-dispatch tests within
+TestRunOrchestrationGuards (also Phase 3) mock `run_analysis_stage` the same
+way that class's TISE-dispatch tests mock `run_tise_solver`.
 """
 
 from __future__ import annotations
