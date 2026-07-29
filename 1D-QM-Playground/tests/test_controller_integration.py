@@ -142,7 +142,7 @@ class TestRunAnalysisStageRealSubprocess:
     """
 
     def test_success_with_real_tise_output_and_missing_tdse_dir(
-        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path, capsys
     ):
         # Run the real tise_solver first (exactly as
         # TestRunTiseSolverRealSubprocess does) to produce a genuine
@@ -157,6 +157,22 @@ class TestRunAnalysisStageRealSubprocess:
         # just a direct in-process call to analysis.run().
         tdse_dir = tmp_path / "data" / "tdse"
         run_analysis_stage(str(tmp_config), tise_dir, tdse_dir)
+
+        # run_analysis_stage is called IN-PROCESS here (this test never
+        # shells out to controller.py itself), so capsys observes THIS
+        # process's stderr. The real analysis.py subprocess prints its own
+        # "--tdse-dir ... not found" info note to ITS stderr -- Analysis's
+        # only channel back to a user at all, since it produces no output
+        # artifact of any kind (ADR-0005) -- and run_analysis_stage must
+        # relay that captured stderr onward rather than silently
+        # discarding it. This is the real-subprocess proof that the relay
+        # fix actually works end to end, not just against a mocked
+        # CompletedProcess (see test_controller_unit.py's
+        # TestRunAnalysisStage.test_success_relays_stderr_to_controller_stderr
+        # for the mocked equivalent).
+        captured = capsys.readouterr()
+        assert "--tdse-dir" in captured.err
+        assert "not found or not a directory" in captured.err
 
     def test_failure_on_unpopulated_tise_dir_raises_solver_stage_error(self, tmp_config: Path, tmp_path: Path):
         # tise_solver_binary is deliberately NOT requested here: tise_dir

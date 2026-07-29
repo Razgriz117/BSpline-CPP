@@ -520,6 +520,52 @@ class TestRunAnalysisStage:
             text=True,
         )
 
+    @pytest.mark.parametrize(
+        "stderr_text",
+        [
+            "analysis.py: info: --tdse-dir /x/tdse not found or not a directory; "
+            "proceeding without TDSE-derived analysis (run_tdse: false is expected until Phase 8)\n",
+            "no trailing newline on this one",
+        ],
+        ids=["trailing-newline", "no-trailing-newline"],
+    )
+    def test_success_relays_stderr_to_controller_stderr(self, tmp_path, capsys, stderr_text):
+        # Analysis produces NO output artifact of any kind (ADR-0005) --
+        # stderr is its ONLY channel back to a user running the full
+        # pipeline through controller.py (e.g. its own "--tdse-dir ... not
+        # found" info note). Before this fix, _run_stage's returned
+        # CompletedProcess.stderr was silently discarded on the success
+        # path here; it must now reach the Controller's own stderr, with
+        # exactly one trailing newline regardless of whether Analysis's own
+        # stderr already ended with one (the two parametrize cases above).
+        tise_dir = tmp_path / "tise"
+        tdse_dir = tmp_path / "tdse"
+        with patch("controller.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=["x"], returncode=0, stdout="", stderr=stderr_text
+            )
+            run_analysis_stage("c.yaml", tise_dir, tdse_dir, script=Path("/fake/analysis.py"))
+
+        captured = capsys.readouterr()
+        assert captured.err == stderr_text.rstrip("\n") + "\n"
+        # stdout is not relayed (analysis.py's design never writes to
+        # stdout -- ADR-0005) -- confirms no accidental over-relay.
+        assert captured.out == ""
+
+    def test_success_with_empty_stderr_prints_nothing(self, tmp_path, capsys):
+        # The common case exercised by every other test in this class
+        # (stderr=""): must remain a silent no-op, not print a spurious
+        # blank line.
+        tise_dir = tmp_path / "tise"
+        tdse_dir = tmp_path / "tdse"
+        with patch("controller.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=["x"], returncode=0, stdout="", stderr="")
+            run_analysis_stage("c.yaml", tise_dir, tdse_dir, script=Path("/fake/analysis.py"))
+
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+
 
 # ─── read_warnings ───────────────────────────────────────────────────────────
 

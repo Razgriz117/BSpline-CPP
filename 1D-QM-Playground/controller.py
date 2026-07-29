@@ -313,12 +313,24 @@ def run_analysis_stage(
     one is Analysis's own contract to handle (Sec 5.4.4: absent tdse_dir
     tolerated; absent/malformed tise_dir a hard TiseOutputError), not
     something the Controller should paper over.
+
+    On success, relays Analysis's captured stderr (if any) to the
+    Controller's own stderr. This matters because, unlike the TISE stage
+    (which signals success-path information via the data/tise/warnings.json
+    sidecar file -- see read_warnings/print_warnings), Analysis produces no
+    output artifact of any kind (ADR-0005): stderr is its ONLY channel back
+    to a user running the full pipeline through controller.py, e.g. its own
+    "--tdse-dir ... not found" info note. On failure, Analysis's stderr
+    already reaches the user via the SolverStageError message _run_stage
+    raises, so this relay only needs to cover the success path.
     """
-    _run_stage(
+    result = _run_stage(
         "Analysis",
         [sys.executable, str(script), "--config", config_path,
          "--tise-dir", str(tise_dir), "--tdse-dir", str(tdse_dir)],
     )
+    if result.stderr:
+        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
 
 
 def read_warnings(tise_output_dir: Path) -> list[dict]:
