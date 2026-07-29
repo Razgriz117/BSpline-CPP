@@ -1,20 +1,38 @@
-"""Real-subprocess integration tests for the TISE Solver<->Analysis contract
-(docs/SDD.md Sec 7.2.2, Sec 9.2).
+"""Real-subprocess integration tests for two related Analysis-side contracts
+(docs/SDD.md Sec 9.2): the TISE Solver<->Analysis file-shape contract (Sec
+7.2.2) and analysis.py's OWN Controller<->Analysis CLI/subprocess contract
+(Sec 7.2.3).
 
-Unlike test_analysis_unit.py -- where every fixture is a hand-written .dat
-file written directly into tmp_path, shaped by hand to match the documented
-file formats, and the real tise_solver binary is never built or run -- every
-test in this module drives controller.run_tise_solver against the REAL,
+The first three classes below (TestNoContinuumRealRoundTrip,
+TestContinuumEnabledRealRoundTrip, TestRepeatedRunOverwritesConsistently)
+cover Sec 7.2.2: unlike test_analysis_unit.py -- where every fixture is a
+hand-written .dat file written directly into tmp_path, shaped by hand to
+match the documented file formats, and the real tise_solver binary is never
+built or run -- each drives controller.run_tise_solver against the REAL,
 compiled tise_solver binary, then reads its REAL on-disk output with
-analysis.read_tise_output. Per docs/SDD.md Sec 9.2 ("Each inter-component
-interface in Sec 7.2 gets a contract test that exercises the real subprocess
-boundary"): Sec 7.2.2 itself has no subprocess relationship between TISE and
-Analysis (only the Controller invokes TISE as a subprocess; Analysis just
-reads files off disk), so what this file proves is that the real
-tise_solver binary's actual output and analysis.py's readers genuinely agree
-end to end on file shape -- NOT any unit-level parsing/error-path/tolerance
-logic, which test_analysis_unit.py already covers exhaustively with
-hand-written fixtures.
+analysis.read_tise_output (called in-process). Sec 7.2.2 itself has no
+subprocess relationship between TISE and Analysis (only the Controller
+invokes TISE as a subprocess; Analysis just reads files off disk), so what
+these three classes prove is that the real tise_solver binary's actual
+output and analysis.py's readers genuinely agree end to end on file shape --
+NOT any unit-level parsing/error-path/tolerance logic, which
+test_analysis_unit.py already covers exhaustively with hand-written
+fixtures.
+
+TestAnalysisCliRealSubprocess, below, instead covers Sec 7.2.3: it invokes
+`python3.10 analysis.py --config ... --tise-dir ... --tdse-dir ...` as a raw
+subprocess (subprocess.run([sys.executable, <path-to-analysis.py>, ...])) --
+never calling read_tise_output() or anything else from analysis.py
+in-process, and never importing or invoking controller.py except for
+run_tise_solver, used purely to produce real data/tise/ fixture input
+exactly as the three classes above already do. This proves analysis.py's
+own CLI is "independently runnable and testable without the Controller in
+the loop" (SDD Sec 2.4) -- distinct from test_controller_integration.py's
+TestRunAnalysisStageRealSubprocess, which proves controller.py's correct
+*usage* of this same Sec 7.2.3 contract (via controller.run_analysis_stage/
+run(), which resolve controller.DEFAULT_ANALYSIS_SCRIPT internally), not
+analysis.py's own CLI behavior under malformed/incomplete argv -- which only
+TestAnalysisCliRealSubprocess covers.
 
 CRITICAL test-hygiene note: exactly like test_controller_integration.py, the
 real config.yaml has run.output_dir: "./data". NOTHING in this module ever
@@ -32,6 +50,8 @@ it.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -41,6 +61,13 @@ from analysis import ContinuumPoint, EigenvalueRow, PhaseShiftRow, read_tise_out
 from controller import run_tise_solver
 
 pytestmark = pytest.mark.integration
+
+# analysis.py's own script path, computed locally -- deliberately NOT
+# imported from controller.DEFAULT_ANALYSIS_SCRIPT (see
+# TestAnalysisCliRealSubprocess below), so this file's independence from
+# controller.py stays literal for the one thing under test in that class:
+# analysis.py's CLI itself.
+_ANALYSIS_SCRIPT = Path(__file__).resolve().parent.parent / "analysis.py"
 
 
 # Mirrors TISE/tise_solver_main.cpp's own placeholder-dimension constants
@@ -202,3 +229,149 @@ class TestRepeatedRunOverwritesConsistently:
         assert len(second.eigenvalues) == _NUM_EIGENSTATES
         assert len(second.phase_shifts) == 3
         assert len(second.continuum_states) == 3
+
+
+# ─── analysis.py's OWN CLI/subprocess contract (Sec 7.2.3), invoked directly ─
+
+
+class TestAnalysisCliRealSubprocess:
+    """Proves analysis.py's OWN CLI/subprocess contract (docs/SDD.md Sec
+    7.2.3) directly: every test below invokes
+    `python3.10 analysis.py --config ... --tise-dir ... --tdse-dir ...` as a
+    raw subprocess (subprocess.run([sys.executable, str(_ANALYSIS_SCRIPT),
+    ...])) -- controller.py is never imported or invoked as the thing under
+    test anywhere in this class (the module-level `from controller import
+    run_tise_solver` is used below only to produce a real data/tise/
+    fixture, exactly as TestNoContinuumRealRoundTrip above already does; it
+    never runs analysis.py itself). This is the "independently runnable and
+    testable without the Controller in the loop" principle (SDD Sec 2.4)
+    applied to analysis.py specifically, and is deliberately distinct from
+    test_controller_integration.py's TestRunAnalysisStageRealSubprocess:
+    that class proves controller.py's correct *usage* of this same Sec
+    7.2.3 contract (via controller.run_analysis_stage/run(), which resolve
+    controller.DEFAULT_ANALYSIS_SCRIPT internally) -- it does not, and
+    should not, exercise analysis.py's own argv handling (a missing
+    individual flag, a missing config file, etc.) the way this class does.
+    _ANALYSIS_SCRIPT (module level, above) is computed locally from
+    __file__, NOT imported from controller.DEFAULT_ANALYSIS_SCRIPT, so that
+    independence-from-Controller framing stays literal.
+    """
+
+    def test_success_missing_tdse_dir_exits_zero_with_info_note_on_stderr(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # Build a real data/tise/ directory first (exactly as
+        # TestNoContinuumRealRoundTrip does above) -- Analysis's required
+        # input (Sec 7.2.2). run_tise_solver is Controller-side plumbing
+        # used only to produce this fixture; the subprocess actually under
+        # test below is analysis.py itself, invoked directly.
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(tmp_config), tise_dir, binary=tise_solver_binary)
+
+        # tdse_dir is deliberately a path that was never created -- Sec
+        # 5.4.4's tolerated case (run_tdse: false is expected until Phase
+        # 8). Proves that tolerance survives the real subprocess/CLI
+        # boundary, invoked with no controller.py anywhere in the loop.
+        tdse_dir = tmp_path / "data" / "tdse"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_ANALYSIS_SCRIPT),
+                "--config", str(tmp_config),
+                "--tise-dir", str(tise_dir),
+                "--tdse-dir", str(tdse_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout == ""
+        assert "info" in result.stderr
+        assert "--tdse-dir" in result.stderr
+        assert "not found or not a directory" in result.stderr
+
+    def test_missing_tise_dir_exits_one_with_eigenvalues_error_on_stderr(
+        self, tmp_config: Path, tmp_path: Path
+    ):
+        # tise_dir deliberately never created/populated -- read_tise_output's
+        # first call, read_eigenvalues(), fails the moment it can't read
+        # eigenvalues.dat (Sec 7.2.2: the four core files are non-optional),
+        # run() lets the resulting TiseOutputError propagate, and main()
+        # catches it (AnalysisError) and exits 1 -- proven here directly
+        # against the CLI, without controller.py or its
+        # run_analysis_stage/SolverStageError wrapping anywhere in the loop.
+        tise_dir = tmp_path / "data" / "tise"
+        tdse_dir = tmp_path / "data" / "tdse"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_ANALYSIS_SCRIPT),
+                "--config", str(tmp_config),
+                "--tise-dir", str(tise_dir),
+                "--tdse-dir", str(tdse_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "eigenvalues" in result.stderr
+
+    def test_missing_config_exits_one_with_config_error_on_stderr(self, tmp_path: Path):
+        # A --config path that was never created -- exercises analysis.py's
+        # own load_config()/ConfigError path directly, deliberately NOT
+        # using the tmp_config fixture (which always points at a real,
+        # valid file). tise_dir/tdse_dir are never created either, but
+        # load_config() runs first inside run(), so this never reaches
+        # read_tise_output().
+        nonexistent_config = tmp_path / "nonexistent_config.yaml"
+        tise_dir = tmp_path / "data" / "tise"
+        tdse_dir = tmp_path / "data" / "tdse"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_ANALYSIS_SCRIPT),
+                "--config", str(nonexistent_config),
+                "--tise-dir", str(tise_dir),
+                "--tdse-dir", str(tdse_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "not found" in result.stderr
+
+    def test_missing_required_flag_exits_two_via_argparse(self, tmp_config: Path, tmp_path: Path):
+        # --tdse-dir omitted entirely. This is argparse's OWN
+        # required-argument enforcement (all three of analysis.py main()'s
+        # parser.add_argument(..., required=True) flags), firing before
+        # analysis.run() -- and therefore before load_config()/
+        # read_tise_output() -- is ever reached. Not something to change,
+        # only to confirm: exit code 2 and argparse's own usage/error text
+        # are Python's standard argparse behavior, not analysis.py's own
+        # error-handling code path.
+        tise_dir = tmp_path / "data" / "tise"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_ANALYSIS_SCRIPT),
+                "--config", str(tmp_config),
+                "--tise-dir", str(tise_dir),
+                # --tdse-dir deliberately omitted
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 2
+        assert result.stdout == ""
+        assert "usage" in result.stderr
+        assert "--tdse-dir" in result.stderr
