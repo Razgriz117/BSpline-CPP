@@ -11,11 +11,11 @@ boundary (real binaries, real files)" that SDD Sec 9.2 calls for in addition
 to the pure-mock unit-test suite; unit tests with mocked subprocess.run
 cannot prove the real CLI flags or file contract actually line up between
 the real programs involved. (analysis.py's OWN CLI behavior, independent of
-controller.py, is intended to be proven separately by a future dedicated
-test file -- test_analysis_integration.py today only covers Sec 7.2.2
-file-shape parity between the real tise_solver binary and analysis.py's
-readers, called in-process, not analysis.py's CLI/subprocess behavior; this
-module only proves controller.py's correct usage of each contract.)
+controller.py, is proven separately by test_analysis_integration.py's
+TestAnalysisCliRealSubprocess class, which invokes analysis.py directly as
+a raw subprocess with no controller.py involvement at all; this module
+only proves controller.py's correct *usage* of each contract, not
+analysis.py's own CLI behavior under malformed/incomplete argv.)
 
 CRITICAL test-hygiene note: the real config.yaml has run.output_dir:
 "./data". NOTHING in this module ever runs the solver against that raw
