@@ -70,6 +70,28 @@ pytestmark = pytest.mark.integration
 _ANALYSIS_SCRIPT = Path(__file__).resolve().parent.parent / "analysis.py"
 
 
+def _run_analysis_cli(config_path: Path | str, tise_dir: Path, tdse_dir: Path) -> subprocess.CompletedProcess:
+    """Invoke analysis.py's own CLI as a raw subprocess with all three
+    required flags, returning the CompletedProcess for the caller to assert
+    on. Used by TestAnalysisCliRealSubprocess below for its three scenarios
+    that supply all three flags; the one scenario that omits a flag
+    entirely (argparse's own required-flag enforcement) builds its argv
+    inline instead, since it doesn't fit this helper's fixed three-flag
+    shape.
+    """
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_ANALYSIS_SCRIPT),
+            "--config", str(config_path),
+            "--tise-dir", str(tise_dir),
+            "--tdse-dir", str(tdse_dir),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
 # Mirrors TISE/tise_solver_main.cpp's own placeholder-dimension constants
 # (kPlaceholderNumEigenstates, kPlaceholderBasisSize, kPlaceholderBandwidth,
 # as of commit be3a403, confirmed by manually running the built binary
@@ -235,26 +257,13 @@ class TestRepeatedRunOverwritesConsistently:
 
 
 class TestAnalysisCliRealSubprocess:
-    """Proves analysis.py's OWN CLI/subprocess contract (docs/SDD.md Sec
-    7.2.3) directly: every test below invokes
-    `python3.10 analysis.py --config ... --tise-dir ... --tdse-dir ...` as a
-    raw subprocess (subprocess.run([sys.executable, str(_ANALYSIS_SCRIPT),
-    ...])) -- controller.py is never imported or invoked as the thing under
-    test anywhere in this class (the module-level `from controller import
-    run_tise_solver` is used below only to produce a real data/tise/
-    fixture, exactly as TestNoContinuumRealRoundTrip above already does; it
-    never runs analysis.py itself). This is the "independently runnable and
-    testable without the Controller in the loop" principle (SDD Sec 2.4)
-    applied to analysis.py specifically, and is deliberately distinct from
-    test_controller_integration.py's TestRunAnalysisStageRealSubprocess:
-    that class proves controller.py's correct *usage* of this same Sec
-    7.2.3 contract (via controller.run_analysis_stage/run(), which resolve
-    controller.DEFAULT_ANALYSIS_SCRIPT internally) -- it does not, and
-    should not, exercise analysis.py's own argv handling (a missing
-    individual flag, a missing config file, etc.) the way this class does.
-    _ANALYSIS_SCRIPT (module level, above) is computed locally from
-    __file__, NOT imported from controller.DEFAULT_ANALYSIS_SCRIPT, so that
-    independence-from-Controller framing stays literal.
+    """Four scenarios invoking analysis.py's CLI directly as a raw
+    subprocess: success with a real data/tise/ directory and a missing
+    --tdse-dir (exit 0), a missing/unpopulated --tise-dir (exit 1), a
+    missing --config (exit 1), and a missing required flag -- argparse's
+    own enforcement (exit 2). See this file's module docstring above for
+    why this class exists and how it differs from
+    test_controller_integration.py's TestRunAnalysisStageRealSubprocess.
     """
 
     def test_success_missing_tdse_dir_exits_zero_with_info_note_on_stderr(
@@ -274,17 +283,7 @@ class TestAnalysisCliRealSubprocess:
         # boundary, invoked with no controller.py anywhere in the loop.
         tdse_dir = tmp_path / "data" / "tdse"
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(_ANALYSIS_SCRIPT),
-                "--config", str(tmp_config),
-                "--tise-dir", str(tise_dir),
-                "--tdse-dir", str(tdse_dir),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        result = _run_analysis_cli(tmp_config, tise_dir, tdse_dir)
 
         assert result.returncode == 0
         assert result.stdout == ""
@@ -305,17 +304,7 @@ class TestAnalysisCliRealSubprocess:
         tise_dir = tmp_path / "data" / "tise"
         tdse_dir = tmp_path / "data" / "tdse"
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(_ANALYSIS_SCRIPT),
-                "--config", str(tmp_config),
-                "--tise-dir", str(tise_dir),
-                "--tdse-dir", str(tdse_dir),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        result = _run_analysis_cli(tmp_config, tise_dir, tdse_dir)
 
         assert result.returncode == 1
         assert result.stdout == ""
@@ -332,17 +321,7 @@ class TestAnalysisCliRealSubprocess:
         tise_dir = tmp_path / "data" / "tise"
         tdse_dir = tmp_path / "data" / "tdse"
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(_ANALYSIS_SCRIPT),
-                "--config", str(nonexistent_config),
-                "--tise-dir", str(tise_dir),
-                "--tdse-dir", str(tdse_dir),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        result = _run_analysis_cli(nonexistent_config, tise_dir, tdse_dir)
 
         assert result.returncode == 1
         assert result.stdout == ""
