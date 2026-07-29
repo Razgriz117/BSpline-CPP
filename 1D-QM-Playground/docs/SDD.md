@@ -96,6 +96,7 @@ Explicitly **out of scope** for the version of the system this SDD describes:
 - The FEDVR basis as an alternative to B-splines ([ADR-0001](adr/0001-defer-fedvr-basis.md)).
 - WKB-proportional node placement ([ADR-0002](adr/0002-defer-wkb-collocation.md)).
 - A parameterized visualization schema — plot ranges, state subsets, etc. ([ADR-0004](adr/0004-defer-visualization-plot-parameters.md)).
+- The Analysis module's output artifact — whether/where/how it produces any file or stdout output at all, as distinct from ADR-0004's narrower plot-parameter question above ([ADR-0005](adr/0005-defer-analysis-output-artifact-format.md)).
 - Outer-boundary treatments beyond the domain-geometry/asymptote logic of REQ-F-030 — specifically complex absorbing potentials, outgoing-wave (Siegert) boundary conditions, and exterior complex scaling, which remain genuinely undecided ([§12.B](#b-open-design-questions)).
 
 ### 1.3 Intended Audience
@@ -173,7 +174,7 @@ The stated long-term goal (`1D-QM-Playground/README.md`) is a solver suitable fo
 2. Propagate a state under that Hamiltonian, with an optional external driving field.
 3. Compute and visualize a defined set of physical observables from both (REQ-F-060).
 
-The system is explicitly scoped to be simple and self-contained rather than maximally general — see [§1.2](#12-scope) and the deferred-extension ADRs (ADR-0001 through ADR-0004).
+The system is explicitly scoped to be simple and self-contained rather than maximally general — see [§1.2](#12-scope) and the deferred-extension ADRs (ADR-0001 through ADR-0005).
 
 ### 2.3 System Context
 
@@ -225,6 +226,7 @@ Additional non-functional requirements (e.g., performance targets, portability) 
 | *(ADR-0002)* | WKB-proportional collocation | [§5.2](#52-tise-solver) | — | — | Deferred — see ADR-0002 |
 | *(ADR-0003)* | Multi-particle / 3D extension | [§5.1](#51-controller), [§3.1](#31-functional-requirements) (REQ-F-010 scope) | — | — | Deferred — see ADR-0003 |
 | *(ADR-0004)* | Visualization plot-parameter schema | [§5.4](#54-analysis-module), [§6.1](#61-configuration-schema) | — | — | Deferred — see ADR-0004 |
+| *(ADR-0005)* | Analysis output-artifact format (file/plot existence, location, shape) | [§5.4](#54-analysis-module), [§7.2.3](#723-controller-to-analysis) | — | — | Deferred — see ADR-0005 |
 | *([§12.B](#b-open-design-questions))* | CAP / outgoing-wave BC / exterior complex scaling | [§5.2](#52-tise-solver) (related to REQ-F-030) | — | — | Open — see [§12.B](#b-open-design-questions) |
 
 ---
@@ -974,7 +976,7 @@ Each subsection below is a complete, standalone contract per [§2.4](#24-assumpt
 - **Direction:** Controller invokes Analysis as a subprocess.
 - **Invocation:** `analysis.py --config <config.yaml> --tise-dir <data/tise/> --tdse-dir <data/tdse/>`.
 - **Inputs:** `analysis`, `visualization` config blocks ([§6.1](#61-configuration-schema)); `--tise-dir`/`--tdse-dir` paths.
-- **Outputs:** plots/derived data (format not yet fixed — matures alongside ADR-0004's revisit trigger); process exit code.
+- **Outputs:** none in Phase 3 — no plots, no derived-data files, no placeholder artifact of any kind ([ADR-0005](adr/0005-defer-analysis-output-artifact-format.md)); once REQ-F-060 quantities are computable, expected outputs are plots/derived data whose format/location is not yet fixed and matures alongside ADR-0005's revisit trigger (a broader question than ADR-0004's `visualization` plot-*parameter* scope); process exit code.
 - **Success/failure:** as [§7.2.1](#721-controller-to-tise-solver). This contract is revisited/extended in [§10](#10-implementation-roadmap-and-phasing) Phase 7 once TDSE output also needs to be consumed.
 - **Related:** REQ-F-060.
 
