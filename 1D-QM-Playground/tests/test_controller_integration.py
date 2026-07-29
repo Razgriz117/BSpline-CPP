@@ -1,14 +1,18 @@
-"""Real-subprocess integration tests for the Controller<->TISE Solver
-contract (docs/SDD.md Sec 7.2.1, Sec 9.2).
+"""Real-subprocess integration tests for controller.py's own use of two
+Controller-side inter-component contracts: Controller<->TISE Solver
+(docs/SDD.md Sec 7.2.1) and Controller<->Analysis (Sec 7.2.3), per Sec 9.2.
 
 Unlike test_controller_unit.py -- which mocks subprocess.run and never
 spawns a real process -- every test in this module drives
-controller.run_tise_solver (or controller.run) against the REAL, compiled
-tise_solver binary, reading and writing REAL files on disk. This is the
-"real subprocess boundary (real binaries, real files)" that SDD Sec 9.2
-calls for in addition to the pure-mock unit-test suite; unit tests with
-mocked subprocess.run cannot prove the real CLI flags or file contract
-actually line up between the two real programs.
+controller.run_tise_solver, controller.run_analysis_stage, or controller.run
+against the REAL, compiled tise_solver binary and/or the REAL analysis.py
+script, reading and writing REAL files on disk. This is the "real subprocess
+boundary (real binaries, real files)" that SDD Sec 9.2 calls for in addition
+to the pure-mock unit-test suite; unit tests with mocked subprocess.run
+cannot prove the real CLI flags or file contract actually line up between
+the real programs involved. (analysis.py's OWN CLI behavior, independent of
+controller.py, is proven separately by test_analysis_integration.py -- this
+module only proves controller.py's correct usage of each contract.)
 
 CRITICAL test-hygiene note: the real config.yaml has run.output_dir:
 "./data". NOTHING in this module ever runs the solver against that raw
@@ -30,7 +34,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from controller import SolverStageError, run, run_tise_solver
+from controller import SolverStageError, run, run_analysis_stage, run_tise_solver
 
 pytestmark = pytest.mark.integration
 
@@ -115,6 +119,88 @@ class TestRunTiseSolverRealSubprocess:
         # n_energies, so this assertion would have failed (tise_dir held 5
         # files, not 0) against the pre-fix binary.
         assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
+
+# ─── run_analysis_stage against the real analysis.py script ────────────────
+
+
+class TestRunAnalysisStageRealSubprocess:
+    """Proves controller.py's real-subprocess use of the Controller<->Analysis
+    contract (docs/SDD.md Sec 7.2.3), mirroring TestRunTiseSolverRealSubprocess
+    above but for the Analysis stage. controller.run_analysis_stage's `script=`
+    parameter is never overridden below, so it resolves
+    controller.DEFAULT_ANALYSIS_SCRIPT -- the real analysis.py sitting next to
+    controller.py -- meaning every subprocess.run call in this class launches
+    the genuine analysis.py CLI, exactly as controller.run() would in
+    production. No mocking anywhere, matching this module's own convention.
+    """
+
+    def test_success_with_real_tise_output_and_missing_tdse_dir(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # Run the real tise_solver first (exactly as
+        # TestRunTiseSolverRealSubprocess does) to produce a genuine
+        # data/tise/ directory -- Analysis's required input (Sec 7.2.2).
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(tmp_config), tise_dir, binary=tise_solver_binary)
+
+        # tdse_dir is deliberately a path that was never created. Sec 5.4.4:
+        # an absent --tdse-dir is analysis.py's own tolerated case (run_tdse:
+        # false is expected until Phase 8) -- it must NOT raise, and this
+        # proves that tolerance survives the real subprocess boundary, not
+        # just a direct in-process call to analysis.run().
+        tdse_dir = tmp_path / "data" / "tdse"
+        run_analysis_stage(str(tmp_config), tise_dir, tdse_dir)
+
+    def test_failure_on_unpopulated_tise_dir_raises_solver_stage_error(self, tmp_config: Path, tmp_path: Path):
+        # tise_solver_binary is deliberately NOT requested here: tise_dir
+        # must genuinely never have been populated by a TISE run, so this
+        # exercises a real, unmocked failure path -- signal a fully-mocked
+        # test suite structurally cannot provide (per prior review feedback
+        # on this phase). analysis.py's own read_tise_output() raises
+        # TiseOutputError the moment it can't read eigenvalues.dat (Sec
+        # 7.2.2: the four core files are non-optional), main() catches that
+        # AnalysisError and exits 1, and controller._run_stage re-raises the
+        # resulting CalledProcessError as a clean SolverStageError.
+        tise_dir = tmp_path / "data" / "tise"  # never created; never populated
+        tdse_dir = tmp_path / "data" / "tdse"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_analysis_stage(str(tmp_config), tise_dir, tdse_dir)
+
+        # "Analysis" is _run_stage's own stage_name for this call (see
+        # run_analysis_stage's body) -- confirms Controller correctly
+        # surfaced the real analysis.py subprocess's exit-1 failure as a
+        # SolverStageError, not a raw/uncaught exception.
+        assert "Analysis" in str(excinfo.value)
+
+    def test_end_to_end_run_with_tise_and_analysis_enabled(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # Build a run-analysis-enabled config variant, following the exact
+        # load-YAML/mutate-a-copy/write-to-a-NEW-file pattern
+        # test_continuum_enabled_missing_n_energies_raises_and_leaves_no_partial_files
+        # above already uses inline -- tmp_config's own file on disk is never
+        # opened for writing here, only read.
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        # run_tise: true and run_tdse: false are already the real config.yaml's
+        # own defaults (tmp_config only overrides run.output_dir) -- only
+        # run_analysis needs flipping to true here.
+        cfg["run"]["run_analysis"] = True
+        analysis_config = tmp_path / "config_run_analysis_enabled.yaml"
+        with open(analysis_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        # Full real pipeline through controller.run() itself -- the actual
+        # CLI entry point, not directly-called Python functions: TISE runs
+        # for real against the real binary and writes real data/tise/
+        # output, then Analysis runs for real (via DEFAULT_ANALYSIS_SCRIPT)
+        # and reads that real TISE output back. Must not raise.
+        run(str(analysis_config))
+
+        tise_dir = tmp_path / "data" / "tise"
+        assert (tise_dir / "eigenvalues.dat").is_file()
 
 
 # ─── Optional: full controller.run() orchestration, end to end ─────────────
