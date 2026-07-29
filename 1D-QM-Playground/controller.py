@@ -296,6 +296,9 @@ def run_tise_solver(config_path: str, tise_output_dir: Path, binary: Path = DEFA
     )
 
 
+# ─── Analysis subprocess ───────────────────────────────────────────────────
+
+
 def run_analysis_stage(
     config_path: str,
     tise_dir: Path,
@@ -396,6 +399,9 @@ def run(config_path: str) -> None:
         run_tise_solver(config_path, tise_dir)
         print_warnings(read_warnings(tise_dir))
 
+    # Analysis and TISE are independently-gated per SDD Sec 7.2.2/Figure 2; a
+    # TISE failure above already aborts run() via the exception, so no
+    # explicit "and tise succeeded" check is needed here.
     if cfg["run"].get("run_analysis"):
         run_analysis_stage(config_path, tise_dir, tdse_dir)
 
