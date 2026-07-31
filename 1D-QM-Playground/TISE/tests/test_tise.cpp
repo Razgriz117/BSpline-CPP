@@ -682,6 +682,159 @@ TEST_F(SolveEigenTest, FirstFewEigenvaluesMatchAnalytic)
 }
 
 // ---------------------------------------------------------------------------
+// classifyBoundStates
+// ---------------------------------------------------------------------------
+
+TEST(ClassifyBoundStatesTest, AllBoundWhenAllBelowThreshold)
+{
+    tise::EigenResult r;
+    r.values = {-5.0, -3.0, -1.0};
+    r.dim = 3;
+    auto c = tise::classifyBoundStates(r, 0.0);
+    EXPECT_EQ(c.nBound, 3);
+    EXPECT_TRUE(c.isBound[0]);
+    EXPECT_TRUE(c.isBound[1]);
+    EXPECT_TRUE(c.isBound[2]);
+}
+
+TEST(ClassifyBoundStatesTest, AllAboveThresholdWhenNoneBelow)
+{
+    tise::EigenResult r;
+    r.values = {0.5, 1.0, 2.0};
+    r.dim = 3;
+    auto c = tise::classifyBoundStates(r, 0.0);
+    EXPECT_EQ(c.nBound, 0);
+    for (bool b : c.isBound)
+        EXPECT_FALSE(b);
+}
+
+TEST(ClassifyBoundStatesTest, MixedAboveAndBelowThreshold)
+{
+    tise::EigenResult r;
+    r.values = {-2.0, -1.0, 0.5, 1.5};
+    r.dim = 4;
+    auto c = tise::classifyBoundStates(r, 0.0);
+    EXPECT_EQ(c.nBound, 2);
+    EXPECT_TRUE(c.isBound[0]);
+    EXPECT_TRUE(c.isBound[1]);
+    EXPECT_FALSE(c.isBound[2]);
+    EXPECT_FALSE(c.isBound[3]);
+}
+
+TEST(ClassifyBoundStatesTest, ValueExactlyAtThresholdIsNotBound)
+{
+    tise::EigenResult r;
+    r.values = {-1.0, 0.0, 1.0};
+    r.dim = 3;
+    auto c = tise::classifyBoundStates(r, 0.0);
+    EXPECT_TRUE(c.isBound[0]);
+    EXPECT_FALSE(c.isBound[1]); // marginal case: strict '<', not bound
+    EXPECT_FALSE(c.isBound[2]);
+    EXPECT_EQ(c.nBound, 1);
+}
+
+class ClassifyBoundStatesHydrogenTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        bspline::BSpline bs;
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        int nBs = bs.getNBSplines();
+        nEn = nBs - 2;
+
+        double rMid = rMin + (rMax - rMin) / 2.0;
+        std::string expr = std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x";
+        std::map<std::string, std::string> potential = {
+            {"[" + std::to_string(rMin) + ", " + std::to_string(rMid) + ")", expr},
+            {"[" + std::to_string(rMid) + ", " + std::to_string(rMax) + "]", expr}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        result = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+    }
+
+    int nNodes = 31, order = 8, L = 0;
+    double rMin = 0.0, rMax = 60.0;
+    int nEn = 0;
+    tise::EigenResult result;
+};
+
+TEST_F(ClassifyBoundStatesHydrogenTest, GroundStateBoundNBoundLessThanDimAndPrefixStructureHolds)
+{
+    auto c = tise::classifyBoundStates(result, 0.0);
+    ASSERT_FALSE(c.isBound.empty());
+    EXPECT_TRUE(c.isBound[0]) << "Ground state (E=-0.5 a.u.) must be bound at threshold 0.0";
+    EXPECT_LT(c.nBound, result.dim);
+
+    bool seenFalse = false;
+    for (bool b : c.isBound)
+    {
+        if (!b)
+            seenFalse = true;
+        else
+            EXPECT_FALSE(seenFalse) << "true entry found after a false entry -- not a prefix";
+    }
+}
+
+class ClassifyBoundStatesSquareWellTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        bspline::BSpline bs;
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        int nBs = bs.getNBSplines();
+        nEn = nBs - 2;
+
+        std::map<std::string, std::string> potential = {
+            {"[0, 5)", "-2.0"},
+            {"[5, 30]", "0.0"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        result = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+    }
+
+    // nNodes=121 (not 31, like the hydrogenic fixture) because this potential's
+    // step discontinuity at x=5 isn't yet resolved with degenerate knots (that's
+    // task A4's strategic node placement); a uniform grid converges to the
+    // analytic odd-parity energies, just more slowly. Empirically verified:
+    // nNodes=31 gives ~1e-2 energy error, nNodes=121 gives ~2e-4. See
+    // docs/planning/engineer-a-plan-A2.md.
+    int nNodes = 121, order = 8, L = 0; // L unused for potential selection; map fully specifies V(x)
+    double rMin = 0.0, rMax = 30.0;
+    int nEn = 0;
+    tise::EigenResult result;
+};
+
+TEST_F(ClassifyBoundStatesSquareWellTest, ExactlyThreeBoundStatesBelowZero)
+{
+    auto c = tise::classifyBoundStates(result, 0.0);
+    EXPECT_EQ(c.nBound, 3);
+    ASSERT_GT(static_cast<int>(c.isBound.size()), 3);
+    EXPECT_TRUE(c.isBound[0]);
+    EXPECT_TRUE(c.isBound[1]);
+    EXPECT_TRUE(c.isBound[2]);
+    EXPECT_FALSE(c.isBound[3]);
+}
+
+TEST_F(ClassifyBoundStatesSquareWellTest, BoundEnergiesMatchAnalyticOddParityRoots)
+{
+    // Analytic odd-parity roots for V0=2.0, w=5.0 (transcendental matching
+    // equation k*cot(k*w)=-kappa, cross-checked by independent
+    // finite-difference diagonalization -- see docs/planning/engineer-a-plan-A2.md).
+    ASSERT_GE(static_cast<int>(result.values.size()), 3);
+    EXPECT_NEAR(result.values[0], -1.83728, 1e-3);
+    EXPECT_NEAR(result.values[1], -1.35493, 1e-3);
+    EXPECT_NEAR(result.values[2], -0.58099, 1e-3);
+}
+
+// ---------------------------------------------------------------------------
 // writeEigenstate
 // ---------------------------------------------------------------------------
 

@@ -355,6 +355,21 @@ EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
     return result;
 }
 
+BoundStateClassification classifyBoundStates(const EigenResult &result, Real threshold)
+{
+    BoundStateClassification out;
+    out.isBound.resize(result.values.size());
+    out.nBound = 0;
+    for (std::size_t i = 0; i < result.values.size(); ++i)
+    {
+        bool bound = result.values[i] < threshold;
+        out.isBound[i] = bound;
+        if (bound)
+            ++out.nBound;
+    }
+    return out;
+}
+
 Real analyticHydrogenEnergy(int n, int L)
 {
     const double n_eff = static_cast<double>(n + L);

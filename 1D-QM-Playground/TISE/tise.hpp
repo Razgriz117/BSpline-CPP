@@ -135,6 +135,22 @@ EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
                                          int nEn,
                                          int order);
 
+// === A2: bound-state classification (REQ-F-020) ===
+// Classification of a solved eigenproblem's eigenvalues against an
+// ionization threshold supplied by the caller (the threshold itself is
+// never computed here -- see classifyAsymptote for that, or a caller may
+// know it by convention, e.g. 0.0 for a Coulomb-type problem). Does not
+// mutate EigenResult.
+struct BoundStateClassification
+{
+    std::vector<bool> isBound; // isBound[i] true iff values[i] < threshold
+    int nBound;                // count of true entries in isBound
+};
+
+// Strict less-than: a state exactly at threshold is the marginal case and
+// is classified as an above-threshold pseudostate, not bound.
+BoundStateClassification classifyBoundStates(const EigenResult &result, Real threshold);
+
 // Analytic hydrogenic energy: E = -1 / (2 * (n + L)^2).
 Real analyticHydrogenEnergy(int n, int L);
 
