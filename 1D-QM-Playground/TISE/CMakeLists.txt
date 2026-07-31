@@ -8,6 +8,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(BUILD_TESTING "Build the testing tree." OFF)
 
+option(ENABLE_COVERAGE "Build with --coverage instrumentation (gcov/gcovr)" OFF)
+if(ENABLE_COVERAGE)
+    add_compile_options(--coverage -O0 -g)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage")
+endif()
+
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
 # nlohmann_json: parses the JSON-encoded piecewise potential passed as input.

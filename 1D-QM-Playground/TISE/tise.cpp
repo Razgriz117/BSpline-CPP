@@ -1,9 +1,11 @@
 #include "tise.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <ostream>
 #include <stdexcept>
 #include <vector>
@@ -108,6 +110,167 @@ double evaluateFunction(std::map<std::string, std::string> function, double x)
     oss << "Function domain does not cover x = "
         << x ;
     throw std::runtime_error(oss.str());
+}
+
+// === A1: boundary-condition asymptote classifier (REQ-F-030) ===
+// See docs/planning/engineer-a-plan-A1.md for the derivation of the
+// thresholds/window sizes below.
+ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real ratio)
+{
+    const int N = static_cast<int>(V.size());
+
+    std::vector<Real> dV(N - 1);
+    Real maxAbsV = std::abs(V[N - 1]);
+    Real maxAbsDV = 0.0;
+    for (int k = 0; k < N - 1; ++k)
+    {
+        dV[k] = V[k + 1] - V[k];
+        maxAbsV = std::max(maxAbsV, std::abs(V[k]));
+        maxAbsDV = std::max(maxAbsDV, std::abs(dV[k]));
+    }
+
+    ConvergenceFit fit{};
+    const Real nan = std::numeric_limits<Real>::quiet_NaN();
+
+    // Flatness pre-check: successive differences are all numerically zero.
+    if (maxAbsDV <= 1e-10 + 1e-9 * maxAbsV)
+    {
+        fit.isDivergent = false;
+        fit.isFlat = true;
+        fit.fittedLimit = V[N - 1];
+        fit.powerLawExponent = nan;
+        return fit;
+    }
+
+    // Divergence check: compare difference magnitude in the back half of the
+    // window vs. the middle. If it hasn't shrunk substantially, the sequence
+    // isn't converging to a finite limit.
+    const int mid = (N - 2) / 2;
+    const Real shrinkFactor = std::abs(dV[N - 2]) / std::max(std::abs(dV[mid]), 1e-300);
+    if (shrinkFactor >= 0.5)
+    {
+        fit.isDivergent = true;
+        fit.isFlat = false;
+        fit.fittedLimit = nan;
+        fit.powerLawExponent = nan;
+        return fit;
+    }
+
+    // Power-law fit via successive-ratio over a tail window, avoiding both
+    // near-field transients and far-field floating-point noise.
+    const int windowStart = std::max(0, N - 7);
+    const int windowEnd = N - 3; // inclusive; dV[windowEnd + 1] must stay in range
+    std::vector<Real> pEstimates;
+    for (int k = windowStart; k <= windowEnd && k + 1 < N - 1; ++k)
+        pEstimates.push_back(std::log(std::abs(dV[k]) / std::abs(dV[k + 1])) / std::log(ratio));
+
+    std::sort(pEstimates.begin(), pEstimates.end());
+    const Real pFit = pEstimates[pEstimates.size() / 2]; // median
+
+    const Real ratioP = std::pow(ratio, -pFit);
+    const Real fittedLimit = (V[N - 1] - ratioP * V[N - 2]) / (1.0 - ratioP);
+
+    fit.isDivergent = false;
+    fit.isFlat = false;
+    fit.fittedLimit = fittedLimit;
+    fit.powerLawExponent = pFit;
+    return fit;
+}
+
+namespace
+{
+constexpr Real kPi = 3.14159265358979323846;
+}
+
+Real case3WindowFunction(Real x, Real R, Real delta, DomainSide side)
+{
+    // Signed distance beyond the boundary: d > 0 means x is outside the box
+    // (beyond the wall), d < 0 means x is inside the trusted region.
+    const Real d = (side == DomainSide::Right) ? (x - R) : (R - x);
+
+    if (d <= -delta)
+        return 1.0;
+    if (d >= 0.0)
+        return 0.0;
+
+    const Real theta = (kPi / 2.0) * (d / delta);
+    const Real s = std::sin(theta);
+    return s * s;
+}
+
+Real evaluateWindowedPotential(const std::map<std::string, std::string> &potential,
+                                Real x, Real R, Real delta, DomainSide side)
+{
+    return case3WindowFunction(x, R, delta, side) * evaluateFunction(potential, x);
+}
+
+AsymptoteClassification classifyAsymptote(const std::map<std::string, std::string> &potential,
+                                           const SpatialDomain &domain,
+                                           DomainSide side,
+                                           std::ostream &warnOut)
+{
+    const Real reference = (side == DomainSide::Left) ? domain.xMin : domain.xMax;
+    const Real sign = (side == DomainSide::Left) ? -1.0 : 1.0;
+    const Real scale = std::max(std::abs(reference), 1.0);
+
+    constexpr int kNumSamples = 16;
+    constexpr Real kRatio = 4.0;
+    std::vector<Real> V(kNumSamples);
+    for (int k = 0; k < kNumSamples; ++k)
+        V[k] = evaluateFunction(potential, reference + sign * scale * std::pow(kRatio, k));
+
+    const ConvergenceFit fit = classifySequenceConvergence(V, kRatio);
+    const Real nan = std::numeric_limits<Real>::quiet_NaN();
+
+    AsymptoteClassification result{};
+    result.warningEmitted = false;
+
+    if (fit.isDivergent)
+    {
+        result.asymptoteCase = AsymptoteCase::HardWall;
+        result.subType = AsymptoteSubType::NotApplicable;
+        result.fittedAsymptoticValue = nan;
+        result.powerLawExponent = nan;
+        result.recommendedTransitionWidth = nan;
+        return result;
+    }
+
+    if (fit.isFlat)
+    {
+        result.asymptoteCase = AsymptoteCase::AnalyticAsymptote;
+        result.subType = AsymptoteSubType::Flat;
+        result.fittedAsymptoticValue = fit.fittedLimit;
+        result.powerLawExponent = nan;
+        result.recommendedTransitionWidth = nan;
+        return result;
+    }
+
+    if (std::abs(fit.powerLawExponent - 1.0) <= 0.15)
+    {
+        result.asymptoteCase = AsymptoteCase::AnalyticAsymptote;
+        result.subType = AsymptoteSubType::Coulomb;
+        result.fittedAsymptoticValue = fit.fittedLimit;
+        result.powerLawExponent = fit.powerLawExponent;
+        result.recommendedTransitionWidth = nan;
+        return result;
+    }
+
+    result.asymptoteCase = AsymptoteCase::Irregular;
+    result.subType = AsymptoteSubType::NotApplicable;
+    result.fittedAsymptoticValue = fit.fittedLimit;
+    result.powerLawExponent = fit.powerLawExponent;
+    result.recommendedTransitionWidth = 0.1 * (domain.xMax - domain.xMin);
+    result.warningEmitted = true;
+
+    warnOut << "Warning: potential asymptote on the " << (side == DomainSide::Left ? "left" : "right")
+            << " side is irregular (fitted power-law exponent p=" << fit.powerLawExponent
+            << "); the potential will be smoothly tapered to zero over a transition width delta="
+            << result.recommendedTransitionWidth
+            << " approaching the box boundary (see docs/planning/boundary-condition-case-3-smoothing.md), "
+            << "avoiding an abrupt truncation. This remains an approximation -- the true asymptotic tail "
+            << "is not analytically known -- so continuum normalization will be approximate.\n";
+
+    return result;
 }
 
 std::pair<std::vector<Real>, std::vector<Real>>

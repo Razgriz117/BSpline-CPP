@@ -70,6 +70,295 @@ TEST(RadialPotentialTest, L2KnownValues)
 }
 
 // ---------------------------------------------------------------------------
+// inInterval
+// ---------------------------------------------------------------------------
+
+TEST(InIntervalTest, ClosedBothEnds)
+{
+    EXPECT_TRUE(tise::inInterval(0.0, "[0, 5]"));
+    EXPECT_TRUE(tise::inInterval(5.0, "[0, 5]"));
+    EXPECT_TRUE(tise::inInterval(2.5, "[0, 5]"));
+    EXPECT_FALSE(tise::inInterval(-0.1, "[0, 5]"));
+    EXPECT_FALSE(tise::inInterval(5.1, "[0, 5]"));
+}
+
+TEST(InIntervalTest, HalfOpenVariants)
+{
+    EXPECT_FALSE(tise::inInterval(0.0, "(0, 5)"));
+    EXPECT_FALSE(tise::inInterval(5.0, "(0, 5)"));
+    EXPECT_TRUE(tise::inInterval(2.5, "(0, 5)"));
+
+    EXPECT_TRUE(tise::inInterval(0.0, "[0, 5)"));
+    EXPECT_FALSE(tise::inInterval(5.0, "[0, 5)"));
+
+    EXPECT_FALSE(tise::inInterval(0.0, "(0, 5]"));
+    EXPECT_TRUE(tise::inInterval(5.0, "(0, 5]"));
+}
+
+TEST(InIntervalTest, InfinityBounds)
+{
+    EXPECT_TRUE(tise::inInterval(1e10, "[0, inf)"));
+    EXPECT_FALSE(tise::inInterval(-1.0, "[0, inf)"));
+    EXPECT_TRUE(tise::inInterval(-1e10, "(-inf, 0]"));
+    EXPECT_FALSE(tise::inInterval(0.1, "(-inf, 0]"));
+    // Case-insensitive "infinity" spelling.
+    EXPECT_TRUE(tise::inInterval(1e10, "[0, infinity)"));
+}
+
+TEST(InIntervalTest, ThrowsOnMalformedString)
+{
+    EXPECT_THROW(tise::inInterval(1.0, "not an interval"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// evaluateFunction
+// ---------------------------------------------------------------------------
+
+TEST(EvaluateFunctionTest, PicksCorrectPiece)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 5)", "x * x"},
+        {"[5, 10]", "10 - x"}
+    };
+    EXPECT_NEAR(tise::evaluateFunction(potential, 3.0), 9.0, 1e-12);
+    EXPECT_NEAR(tise::evaluateFunction(potential, 7.0), 3.0, 1e-12);
+}
+
+TEST(EvaluateFunctionTest, ThrowsWhenXUncovered)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 5)", "x"}
+    };
+    EXPECT_THROW(tise::evaluateFunction(potential, 10.0), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// classifySequenceConvergence
+// ---------------------------------------------------------------------------
+
+TEST(ClassifySequenceConvergenceTest, DetectsFlatSequence)
+{
+    std::vector<double> V(16, 10.0); // exactly constant
+    auto fit = tise::classifySequenceConvergence(V, 4.0);
+    EXPECT_FALSE(fit.isDivergent);
+    EXPECT_TRUE(fit.isFlat);
+    EXPECT_NEAR(fit.fittedLimit, 10.0, 1e-12);
+}
+
+TEST(ClassifySequenceConvergenceTest, DetectsDivergentSequence)
+{
+    std::vector<double> V(16);
+    for (int k = 0; k < 16; ++k)
+        V[k] = std::pow(16.0, k); // differences grow geometrically, never shrink
+    auto fit = tise::classifySequenceConvergence(V, 4.0);
+    EXPECT_TRUE(fit.isDivergent);
+    EXPECT_FALSE(fit.isFlat);
+}
+
+TEST(ClassifySequenceConvergenceTest, FitsCoulombPowerLaw)
+{
+    // V[k] = 3 * ratio^(-k): a pure p=1 power-law decay to a zero limit.
+    std::vector<double> V(16);
+    for (int k = 0; k < 16; ++k)
+        V[k] = 3.0 * std::pow(4.0, -k);
+    auto fit = tise::classifySequenceConvergence(V, 4.0);
+    EXPECT_FALSE(fit.isDivergent);
+    EXPECT_FALSE(fit.isFlat);
+    EXPECT_NEAR(fit.powerLawExponent, 1.0, 1e-6);
+    EXPECT_NEAR(fit.fittedLimit, 0.0, 1e-9);
+}
+
+TEST(ClassifySequenceConvergenceTest, FitsArbitraryPowerLaw)
+{
+    // V[k] = 3 * ratio^(-1.5k): a pure p=1.5 power-law decay to a zero limit.
+    std::vector<double> V(16);
+    for (int k = 0; k < 16; ++k)
+        V[k] = 3.0 * std::pow(4.0, -1.5 * k);
+    auto fit = tise::classifySequenceConvergence(V, 4.0);
+    EXPECT_FALSE(fit.isDivergent);
+    EXPECT_FALSE(fit.isFlat);
+    EXPECT_NEAR(fit.powerLawExponent, 1.5, 1e-6);
+    EXPECT_NEAR(fit.fittedLimit, 0.0, 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// case3WindowFunction / evaluateWindowedPotential
+// (docs/planning/boundary-condition-case-3-smoothing.md)
+// ---------------------------------------------------------------------------
+
+TEST(Case3WindowFunctionTest, EqualsOneWellInsideBoundary)
+{
+    EXPECT_NEAR(tise::case3WindowFunction(5.0, 10.0, 2.0, tise::DomainSide::Right), 1.0, 1e-14);
+    EXPECT_NEAR(tise::case3WindowFunction(8.0, 10.0, 2.0, tise::DomainSide::Right), 1.0, 1e-14);
+}
+
+TEST(Case3WindowFunctionTest, EqualsZeroAtAndBeyondBoundary)
+{
+    EXPECT_NEAR(tise::case3WindowFunction(10.0, 10.0, 2.0, tise::DomainSide::Right), 0.0, 1e-14);
+    EXPECT_NEAR(tise::case3WindowFunction(12.0, 10.0, 2.0, tise::DomainSide::Right), 0.0, 1e-14);
+}
+
+TEST(Case3WindowFunctionTest, IsContinuousAtBothTransitionEdges)
+{
+    const double R = 10.0, delta = 2.0;
+    const double eps = 1e-6;
+    EXPECT_NEAR(tise::case3WindowFunction(R - delta - eps, R, delta, tise::DomainSide::Right),
+                tise::case3WindowFunction(R - delta + eps, R, delta, tise::DomainSide::Right), 1e-4);
+    EXPECT_NEAR(tise::case3WindowFunction(R - eps, R, delta, tise::DomainSide::Right),
+                tise::case3WindowFunction(R + eps, R, delta, tise::DomainSide::Right), 1e-4);
+}
+
+TEST(Case3WindowFunctionTest, DerivativeVanishesAtBothTransitionEdges)
+{
+    const double R = 10.0, delta = 2.0;
+    const double h = 1e-5;
+    auto centralDiff = [&](double x) {
+        return (tise::case3WindowFunction(x + h, R, delta, tise::DomainSide::Right) -
+                tise::case3WindowFunction(x - h, R, delta, tise::DomainSide::Right)) / (2.0 * h);
+    };
+    EXPECT_NEAR(centralDiff(R - delta), 0.0, 1e-3);
+    EXPECT_NEAR(centralDiff(R), 0.0, 1e-3);
+}
+
+TEST(Case3WindowFunctionTest, MonotonicWithinTransition)
+{
+    const double R = 10.0, delta = 2.0;
+    double prev = tise::case3WindowFunction(R - delta, R, delta, tise::DomainSide::Right);
+    for (int i = 1; i <= 10; ++i)
+    {
+        double x = (R - delta) + delta * i / 10.0;
+        double w = tise::case3WindowFunction(x, R, delta, tise::DomainSide::Right);
+        EXPECT_LE(w, prev + 1e-12);
+        prev = w;
+    }
+}
+
+TEST(Case3WindowFunctionTest, LeftSideMirrorsRightSide)
+{
+    const double R = 10.0, delta = 2.0;
+    // Left side: interior (trusted) region is x >= R+delta; wall is at x <= R.
+    EXPECT_NEAR(tise::case3WindowFunction(R + delta, R, delta, tise::DomainSide::Left), 1.0, 1e-14);
+    EXPECT_NEAR(tise::case3WindowFunction(R + 5.0, R, delta, tise::DomainSide::Left), 1.0, 1e-14);
+    EXPECT_NEAR(tise::case3WindowFunction(R, R, delta, tise::DomainSide::Left), 0.0, 1e-14);
+    EXPECT_NEAR(tise::case3WindowFunction(R - 5.0, R, delta, tise::DomainSide::Left), 0.0, 1e-14);
+}
+
+TEST(EvaluateWindowedPotentialTest, MatchesRawPotentialWellInsideBoundary)
+{
+    std::map<std::string, std::string> potential = {{"(-inf, inf)", "x*x"}};
+    double result = tise::evaluateWindowedPotential(potential, 5.0, 10.0, 2.0, tise::DomainSide::Right);
+    EXPECT_NEAR(result, tise::evaluateFunction(potential, 5.0), 1e-12);
+}
+
+TEST(EvaluateWindowedPotentialTest, VanishesAtAndBeyondBoundary)
+{
+    std::map<std::string, std::string> potential = {{"(-inf, inf)", "x*x"}};
+    EXPECT_NEAR(tise::evaluateWindowedPotential(potential, 10.0, 10.0, 2.0, tise::DomainSide::Right), 0.0, 1e-12);
+    EXPECT_NEAR(tise::evaluateWindowedPotential(potential, 12.0, 10.0, 2.0, tise::DomainSide::Right), 0.0, 1e-12);
+}
+
+TEST(EvaluateWindowedPotentialTest, MatchesDirectWindowFunctionTimesRawPotential)
+{
+    std::map<std::string, std::string> potential = {{"(-inf, inf)", "x*x"}};
+    double x = 9.0, R = 10.0, delta = 2.0;
+    double expected = tise::case3WindowFunction(x, R, delta, tise::DomainSide::Right) *
+                       tise::evaluateFunction(potential, x);
+    EXPECT_NEAR(tise::evaluateWindowedPotential(potential, x, R, delta, tise::DomainSide::Right),
+                expected, 1e-12);
+}
+
+// ---------------------------------------------------------------------------
+// classifyAsymptote
+// ---------------------------------------------------------------------------
+
+TEST(ClassifyAsymptoteTest, Case1HardWallForQuadraticGrowth)
+{
+    std::map<std::string, std::string> potential = {{"[0, inf)", "x*x"}};
+    tise::SpatialDomain domain{0.0, 20.0};
+    std::ostringstream warn;
+    auto result = tise::classifyAsymptote(potential, domain, tise::DomainSide::Right, warn);
+    EXPECT_EQ(result.asymptoteCase, tise::AsymptoteCase::HardWall);
+}
+
+TEST(ClassifyAsymptoteTest, Case1HardWallForLinearGrowth)
+{
+    std::map<std::string, std::string> potential = {{"[0, inf)", "x"}};
+    tise::SpatialDomain domain{0.0, 20.0};
+    std::ostringstream warn;
+    auto result = tise::classifyAsymptote(potential, domain, tise::DomainSide::Right, warn);
+    EXPECT_EQ(result.asymptoteCase, tise::AsymptoteCase::HardWall);
+}
+
+TEST(ClassifyAsymptoteTest, Case2FlatForStepPotential)
+{
+    std::map<std::string, std::string> potential = {{"[0,5)", "0"}, {"[5, inf)", "10"}};
+    tise::SpatialDomain domain{0.0, 20.0};
+    std::ostringstream warn;
+    auto result = tise::classifyAsymptote(potential, domain, tise::DomainSide::Right, warn);
+    EXPECT_EQ(result.asymptoteCase, tise::AsymptoteCase::AnalyticAsymptote);
+    EXPECT_EQ(result.subType, tise::AsymptoteSubType::Flat);
+    EXPECT_NEAR(result.fittedAsymptoticValue, 10.0, 1e-6);
+}
+
+TEST(ClassifyAsymptoteTest, Case2CoulombForInverseR)
+{
+    std::map<std::string, std::string> potential = {{"(0, inf)", "-1/x"}};
+    tise::SpatialDomain domain{0.1, 50.0};
+    std::ostringstream warn;
+    auto result = tise::classifyAsymptote(potential, domain, tise::DomainSide::Right, warn);
+    EXPECT_EQ(result.asymptoteCase, tise::AsymptoteCase::AnalyticAsymptote);
+    EXPECT_EQ(result.subType, tise::AsymptoteSubType::Coulomb);
+    EXPECT_NEAR(result.powerLawExponent, 1.0, 1e-2);
+}
+
+TEST(ClassifyAsymptoteTest, Case3IrregularForPowerLawOneAndHalf)
+{
+    std::map<std::string, std::string> potential = {{"(0, inf)", "1/x^1.5"}};
+    tise::SpatialDomain domain{0.1, 50.0};
+    std::ostringstream warn;
+    auto result = tise::classifyAsymptote(potential, domain, tise::DomainSide::Right, warn);
+    EXPECT_EQ(result.asymptoteCase, tise::AsymptoteCase::Irregular);
+    EXPECT_NEAR(result.powerLawExponent, 1.5, 1e-2);
+    EXPECT_TRUE(result.warningEmitted);
+    EXPECT_GT(result.recommendedTransitionWidth, 0.0);
+}
+
+TEST(ClassifyAsymptoteTest, Case3WarningTextMentionsTaperingNotDiscontinuity)
+{
+    std::map<std::string, std::string> potential = {{"(0, inf)", "1/x^1.5"}};
+    tise::SpatialDomain domain{0.1, 50.0};
+    std::ostringstream warn;
+    tise::classifyAsymptote(potential, domain, tise::DomainSide::Right, warn);
+    std::string text = warn.str();
+    EXPECT_NE(text.find("taper"), std::string::npos);
+    EXPECT_NE(text.find("approximate"), std::string::npos);
+    EXPECT_EQ(text.find("discontinuity"), std::string::npos);
+}
+
+TEST(ClassifyAsymptoteTest, NoWarningForCase1AndCase2)
+{
+    tise::SpatialDomain domain{0.0, 20.0};
+    std::ostringstream warn1;
+    std::map<std::string, std::string> hardWallPotential = {{"[0, inf)", "x*x"}};
+    tise::classifyAsymptote(hardWallPotential, domain, tise::DomainSide::Right, warn1);
+    EXPECT_TRUE(warn1.str().empty());
+
+    std::ostringstream warn2;
+    std::map<std::string, std::string> flatPotential = {{"[0,5)", "0"}, {"[5, inf)", "10"}};
+    tise::classifyAsymptote(flatPotential, domain, tise::DomainSide::Right, warn2);
+    EXPECT_TRUE(warn2.str().empty());
+}
+
+TEST(ClassifyAsymptoteTest, LeftSideSymmetric)
+{
+    std::map<std::string, std::string> potential = {{"(-inf, inf)", "x*x"}};
+    tise::SpatialDomain domain{-20.0, 0.0};
+    std::ostringstream warn;
+    auto result = tise::classifyAsymptote(potential, domain, tise::DomainSide::Left, warn);
+    EXPECT_EQ(result.asymptoteCase, tise::AsymptoteCase::HardWall);
+}
+
+// ---------------------------------------------------------------------------
 // analyticHydrogenEnergy
 // ---------------------------------------------------------------------------
 

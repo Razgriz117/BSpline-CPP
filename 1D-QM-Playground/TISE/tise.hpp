@@ -1,6 +1,7 @@
 #pragma once
 
-#include <iosfwd>
+#include <iostream>
+#include <string>
 #include <vector>
 #include <map>
 #include "BSpline.hpp"
@@ -24,6 +25,101 @@ std::vector<Real> buildUniformRadialGrid(int nNodes, Real rMin, Real rMax);
 
 // Radial hydrogen-like potential V_L(x) = L(L+1)/(2x^2) - 1/x.
 double radialPotential(double x, int L);
+
+// True if x falls within `interval`, e.g. "[0, 20)", "(-inf, inf)". Bounds may
+// be finite numbers or (+/-)inf/infinity (case-insensitive); brackets select
+// inclusive ([, ]) vs. exclusive ((, )) endpoints. Throws std::runtime_error
+// if `interval` doesn't match the expected syntax.
+bool inInterval(double x, const std::string &interval);
+
+// Given a piecewise potential (domain string -> muparser expression string in
+// `x`), find the piece whose domain contains x and evaluate it there. Throws
+// std::runtime_error if no piece's domain covers x.
+double evaluateFunction(std::map<std::string, std::string> function, double x);
+
+// Result of fitting a sampled sequence V[0..N-1] (assumed to be sampled at
+// points growing/shrinking geometrically by `ratio` per step) for convergence
+// behavior: does it diverge, is it already flat, or does it follow a
+// power-law V ~ fittedLimit + C/step^powerLawExponent?
+struct ConvergenceFit
+{
+    bool isDivergent;
+    bool isFlat;
+    Real fittedLimit;
+    Real powerLawExponent;
+};
+
+// Shared numeric core for asymptote classification (REQ-F-030) and, later,
+// singular-point detection for strategic node placement (REQ-F-050). See
+// docs/planning/engineer-a-plan-A1.md for the algorithm.
+ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real ratio);
+
+// Which side of the spatial domain a boundary/asymptote calculation refers to.
+enum class DomainSide
+{
+    Left,
+    Right
+};
+
+// Smooth sin^2 raised-cosine taper used for Case-3 (irregular-asymptote)
+// boundary handling, per docs/planning/boundary-condition-case-3-smoothing.md:
+// 1 in the trusted interior, 0 at and beyond the boundary R, C^1-continuous
+// in between over a transition width `delta`. For DomainSide::Right, the
+// interior is x <= R-delta; for DomainSide::Left, the interior is x >= R+delta.
+Real case3WindowFunction(Real x, Real R, Real delta, DomainSide side);
+
+// V~(x) = W(x) * V(x): the smoothed, boundary-tapered potential used in place
+// of a hard flat-truncation for Case 3. `potential` is evaluated via
+// evaluateFunction; the result is then multiplied by case3WindowFunction.
+Real evaluateWindowedPotential(const std::map<std::string, std::string> &potential,
+                                Real x, Real R, Real delta, DomainSide side);
+
+// The spatial domain of the TISE problem (a single finite box; Dirichlet
+// walls at both xMin and xMax regardless of which sides are "unbounded" in
+// the physical problem being approximated).
+struct SpatialDomain
+{
+    Real xMin;
+    Real xMax;
+};
+
+// Figure 7 (SDD Sec. 5.2.3) Case 1/2/3 dispatch for an unbounded domain side.
+enum class AsymptoteCase
+{
+    HardWall,          // Case 1: no finite asymptote (diverges/grows)
+    AnalyticAsymptote, // Case 2: flat or Coulomb ~1/r
+    Irregular          // Case 3: unknown/irregular tail
+};
+
+// Case-2 sub-branch. Only Flat's continuum-matching formula is implemented
+// (Engineer B's B3); Coulomb is classified but its matching formula is not
+// yet derived by any source document (flagged as a follow-up).
+enum class AsymptoteSubType
+{
+    NotApplicable,
+    Flat,
+    Coulomb
+};
+
+struct AsymptoteClassification
+{
+    AsymptoteCase    asymptoteCase;
+    AsymptoteSubType subType;
+    Real             fittedAsymptoticValue;      // V_inf; NaN if HardWall
+    Real             powerLawExponent;           // fitted p; NaN if HardWall or Flat
+    Real             recommendedTransitionWidth; // Delta for the Case-3 window; NaN unless Irregular
+    bool             warningEmitted;
+};
+
+// Classify the potential's asymptote on the given unbounded domain side
+// (REQ-F-030). Assumes the caller already knows this side is unbounded;
+// bounded sides always get a plain Dirichlet wall and never call this.
+// Case-3 warnings are written to `warnOut` (physics warning, non-fatal,
+// per SDD Sec. 8's warning taxonomy).
+AsymptoteClassification classifyAsymptote(const std::map<std::string, std::string> &potential,
+                                           const SpatialDomain &domain,
+                                           DomainSide side,
+                                           std::ostream &warnOut = std::cerr);
 
 // Fill symmetric banded Hamiltonian H and overlap S matrices (LAPACK 'U' storage).
 // Returns {Hmat, Smat}, each of size order * nEn.
