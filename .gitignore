@@ -1,3 +1,7 @@
 build*
+data/
 EigennState_*
 .vscode/
+__pycache__/
+*.pyc
+.coverage

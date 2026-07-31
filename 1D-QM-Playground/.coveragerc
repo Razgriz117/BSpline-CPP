@@ -1,0 +1,7 @@
+[run]
+branch = True
+source = controller, analysis
+
+[report]
+fail_under = 80
+show_missing = True

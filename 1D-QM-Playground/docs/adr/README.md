@@ -8,6 +8,7 @@ This directory records decisions to **defer** a design alternative rather than a
 | [0002](0002-defer-wkb-collocation.md) | Defer WKB/Phase-Angle-Proportional Collocation | Accepted (deferred) | Use uniform + strategic-node knot placement by default; WKB-proportional spacing is a future upgrade. |
 | [0003](0003-defer-multiparticle-3d-extension.md) | Defer Multi-Particle / 3D Extension | Accepted (deferred) | Stay strictly 1D, single-particle for this project; multi-particle/3D is future pedagogical work. |
 | [0004](0004-defer-visualization-plot-parameters.md) | Defer Visualization Plot-Parameter Schema | Accepted (deferred) | Keep `visualization` boolean-only until the Analysis module's detailed design (SDD [§5.4](../SDD.md#54-analysis-module)) is complete. |
+| [0005](0005-defer-analysis-output-artifact-format.md) | Defer Analysis Output-Artifact Format | Accepted (deferred) | Analysis produces no output artifact (no files, no plots, no `data/analysis/`) until REQ-F-060 is computable in SDD [§10.2](../SDD.md#102-phased-implementation-sequence) Phase 7/8; distinct from ADR-0004's narrower plot-*parameter* scope. |
 
 See also [SDD Appendix B](../SDD.md#b-open-design-questions) for design questions that are still genuinely unresolved (no decision, not even a decision to defer).
 
