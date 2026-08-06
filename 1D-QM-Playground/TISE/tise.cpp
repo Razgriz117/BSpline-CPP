@@ -154,6 +154,55 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::m
     return {Hmat, Smat};
 }
 
+std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
+    const bspline::BSpline &bs, 
+    int order, int nEn, 
+    std::vector<Real> Hmat, 
+    std::vector<Real> Smat, 
+    EigenResult eigen)
+{
+    // Calculate <phi_n | H | B_N> and <phi_n | B_N>. 
+    // Note:
+    // - H is in the basis made up by the B-Splines, hence H |B_N> is simply the N-th column of H.
+    // - Hmat is not an N X N flattened matrix; it stores bands of width ``order`` from an ``nEn``x``nEn`` matrix, so there are ``order * nEn`` elements
+    // - Hmat was made in column-major order (see fillBandedMatrices)
+    // - eigen.vectors is a flattened set of all eigenvectors in "column-major" order
+    // Thus we get H | B_N> by getting the last column of H.
+    // Also note:
+    // - Eigenvectors are NOT in the B-Spline basis, so we can't just compute <phi_i|B_N> by taking the last element of each |phi_n>.
+    // instead we need to use SB_N, the last column of S, which accounts for overlap of all B-Splines with B_N.
+
+    std::vector<Real> HB_N(nEn), SB_N(nEn);
+    int iBs2 = nEn + 1;      // last B-spline index
+    int col  = iBs2 - 1;     // = nEn, matches bandIndex's 1-indexed col
+
+    int iBs1Min = std::max(2, iBs2 - order + 1);
+    for (int iBs1 = iBs1Min; iBs1 <= iBs2; ++iBs1) {
+        int row = iBs1 + order - iBs2;            // band-local row, matches fill loop
+        int idx = (row - 1) + (col - 1) * order;  // bandIndex(row, col)
+        HB_N[iBs1 - 2] = Hmat[idx];               // iBs1=2 -> index 0
+        SB_N[iBs1 - 2] = Smat[idx];               // same band position, from Smat
+    }
+
+
+    // <phi_n|H|B_N> / <phi_n|B_N> are the scalar product of phi_n with HB_N / SB_N.
+    std::vector<Real> coeffs1(nEn), coeffs2(nEn);
+    for (int i = 0; i < nEn; ++i)
+    {
+        Real hSum = 0.0, sSum = 0.0;
+        for (int j = 0; j < nEn; ++j)
+        {
+            Real c = eigen.vectors[i * eigen.ldz + j];
+            hSum += c * HB_N[j];
+            sSum += c * SB_N[j];
+        }
+        coeffs1[i] = hSum;
+        coeffs2[i] = sSum;
+    }
+
+    return {coeffs1, coeffs2};
+}
+
 EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
                                           std::vector<Real> S,
                                           int nEn,
@@ -248,7 +297,11 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::m
     int nEn       = nBSplines - 2;
 
     auto [H, S] = fillBandedMatrices(bs, nEn, order, L, potential);
-    return solveGeneralizedEigenproblem(std::move(H), std::move(S), nEn, order);
+    EigenResult er = solveGeneralizedEigenproblem(H, S, nEn, order);
+
+    precomputeBoundaryCoupling(bs, order, nEn, H, S, er);
+
+    return er;
 }
 
 } // namespace tise

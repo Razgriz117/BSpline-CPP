@@ -393,6 +393,98 @@ TEST_F(SolveEigenTest, FirstFewEigenvaluesMatchAnalytic)
 }
 
 // ---------------------------------------------------------------------------
+// precomputeBoundaryCoupling
+//
+// Per docs/planning/tise-task-breakdown.md §3 "B1. Precompute boundary-
+// coupling elements": validate <phi_n|B_N> and <phi_n|H|B_N> against a
+// directly-computed (brute-force bs.integral call, no shortcuts) reference,
+// for a small basis size. B_N here is the last B-spline used in the confined
+// nEn-dimensional basis (1-based B-spline index nEn+1), matching the
+// convention precomputeBoundaryCoupling itself uses to extract HB_N from the
+// banded Hmat (see tise.cpp).
+// ---------------------------------------------------------------------------
+
+class PrecomputeBoundaryCouplingTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        // Muparser encoding of tise::radialPotential(x, L), as in
+        // FillBandedMatricesRadialPotentialTest.
+        std::map<std::string, std::string> potential = {
+            {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        Hmat = H;
+        Smat = S;
+        eigen = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 11, order = 4, L = 1; // small basis; L=1 so H is non-trivial
+    double rMin = 0.1, rMax = 10.0;
+    int nBSplines = 0, nEn = 0;
+    std::vector<double> Hmat, Smat;
+    tise::EigenResult eigen;
+};
+
+TEST_F(PrecomputeBoundaryCouplingTest, ReturnsOneCoefficientPerEigenstate)
+{
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(bs, order, nEn, Hmat, Smat, eigen);
+    EXPECT_EQ(static_cast<int>(coeffs1.size()), nEn);
+    EXPECT_EQ(static_cast<int>(coeffs2.size()), nEn);
+}
+
+TEST_F(PrecomputeBoundaryCouplingTest, MatchesBruteForceIntegrals)
+{
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(bs, order, nEn, Hmat, Smat, eigen);
+    ASSERT_EQ(static_cast<int>(coeffs1.size()), nEn);
+    ASSERT_EQ(static_cast<int>(coeffs2.size()), nEn);
+
+    auto unity  = [](double, const double *) { return 1.0; };
+    auto potFun = [this](double x, const double *) { return tise::radialPotential(x, L); };
+
+    // B_N: last B-spline in the confined basis (1-based bs index nEn+1).
+    int iBsN = nEn + 1;
+
+    // Brute-force <B_i|B_N> and <B_i|H|B_N> for each confined B-spline
+    // i = 2..nEn+1 (0-based k = i-2), independent of fillBandedMatrices'
+    // banded storage / precomputeBoundaryCoupling's HB_N extraction.
+    std::vector<double> S_row(nEn), H_row(nEn);
+    for (int k = 0; k < nEn; ++k)
+    {
+        int iBs = k + 2;
+        S_row[k] = bs.integral(unity, iBs, iBsN);
+        double kinetic   = bs.integral(unity, iBs, iBsN, 1, 1) / 2.0;
+        double potential = bs.integral(potFun, iBs, iBsN);
+        H_row[k] = kinetic + potential;
+    }
+
+    // phi_n = sum_k c_{k,n} |B_{k+2}>, so <phi_n|B_N> = sum_k c_{k,n} <B_{k+2}|B_N>
+    // and <phi_n|H|B_N> = sum_k c_{k,n} <B_{k+2}|H|B_N>. eigen.vectors is
+    // column-major with leading dimension eigen.ldz.
+    for (int n = 0; n < nEn; ++n)
+    {
+        double expectedOverlap = 0.0, expectedHCoupling = 0.0;
+        for (int k = 0; k < nEn; ++k)
+        {
+            double c = eigen.vectors[n * eigen.ldz + k];
+            expectedOverlap   += c * S_row[k];
+            expectedHCoupling += c * H_row[k];
+        }
+        EXPECT_NEAR(coeffs2[n], expectedOverlap,   1e-9) << "<phi_n|B_N> mismatch at n=" << n;
+        EXPECT_NEAR(coeffs1[n], expectedHCoupling, 1e-9) << "<phi_n|H|B_N> mismatch at n=" << n;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // writeEigenstate
 // ---------------------------------------------------------------------------
 

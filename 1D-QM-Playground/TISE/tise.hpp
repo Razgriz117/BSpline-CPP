@@ -32,6 +32,11 @@ double radialPotential(double x, int L);
 std::pair<std::vector<Real>, std::vector<Real>>
 fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::map<std::string, std::string> potential);
 
+// Given the set of BSplines, Hamiltonian, and eigenvectors, solve for:
+// \langle \phi_n | H | B_N \rangle and \langle \phi_n | B_N \rangle, for each eigenvector
+// These are returned as {coeffs1, coeffs2}, each with length equal to the number of eigenvectors
+std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(const bspline::BSpline &bs, int order, int nEn, std::vector<Real> Hmat, std::vector<Real> Smat, EigenResult eigen);
+
 // Solve H c = E S c via LAPACK DSBGV.
 // H and S are consumed (overwritten); pass by value intentionally.
 EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
