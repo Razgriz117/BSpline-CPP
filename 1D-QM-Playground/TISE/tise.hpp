@@ -33,9 +33,21 @@ std::pair<std::vector<Real>, std::vector<Real>>
 fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::map<std::string, std::string> potential);
 
 // Given the set of BSplines, Hamiltonian, and eigenvectors, solve for:
-// \langle \phi_n | H | B_N \rangle and \langle \phi_n | B_N \rangle, for each eigenvector
+// < phi_n | H | B_N > and < phi_n | B_N >, for each eigenvector
 // These are returned as {coeffs1, coeffs2}, each with length equal to the number of eigenvectors
 std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(const bspline::BSpline &bs, int order, int nEn, std::vector<Real> Hmat, std::vector<Real> Smat, EigenResult eigen);
+
+// given the output of precomputeBoundaryCoupling, construct continuum states |\bar\psi_E> (linear combinations of eigenvectors) 
+// for each energy E on the input grid. The result is stored as a 2-D vector with (# Energy points) elements of length (# eigenvectors)
+// note that each energy has a state with (# eigenvectors + 1) elements, but the coefficient for the last element is always 1 (and corresponds to B_N).
+std::vector<std::vector<Real>> buildContinuumState(
+    const bspline::BSpline &bs, 
+    int order, int nEn, 
+    std::vector<Real> Hmat, 
+    std::vector<Real> Smat, 
+    EigenResult eigen,
+    std::vector<Real> grid
+);
 
 // Solve H c = E S c via LAPACK DSBGV.
 // H and S are consumed (overwritten); pass by value intentionally.

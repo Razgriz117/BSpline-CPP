@@ -203,6 +203,31 @@ std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
     return {coeffs1, coeffs2};
 }
 
+std::vector<std::vector<Real>> buildContinuumState(
+    const bspline::BSpline &bs, 
+    int order, int nEn, 
+    std::vector<Real> Hmat, 
+    std::vector<Real> Smat, 
+    EigenResult eigen,
+    std::vector<Real> grid)
+{
+    auto [coeffs1, coeffs2] = precomputeBoundaryCoupling(bs, order, nEn, Hmat, Smat, eigen);
+    
+    std::vector<std::vector<Real>> states(grid.size(), std::vector<Real>(eigen.vectors.size() + 1, 0.0));
+    
+    // Compute the coeffs for each point on the energy grid
+    for(int E_idx = 0; E_idx < grid.size(); ++E_idx)
+    {
+        for(int i = 0; i < nEn; ++i)
+        {
+            states[E_idx][i] = (coeffs1[i] - (grid[E_idx] * coeffs2[i])) / (grid[E_idx] - eigen.values[i]);
+        }
+    }
+
+    return states;
+
+}
+
 EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
                                           std::vector<Real> S,
                                           int nEn,
@@ -299,7 +324,7 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::m
     auto [H, S] = fillBandedMatrices(bs, nEn, order, L, potential);
     EigenResult er = solveGeneralizedEigenproblem(H, S, nEn, order);
 
-    precomputeBoundaryCoupling(bs, order, nEn, H, S, er);
+    buildContinuumState(bs, order, nEn, H, S, er, grid);
 
     return er;
 }
