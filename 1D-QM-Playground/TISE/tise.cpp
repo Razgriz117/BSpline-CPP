@@ -113,8 +113,8 @@ double evaluateFunction(std::map<std::string, std::string> function, double x)
 std::pair<std::vector<Real>, std::vector<Real>>
 fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::map<std::string, std::string> potential)
 {
-    std::vector<Real> Hmat(order * nEn, 0.0);
-    std::vector<Real> Smat(order * nEn, 0.0);
+    std::vector<Real> Hmat(order * (nEn + 1), 0.0);
+    std::vector<Real> Smat(order * (nEn + 1), 0.0);
 
     bspline::D2DFun fUni = [](double, const double *) { return 1.0; };
     // Piecewise potential supplied by the caller, evaluated per-x via muparser.
@@ -133,7 +133,7 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::m
         return (row - 1) + (col - 1) * order;
     };
 
-    for (int iBs2 = 2; iBs2 <= nEn + 1; ++iBs2)
+    for (int iBs2 = 2; iBs2 <= nEn + 2; ++iBs2)
     {
         int iBs1Min = std::max(2, iBs2 - order + 1);
         for (int iBs1 = iBs1Min; iBs1 <= iBs2; ++iBs1)
@@ -173,11 +173,11 @@ std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
     // instead we need to use SB_N, the last column of S, which accounts for overlap of all B-Splines with B_N.
 
     std::vector<Real> HB_N(nEn), SB_N(nEn);
-    int iBs2 = nEn + 1;      // last B-spline index
-    int col  = iBs2 - 1;     // = nEn, matches bandIndex's 1-indexed col
+    int iBs2 = nEn + 2;      // last B-spline index
+    int col  = iBs2 - 1;     // = nEn + 1, matches bandIndex's 1-indexed col
 
     int iBs1Min = std::max(2, iBs2 - order + 1);
-    for (int iBs1 = iBs1Min; iBs1 <= iBs2; ++iBs1) {
+    for (int iBs1 = iBs1Min; iBs1 <= iBs2 - 1; ++iBs1) {
         int row = iBs1 + order - iBs2;            // band-local row, matches fill loop
         int idx = (row - 1) + (col - 1) * order;  // bandIndex(row, col)
         HB_N[iBs1 - 2] = Hmat[idx];               // iBs1=2 -> index 0
@@ -213,8 +213,8 @@ std::vector<std::vector<Real>> buildContinuumState(
 {
     auto [coeffs1, coeffs2] = precomputeBoundaryCoupling(bs, order, nEn, Hmat, Smat, eigen);
     
-    std::vector<std::vector<Real>> states(grid.size(), std::vector<Real>(eigen.vectors.size() + 1, 0.0));
-    
+    std::vector<std::vector<Real>> states(grid.size(), std::vector<Real>(eigen.values.size() + 1, 0.0));
+
     // Compute the coeffs for each point on the energy grid
     for(int E_idx = 0; E_idx < grid.size(); ++E_idx)
     {
@@ -222,6 +222,7 @@ std::vector<std::vector<Real>> buildContinuumState(
         {
             states[E_idx][i] = (coeffs1[i] - (grid[E_idx] * coeffs2[i])) / (grid[E_idx] - eigen.values[i]);
         }
+        states[E_idx][nEn] = 1.0;
     }
 
     return states;

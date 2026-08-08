@@ -224,8 +224,8 @@ protected:
 
 TEST_F(FillBandedMatricesTest, MatrixSizeIsOrderTimesNEn)
 {
-    EXPECT_EQ(static_cast<int>(Hmat.size()), order * nEn);
-    EXPECT_EQ(static_cast<int>(Smat.size()), order * nEn);
+    EXPECT_EQ(static_cast<int>(Hmat.size()), order * (nEn + 1));
+    EXPECT_EQ(static_cast<int>(Smat.size()), order * (nEn + 1));
 }
 
 TEST_F(FillBandedMatricesTest, OverlapDiagonalIsPositive)
@@ -398,10 +398,13 @@ TEST_F(SolveEigenTest, FirstFewEigenvaluesMatchAnalytic)
 // Per docs/planning/tise-task-breakdown.md §3 "B1. Precompute boundary-
 // coupling elements": validate <phi_n|B_N> and <phi_n|H|B_N> against a
 // directly-computed (brute-force bs.integral call, no shortcuts) reference,
-// for a small basis size. B_N here is the last B-spline used in the confined
-// nEn-dimensional basis (1-based B-spline index nEn+1), matching the
-// convention precomputeBoundaryCoupling itself uses to extract HB_N from the
-// banded Hmat (see tise.cpp).
+// for a small basis size. B_N here is the true "last B-spline... normally
+// dropped to enforce psi(R)=0 for bound states" (1-based bs index nBSplines,
+// i.e. nEn+2) -- NOT B_{nEn+1}, which is already the last spline spanning the
+// confined nEn-dimensional bound-state basis itself. Using B_{nEn+1} as B_N
+// would put B_N inside span{phi_n}, which forces <phi_n|H|B_N> = E_n<phi_n|B_N>
+// identically (since H*phi_n = E_n*S*phi_n), collapsing buildContinuumState's
+// c_n(E) to a constant independent of E -- see git history for this fix.
 // ---------------------------------------------------------------------------
 
 class PrecomputeBoundaryCouplingTest : public ::testing::Test
@@ -451,8 +454,9 @@ TEST_F(PrecomputeBoundaryCouplingTest, MatchesBruteForceIntegrals)
     auto unity  = [](double, const double *) { return 1.0; };
     auto potFun = [this](double x, const double *) { return tise::radialPotential(x, L); };
 
-    // B_N: last B-spline in the confined basis (1-based bs index nEn+1).
-    int iBsN = nEn + 1;
+    // B_N: the true dropped last B-spline (1-based bs index nBSplines),
+    // outside the confined nEn-dimensional bound-state basis.
+    int iBsN = nBSplines;
 
     // Brute-force <B_i|B_N> and <B_i|H|B_N> for each confined B-spline
     // i = 2..nEn+1 (0-based k = i-2), independent of fillBandedMatrices'
@@ -481,6 +485,114 @@ TEST_F(PrecomputeBoundaryCouplingTest, MatchesBruteForceIntegrals)
         }
         EXPECT_NEAR(coeffs2[n], expectedOverlap,   1e-9) << "<phi_n|B_N> mismatch at n=" << n;
         EXPECT_NEAR(coeffs1[n], expectedHCoupling, 1e-9) << "<phi_n|H|B_N> mismatch at n=" << n;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// buildContinuumState
+//
+// Per docs/planning/tise-task-breakdown.md §3 "B2. Energy-grid loop and
+// closed-form coefficients": for each energy on a grid, compute
+// c_n = (<phi_n|H|B_N> - E<phi_n|B_N>) / (E - E_n) and
+// |psi_bar_E> = sum_n |phi_n> c_n + |B_N>.
+// ---------------------------------------------------------------------------
+
+class BuildContinuumStateTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        std::map<std::string, std::string> potential = {
+            {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        Hmat = H;
+        Smat = S;
+        eigen = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+
+        // Energy grid well above the bound-state spectrum (eigen.values are
+        // all < 2 for this basis), so E - E_n never vanishes.
+        Egrid = {2.0, 5.0, 10.0};
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 11, order = 4, L = 1;
+    double rMin = 0.1, rMax = 10.0;
+    int nBSplines = 0, nEn = 0;
+    std::vector<double> Hmat, Smat;
+    tise::EigenResult eigen;
+    std::vector<double> Egrid;
+};
+
+TEST_F(BuildContinuumStateTest, ReturnsOneStatePerEnergyGridPoint)
+{
+    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
+    EXPECT_EQ(static_cast<int>(states.size()), static_cast<int>(Egrid.size()));
+}
+
+TEST_F(BuildContinuumStateTest, EachStateHasNEnPlusOneCoefficients)
+{
+    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
+    for (const auto &state : states)
+        EXPECT_EQ(static_cast<int>(state.size()), nEn + 1);
+}
+
+TEST_F(BuildContinuumStateTest, LastCoefficientIsAlwaysOne)
+{
+    // The B_N term's coefficient in |psi_bar_E> = sum_n |phi_n> c_n + |B_N>
+    // is exactly 1, for every energy on the grid.
+    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
+    for (size_t e = 0; e < states.size(); ++e)
+        EXPECT_DOUBLE_EQ(states[e][nEn], 1.0) << "B_N coefficient wrong at E_idx=" << e;
+}
+
+TEST_F(BuildContinuumStateTest, CoefficientsVaryWithEnergy)
+{
+    // Regression guard: c_n(E) must actually depend on E. (It collapses to a
+    // constant, independent of E, if B_N is mistakenly drawn from inside
+    // span{phi_n} rather than the true dropped last B-spline -- see
+    // PrecomputeBoundaryCouplingTest above.)
+    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
+    ASSERT_GE(states.size(), 2u);
+
+    bool anyDifferent = false;
+    for (int n = 0; n < nEn; ++n)
+        if (std::abs(states[0][n] - states[1][n]) > 1e-9)
+            anyDifferent = true;
+    EXPECT_TRUE(anyDifferent) << "coefficients identical across different energies";
+}
+
+TEST_F(BuildContinuumStateTest, SatisfiesDefiningEigenrelation)
+{
+    // The doc's B2 "Done when" criterion: <phi_n|(E-H)|psi_bar_E> ~ 0 for
+    // every confined n, at each sampled energy. |psi_bar_E> = sum_n c_n|phi_n>
+    // + |B_N>, and {phi_n} is S-orthonormal with H phi_n = E_n S phi_n (the
+    // defining property of solveGeneralizedEigenproblem's output), so this
+    // reduces to E*(c_n + <phi_n|B_N>) - (c_n*E_n + <phi_n|H|B_N>) ~ 0.
+    // <phi_n|B_N> and <phi_n|H|B_N> are precomputeBoundaryCoupling's
+    // coeffs2/coeffs1, independently validated against brute-force
+    // bs.integral() calls by PrecomputeBoundaryCouplingTest above -- so this
+    // is not simply re-checking the algebra that defined c_n.
+    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(bs, order, nEn, Hmat, Smat, eigen);
+
+    for (size_t eIdx = 0; eIdx < Egrid.size(); ++eIdx)
+    {
+        double E = Egrid[eIdx];
+        for (int n = 0; n < nEn; ++n)
+        {
+            double c = states[eIdx][n];
+            double lhs = E * (c + coeffs2[n]) - (c * eigen.values[n] + coeffs1[n]);
+            EXPECT_NEAR(lhs, 0.0, 1e-9)
+                << "<phi_n|(E-H)|psi_bar_E> nonzero at n=" << n << ", E=" << E;
+        }
     }
 }
 
