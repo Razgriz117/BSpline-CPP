@@ -370,6 +370,19 @@ BoundStateClassification classifyBoundStates(const EigenResult &result, Real thr
     return out;
 }
 
+// === A3: well-containment diagnostic (SDD Sec. 5.2.3, Sec. 6.4) ===
+ContainmentCheck checkWellContainment(const bspline::BSpline &bs,
+                                       const std::vector<Real> &coeffs,
+                                       Real xBoundary,
+                                       Real tol)
+{
+    const int n = static_cast<int>(coeffs.size());
+    ContainmentCheck out;
+    out.psiPrimeAtBoundary = bs.eval(xBoundary, coeffs.data(), n, 1);
+    out.notWellContained = std::abs(out.psiPrimeAtBoundary) > tol;
+    return out;
+}
+
 Real analyticHydrogenEnergy(int n, int L)
 {
     const double n_eff = static_cast<double>(n + L);

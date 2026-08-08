@@ -151,6 +151,29 @@ struct BoundStateClassification
 // is classified as an above-threshold pseudostate, not bound.
 BoundStateClassification classifyBoundStates(const EigenResult &result, Real threshold);
 
+// === A3: well-containment diagnostic (SDD Sec. 5.2.3, Sec. 6.4) ===
+// Result of checkWellContainment: the raw signed derivative plus the
+// pass/fail flag derived from it.
+struct ContainmentCheck
+{
+    Real psiPrimeAtBoundary; // psi'(xBoundary), as returned by BSpline::eval
+    bool notWellContained;   // true iff |psiPrimeAtBoundary| > tol
+};
+
+// Well-containment diagnostic (SDD Sec. 5.2.3 Figure 6 "BOUND" node; Sec. 6.4
+// data-validation rule): a bound state confined within the box should decay
+// to numerically-zero slope at the outer wall; a nonzero psi'(xBoundary)
+// means the state is "colliding" with the wall and its energy/wavefunction
+// may be inaccurate. `coeffs` is whatever eigenstateCoefficients produces
+// (already zero-padded at both ends) for a single eigenstate; `xBoundary` is
+// typically rMax (or rMin for a left-side check). Strict '>': a derivative
+// magnitude exactly equal to tol is the marginal case and is not flagged,
+// mirroring classifyBoundStates' strict-inequality boundary convention.
+ContainmentCheck checkWellContainment(const bspline::BSpline &bs,
+                                       const std::vector<Real> &coeffs,
+                                       Real xBoundary,
+                                       Real tol = 1e-3);
+
 // Analytic hydrogenic energy: E = -1 / (2 * (n + L)^2).
 Real analyticHydrogenEnergy(int n, int L);
 

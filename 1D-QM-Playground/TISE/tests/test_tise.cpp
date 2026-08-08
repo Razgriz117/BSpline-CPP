@@ -835,6 +835,144 @@ TEST_F(ClassifyBoundStatesSquareWellTest, BoundEnergiesMatchAnalyticOddParityRoo
 }
 
 // ---------------------------------------------------------------------------
+// checkWellContainment
+// ---------------------------------------------------------------------------
+
+class WellContainmentSmallBoxTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        int nBs = bs.getNBSplines();
+        int nEn = nBs - 2;
+
+        double rMid = rMin + (rMax - rMin) / 2.0;
+        std::string expr = std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x";
+        std::map<std::string, std::string> potential = {
+            {"[" + std::to_string(rMin) + ", " + std::to_string(rMid) + ")", expr},
+            {"[" + std::to_string(rMid) + ", " + std::to_string(rMax) + "]", expr}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        auto result = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+        coeffs = tise::eigenstateCoefficients(result.vectors, 1, nEn, nBs);
+    }
+
+    // Deliberately too small: rMax=2.0 is only ~2 decay lengths beyond the
+    // hydrogenic ground state's kappa=1, so the ground state "collides" with
+    // the wall. |psi'(2.0)| ~ 0.27, ~270x the default tol (see plan doc).
+    int nNodes = 31, order = 8, L = 0;
+    double rMin = 0.0, rMax = 2.0;
+    bspline::BSpline bs;
+    std::vector<double> coeffs;
+};
+
+TEST_F(WellContainmentSmallBoxTest, FlagsGroundState)
+{
+    auto c = tise::checkWellContainment(bs, coeffs, rMax);
+    EXPECT_TRUE(c.notWellContained);
+}
+
+class WellContainmentLargeBoxTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        int nBs = bs.getNBSplines();
+        int nEn = nBs - 2;
+
+        double rMid = rMin + (rMax - rMin) / 2.0;
+        std::string expr = std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x";
+        std::map<std::string, std::string> potential = {
+            {"[" + std::to_string(rMin) + ", " + std::to_string(rMid) + ")", expr},
+            {"[" + std::to_string(rMid) + ", " + std::to_string(rMax) + "]", expr}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        auto result = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+        coeffs = tise::eigenstateCoefficients(result.vectors, 1, nEn, nBs);
+    }
+
+    // Matches SolveEigenTest's converged box -- ~60 decay lengths of margin
+    // for the ground state (|psi'(60.0)| ~ 1e-24).
+    int nNodes = 31, order = 8, L = 0;
+    double rMin = 0.0, rMax = 60.0;
+    bspline::BSpline bs;
+    std::vector<double> coeffs;
+};
+
+TEST_F(WellContainmentLargeBoxTest, DoesNotFlagGroundState)
+{
+    auto c = tise::checkWellContainment(bs, coeffs, rMax);
+    EXPECT_FALSE(c.notWellContained);
+}
+
+TEST_F(WellContainmentLargeBoxTest, DerivativeMatchesDirectBsEvalCall)
+{
+    auto c = tise::checkWellContainment(bs, coeffs, rMax);
+    const int n = static_cast<int>(coeffs.size());
+    double direct = bs.eval(rMax, coeffs.data(), n, 1);
+    EXPECT_NEAR(c.psiPrimeAtBoundary, direct, 1e-15);
+}
+
+// Cheap, non-physics fixture (mirrors WriteEigenstateTest's setup) that pins
+// checkWellContainment's tol-comparison semantics exactly, independent of
+// LAPACK/muparser. Coefficients ramp from 1 (interior) to a hard 0 at both
+// ends (mirrors eigenstateCoefficients' zero-padding), robust to exactly
+// which B-spline's support reaches the boundary -- WriteEigenstateTest's own
+// single-mid-coefficient pattern was checked and does NOT reach x=grid.back()
+// for nNodes=11/order=4, so that exact pattern isn't reused here.
+class WellContainmentSyntheticTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = i * 1.0 / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        int nBSplines = bs.getNBSplines();
+        coeffs.assign(nBSplines, 1.0);
+        coeffs.front() = 0.0;
+        coeffs.back() = 0.0;
+        xBoundary = grid.back();
+    }
+
+    int nNodes = 11, order = 4;
+    bspline::BSpline bs;
+    std::vector<double> coeffs;
+    double xBoundary = 0.0;
+};
+
+TEST_F(WellContainmentSyntheticTest, DerivativeExactlyAtToleranceIsNotFlagged)
+{
+    const int n = static_cast<int>(coeffs.size());
+    double raw = bs.eval(xBoundary, coeffs.data(), n, 1);
+    ASSERT_NE(raw, 0.0) << "test setup assumption: psi'(xBoundary) must be nonzero";
+
+    auto c = tise::checkWellContainment(bs, coeffs, xBoundary, std::abs(raw));
+    EXPECT_NEAR(c.psiPrimeAtBoundary, raw, 1e-15);
+    EXPECT_FALSE(c.notWellContained)
+        << "exactly at tol is the marginal case: strict '>' required to flag";
+}
+
+TEST_F(WellContainmentSyntheticTest, DerivativeJustAboveToleranceIsFlagged)
+{
+    const int n = static_cast<int>(coeffs.size());
+    double raw = bs.eval(xBoundary, coeffs.data(), n, 1);
+    ASSERT_NE(raw, 0.0) << "test setup assumption: psi'(xBoundary) must be nonzero";
+
+    auto c = tise::checkWellContainment(bs, coeffs, xBoundary, std::abs(raw) * 0.999999);
+    EXPECT_TRUE(c.notWellContained);
+}
+
+// ---------------------------------------------------------------------------
 // writeEigenstate
 // ---------------------------------------------------------------------------
 
