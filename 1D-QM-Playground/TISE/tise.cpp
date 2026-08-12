@@ -1,7 +1,10 @@
 #include "tise.hpp"
 
+#define _USE_MATH_DEFINES
+
 #include <cassert>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <ostream>
@@ -33,6 +36,15 @@ std::vector<Real> buildUniformRadialGrid(int nNodes, Real rMin, Real rMax)
     const Real span = rMax - rMin;
     for (int i = 0; i < nNodes; ++i)
         grid[i] = rMin + span * static_cast<Real>(i) / static_cast<Real>(nNodes - 1);
+    return grid;
+}
+
+std::vector<Real> buildEnergyGrid(Real E_threshold, Real E_max, int N_E)
+{
+    std::vector<Real> grid(N_E);
+    const Real span = E_max - E_threshold;
+    for (int i = 1; i <= N_E; ++i)
+        grid[i - 1] = E_threshold + span * static_cast<Real>(i) / static_cast<Real>(N_E);
     return grid;
 }
 
@@ -155,7 +167,6 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::m
 }
 
 std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
-    const bspline::BSpline &bs, 
     int order, int nEn, 
     std::vector<Real> Hmat, 
     std::vector<Real> Smat, 
@@ -204,14 +215,13 @@ std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
 }
 
 std::vector<std::vector<Real>> buildContinuumState(
-    const bspline::BSpline &bs, 
     int order, int nEn, 
     std::vector<Real> Hmat, 
     std::vector<Real> Smat, 
     EigenResult eigen,
     std::vector<Real> grid)
 {
-    auto [coeffs1, coeffs2] = precomputeBoundaryCoupling(bs, order, nEn, Hmat, Smat, eigen);
+    auto [coeffs1, coeffs2] = precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen);
     
     std::vector<std::vector<Real>> states(grid.size(), std::vector<Real>(eigen.values.size() + 1, 0.0));
 
@@ -227,6 +237,89 @@ std::vector<std::vector<Real>> buildContinuumState(
 
     return states;
 
+}
+
+AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, std::vector<Real> grid, Real R)
+{
+    AsymptoticResult result;
+    result.A_E = std::vector<Real>(grid.size(), 0.0);
+    result.delta = std::vector<Real>(grid.size(), 0.0);
+    result.dDeltaDE = std::vector<Real>(grid.size(), 0.0);
+
+    // for each E, first find \bar psi_E(R) and \bar psi'_E(R), then calculate A_E, delta
+    for (int E_idx = 0; E_idx < grid.size(); ++E_idx)
+    {
+        Real psi_R = bs.eval(R, states[E_idx].data(), states[E_idx].size(), 0);
+        Real psiPrime_R = bs.eval(R, states[E_idx].data(), states[E_idx].size(), 1);
+
+        Real k = sqrt(2 * grid[E_idx]);
+
+        result.A_E[E_idx] = sqrt(
+            (2 / M_PI) / 
+            (
+                k * pow(psi_R, 2) +
+                pow(psiPrime_R, 2) / k
+            )
+        );
+
+        result.delta[E_idx] = std::atan(
+            (k * psi_R) /
+            (psiPrime_R)
+        ) - (k * R);
+    }
+
+    // now that result.delta is filled, we can find result.dDeltaDE
+    for (int E_idx = 0; E_idx < grid.size(); ++E_idx)
+    {
+        Real dE = grid[1] - grid[0];
+        Real dSin2DeltaDE;
+        if (E_idx == 0)
+            dSin2DeltaDE = (std::sin(2*result.delta[E_idx+1]) - std::sin(2*result.delta[E_idx])) / dE;
+        else if (E_idx == grid.size() - 1)
+            dSin2DeltaDE = (std::sin(2*result.delta[E_idx]) - std::sin(2*result.delta[E_idx-1])) / dE; // TODO: will this sign be wrong
+        else
+            dSin2DeltaDE = (std::sin(2*result.delta[E_idx+1]) - std::sin(2*result.delta[E_idx-1])) / (2*dE);
+
+        result.dDeltaDE[E_idx] = dSin2DeltaDE / (2.0 * std::cos(2.0 * result.delta[E_idx]));
+    }
+
+    return result;
+}
+
+void writeContinuumInfo(std::ostream &out,
+                     const bspline::BSpline &bs,
+                     const AsymptoticResult &result,
+                     const std::vector<Real> &grid,
+                     const std::vector<std::vector<Real>> &states,
+                     std::vector<std::ostream *> stateOut,
+                     int npts,
+                     Real rMin,
+                     Real rMax)
+{
+    // phase_shifts.dat: 3-col epsilon_i, delta(epsilon_i), dDelta/dE
+    out << std::scientific << std::setprecision(16);
+    for (std::size_t i = 0; i < grid.size(); ++i)
+    {
+        out << " " << std::setw(24) << grid[i]
+            << " " << std::setw(24) << result.delta[i]
+            << " " << std::setw(24) << result.dDeltaDE[i] << "\n";
+    }
+
+    // continuum_state_NNN.dat: 2-col x, psi_{epsilon_i}(x), one block per energy
+    for (std::size_t i = 0; i < grid.size(); ++i)
+    {
+        std::ostream &stOut = *stateOut[i];
+        stOut << std::scientific << std::setprecision(16);
+        const int n = static_cast<int>(states[i].size());
+        for (int ix = 1; ix <= npts; ++ix)
+        {
+            Real x = rMin + (rMax - rMin) *
+                     static_cast<Real>(ix - 1) / static_cast<Real>(npts - 1);
+            Real psi = result.A_E[i] * bs.eval(x, states[i].data(), n);
+            stOut << " " << std::setw(24) << x
+                  << " " << std::setw(24) << psi << "\n";
+        }
+    }
 }
 
 EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
@@ -309,7 +402,8 @@ void writeEigenstate(std::ostream &out,
     }
 }
 
-EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential)
+EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
+                       Real E_threshold, Real E_max, int N_E)
 {
     auto grid = buildUniformRadialGrid(nNodes, rMin, rMax);
 
@@ -325,7 +419,22 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::m
     auto [H, S] = fillBandedMatrices(bs, nEn, order, L, potential);
     EigenResult er = solveGeneralizedEigenproblem(H, S, nEn, order);
 
-    buildContinuumState(bs, order, nEn, H, S, er, grid);
+    auto energyGrid = buildEnergyGrid(E_threshold, E_max, N_E);
+    std::vector<std::vector<tise::Real>> states = buildContinuumState(order, nEn, H, S, er, energyGrid);
+    AsymptoticResult ar = matchAsymptotic(bs, states, energyGrid, 100);
+
+    std::ofstream phaseShiftsOut("phase_shifts.dat");
+    std::vector<std::ofstream> continuumStateFiles;
+    continuumStateFiles.reserve(energyGrid.size());
+    std::vector<std::ostream *> continuumStateOut;
+    for (std::size_t i = 0; i < energyGrid.size(); ++i)
+    {
+        std::ostringstream oss;
+        oss << "continuum_state_" << std::setw(3) << std::setfill('0') << (i + 1) << ".dat";
+        continuumStateFiles.emplace_back(oss.str());
+        continuumStateOut.push_back(&continuumStateFiles.back());
+    }
+    writeContinuumInfo(phaseShiftsOut, bs, ar, energyGrid, states, continuumStateOut, 301, rMin, rMax);
 
     return er;
 }

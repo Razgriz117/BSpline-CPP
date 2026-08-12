@@ -19,8 +19,23 @@ struct EigenResult
     int ldz;                   // leading dimension (== dim)
 };
 
+// Holds the output of matchAsymptotic, A_E, delta, dDeltaDE for each energy E in the input energy grid.
+struct AsymptoticResult
+{
+    std::vector<Real> A_E;
+    std::vector<Real> delta;
+    std::vector<Real> dDeltaDE;
+};
+
 // Build a uniform radial grid of nNodes points on [rMin, rMax].
 std::vector<Real> buildUniformRadialGrid(int nNodes, Real rMin, Real rMax);
+
+// Build a uniform energy grid epsilon_i = E_threshold + (E_max - E_threshold)/N_E * i,
+// for i = 1..N_E. Sampling starts at i=1 (never i=0) to avoid the k=0 (E=E_threshold=0)
+// singularity in matchAsymptotic's matching formulas; per
+// docs/planning/tise-task-breakdown.md B2, this generalizes the PDF's
+// [0, E_max] grid to a user-supplied [E_threshold, E_max] window.
+std::vector<Real> buildEnergyGrid(Real E_threshold, Real E_max, int N_E);
 
 // Radial hydrogen-like potential V_L(x) = L(L+1)/(2x^2) - 1/x.
 double radialPotential(double x, int L);
@@ -35,19 +50,35 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::m
 // Given the set of BSplines, Hamiltonian, and eigenvectors, solve for:
 // < phi_n | H | B_N > and < phi_n | B_N >, for each eigenvector
 // These are returned as {coeffs1, coeffs2}, each with length equal to the number of eigenvectors
-std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(const bspline::BSpline &bs, int order, int nEn, std::vector<Real> Hmat, std::vector<Real> Smat, EigenResult eigen);
+std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(int order, int nEn, std::vector<Real> Hmat, std::vector<Real> Smat, EigenResult eigen);
 
 // given the output of precomputeBoundaryCoupling, construct continuum states |\bar\psi_E> (linear combinations of eigenvectors) 
 // for each energy E on the input grid. The result is stored as a 2-D vector with (# Energy points) elements of length (# eigenvectors)
 // note that each energy has a state with (# eigenvectors + 1) elements, but the coefficient for the last element is always 1 (and corresponds to B_N).
 std::vector<std::vector<Real>> buildContinuumState(
-    const bspline::BSpline &bs, 
     int order, int nEn, 
     std::vector<Real> Hmat, 
     std::vector<Real> Smat, 
     EigenResult eigen,
     std::vector<Real> grid
 );
+
+AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, std::vector<Real> grid, Real R);
+
+// Writes phase_shifts.dat-style output (epsilon_i, delta, dDeltaDE) to `out`,
+// and one continuum_state_NNN.dat-style block (x, psi_E(x)) per energy to
+// `stateOut[i]`. `grid` and `states` are the energy grid and per-energy
+// B-spline coefficient vectors produced by buildContinuumState; `result` is
+// matchAsymptotic's output for that same grid.
+void writeContinuumInfo(std::ostream &out,
+                     const bspline::BSpline &bs,
+                     const AsymptoticResult &result,
+                     const std::vector<Real> &grid,
+                     const std::vector<std::vector<Real>> &states,
+                     std::vector<std::ostream *> stateOut,
+                     int npts,
+                     Real rMin,
+                     Real rMax);
 
 // Solve H c = E S c via LAPACK DSBGV.
 // H and S are consumed (overwritten); pass by value intentionally.
@@ -78,8 +109,11 @@ void writeEigenstate(std::ostream &out,
                      Real rMin,
                      Real rMax);
 
-// Top-level TISE solver: build grid, fill matrices, diagonalise.
+// Top-level TISE solver: build grid, fill matrices, diagonalise, then construct
+// and write continuum states/phase shifts on the energy grid
+// [E_threshold, E_max] (N_E points, per buildEnergyGrid).
 // `potential` is the piecewise potential passed through to fillBandedMatrices.
-EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential);
+EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
+                       Real E_threshold, Real E_max, int N_E);
 
 } // namespace tise

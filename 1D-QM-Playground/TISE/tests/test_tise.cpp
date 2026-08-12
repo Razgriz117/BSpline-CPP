@@ -440,14 +440,14 @@ protected:
 
 TEST_F(PrecomputeBoundaryCouplingTest, ReturnsOneCoefficientPerEigenstate)
 {
-    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(bs, order, nEn, Hmat, Smat, eigen);
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen);
     EXPECT_EQ(static_cast<int>(coeffs1.size()), nEn);
     EXPECT_EQ(static_cast<int>(coeffs2.size()), nEn);
 }
 
 TEST_F(PrecomputeBoundaryCouplingTest, MatchesBruteForceIntegrals)
 {
-    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(bs, order, nEn, Hmat, Smat, eigen);
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen);
     ASSERT_EQ(static_cast<int>(coeffs1.size()), nEn);
     ASSERT_EQ(static_cast<int>(coeffs2.size()), nEn);
 
@@ -533,13 +533,13 @@ protected:
 
 TEST_F(BuildContinuumStateTest, ReturnsOneStatePerEnergyGridPoint)
 {
-    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
     EXPECT_EQ(static_cast<int>(states.size()), static_cast<int>(Egrid.size()));
 }
 
 TEST_F(BuildContinuumStateTest, EachStateHasNEnPlusOneCoefficients)
 {
-    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
     for (const auto &state : states)
         EXPECT_EQ(static_cast<int>(state.size()), nEn + 1);
 }
@@ -548,7 +548,7 @@ TEST_F(BuildContinuumStateTest, LastCoefficientIsAlwaysOne)
 {
     // The B_N term's coefficient in |psi_bar_E> = sum_n |phi_n> c_n + |B_N>
     // is exactly 1, for every energy on the grid.
-    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
     for (size_t e = 0; e < states.size(); ++e)
         EXPECT_DOUBLE_EQ(states[e][nEn], 1.0) << "B_N coefficient wrong at E_idx=" << e;
 }
@@ -559,7 +559,7 @@ TEST_F(BuildContinuumStateTest, CoefficientsVaryWithEnergy)
     // constant, independent of E, if B_N is mistakenly drawn from inside
     // span{phi_n} rather than the true dropped last B-spline -- see
     // PrecomputeBoundaryCouplingTest above.)
-    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
     ASSERT_GE(states.size(), 2u);
 
     bool anyDifferent = false;
@@ -580,8 +580,8 @@ TEST_F(BuildContinuumStateTest, SatisfiesDefiningEigenrelation)
     // coeffs2/coeffs1, independently validated against brute-force
     // bs.integral() calls by PrecomputeBoundaryCouplingTest above -- so this
     // is not simply re-checking the algebra that defined c_n.
-    auto states = tise::buildContinuumState(bs, order, nEn, Hmat, Smat, eigen, Egrid);
-    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(bs, order, nEn, Hmat, Smat, eigen);
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen);
 
     for (size_t eIdx = 0; eIdx < Egrid.size(); ++eIdx)
     {

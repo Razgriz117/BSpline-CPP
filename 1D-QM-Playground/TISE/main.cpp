@@ -37,6 +37,11 @@ constexpr int    NPTS_EIGENSTATE = 301;
 constexpr int    TIME_STEPS      = 1000;
 constexpr double DT              = 0.3;
 
+// Continuum energy-grid parameters (REQ-F-040); see buildEnergyGrid.
+constexpr double E_THRESHOLD = 0.0;
+constexpr double E_MAX       = 2.0;
+constexpr int    N_E         = 50;
+
 // Parse a JSON array of {"domain": ..., "function": ...} objects (as produced by
 // the controller module from a YAML "potential" list) into a domain-string -> expression-string
 // map. Each entry describes one piece of a piecewise-defined potential; the
@@ -70,7 +75,8 @@ int main(int argc, char *argv[])
     tise::EigenResult er;
     try
     {
-        er = tise::solveTISE(BS_NNODS, BS_ORDER, BS_GRMIN, BS_GRMAX, L, potential);
+        er = tise::solveTISE(BS_NNODS, BS_ORDER, BS_GRMIN, BS_GRMAX, L, potential,
+                             E_THRESHOLD, E_MAX, N_E);
     }
     catch (const std::exception &e)
     {
