@@ -1,0 +1,2 @@
+1. Are we doing input validation? If so, how? Are the left and right bounds (e.g., R in the original continuum document) validated to ensure they're physically accurate? If we expect the potential to be zero beyond R, is this validated when R is given as input?
+2. Create a simple integration test that verifies no regressions take place in the behavior of the existing H-Boundstates executable. In other words, this test would ensure that no matter how we modify the TIST module, the previously produced results of the H-Boundstates module can be reproduced.
