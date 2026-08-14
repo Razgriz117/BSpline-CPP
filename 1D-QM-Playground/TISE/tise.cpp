@@ -294,9 +294,63 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
     return result;
 }
 
-std::pair<std::vector<Real>, std::vector<Real>>
-fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::map<std::string, std::string> potential)
+namespace
 {
+// colOf[i] = 1-based matrix column for physical B-spline i (1-based), or 0
+// if i is excluded by dropSet. Size nBSplines+1 (index 0 unused). nKept is
+// the true number of surviving indices.
+struct ColumnMap
+{
+    std::vector<int> colOf;
+    int nKept;
+};
+
+ColumnMap columnIndexMap(int nBSplines, const std::vector<int> &dropSet)
+{
+    std::vector<bool> isDropped(nBSplines + 1, false);
+    for (int d : dropSet)
+    {
+        if (d < 1 || d > nBSplines)
+            throw std::runtime_error("dropSet index out of range [1," +
+                                      std::to_string(nBSplines) + "]: " + std::to_string(d));
+        isDropped[d] = true;
+    }
+    std::vector<int> colOf(nBSplines + 1, 0);
+    int c = 0;
+    for (int idx = 1; idx <= nBSplines; ++idx)
+        if (!isDropped[idx])
+            colOf[idx] = ++c;
+    return {colOf, c};
+}
+
+// Shared by fillBandedMatrices/eigenstateCoefficients: resolves the
+// caller's optional drop-set to the classic {1, nBSplines} default when
+// absent, and validates nEn matches the true kept count. Both functions
+// must reach this exact same check -- a mismatch here previously risked a
+// silent out-of-bounds write (see docs/planning/engineer-a-plan-A4b.md,
+// "An independent design review" section, for the worked counterexample:
+// nBSplines=10, order=4, dropSet={1,10}, nEn=7 -> 4-element OOB write).
+ColumnMap resolveDropSet(int nBSplines, int nEn, const std::optional<std::vector<int>> &dropSet)
+{
+    std::vector<int> drop = dropSet.value_or(std::vector<int>{1, nBSplines});
+    ColumnMap map = columnIndexMap(nBSplines, drop);
+    if (map.nKept != nEn)
+        throw std::runtime_error("nEn (" + std::to_string(nEn) +
+                                  ") does not match nBSplines - |dropSet| (" +
+                                  std::to_string(map.nKept) + ")");
+    return map;
+}
+} // namespace
+
+std::pair<std::vector<Real>, std::vector<Real>>
+fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
+                    std::map<std::string, std::string> potential,
+                    std::optional<std::vector<int>> dropSet)
+{
+    const int nBSplines = bs.getNBSplines();
+    const ColumnMap map = resolveDropSet(nBSplines, nEn, dropSet);
+    const std::vector<int> &colOf = map.colOf;
+
     std::vector<Real> Hmat(order * nEn, 0.0);
     std::vector<Real> Smat(order * nEn, 0.0);
 
@@ -317,21 +371,27 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::m
         return (row - 1) + (col - 1) * order;
     };
 
-    for (int iBs2 = 2; iBs2 <= nEn + 1; ++iBs2)
+    for (int iBs2 = 1; iBs2 <= nBSplines; ++iBs2)
     {
-        int iBs1Min = std::max(2, iBs2 - order + 1);
+        const int col2 = colOf[iBs2];
+        if (col2 == 0)
+            continue;
+        const int iBs1Min = std::max(1, iBs2 - order + 1);
         for (int iBs1 = iBs1Min; iBs1 <= iBs2; ++iBs1)
         {
-            Real overlap  = bs.integral(fUni, iBs1, iBs2);
-            Real kinetic  = bs.integral(fUni, iBs1, iBs2, 1, 1) / 2.0;
-            Real potential = bs.integral(fPot, iBs1, iBs2, 0, 0, parvec);
+            const int col1 = colOf[iBs1];
+            if (col1 == 0)
+                continue;
 
-            int col = iBs2 - 1;
-            int row = iBs1 + order - iBs2;
-            int idx = bandIndex(row, col);
+            Real overlap       = bs.integral(fUni, iBs1, iBs2);
+            Real kinetic       = bs.integral(fUni, iBs1, iBs2, 1, 1) / 2.0;
+            Real potentialTerm = bs.integral(fPot, iBs1, iBs2, 0, 0, parvec);
+
+            const int row = order + col1 - col2;
+            const int idx = bandIndex(row, col2);
 
             Smat[idx] = overlap;
-            Hmat[idx] = kinetic + potential;
+            Hmat[idx] = kinetic + potentialTerm;
         }
     }
 
@@ -594,6 +654,40 @@ std::vector<Real> buildStrategicRadialGrid(int nNodes, Real rMin, Real rMax,
     return grid;
 }
 
+// === A4b: generalized B-spline drop-set (REQ-F-050 table row 4) ===
+// Physical B-spline indices (1-based) whose support touches x, given the
+// same (nNodes, order, grid) that will be passed to BSpline::init. Support
+// of B-spline Bs spans extended-knot indices [Bs-order, Bs] (verified
+// against BSpline::init's own construction, BSpline.cpp:204-230: the
+// extended grid clamps to grid.front()/grid.back() outside [0,nNodes-1],
+// and each B-spline's defining knot vector starts at extended index
+// Bs-order). Closed-interval ("touches", not strict interior support): a
+// B-spline whose support ends exactly at x is included -- appropriate for
+// identifying removal candidates at exactly a singular x, where being
+// slightly inclusive is the conservative choice. Note: touching a domain
+// *boundary* point pulls in an entire cluster of `order` B-splines (all of
+// them clamp to the same boundary knot), not just one -- see
+// docs/planning/engineer-a-plan-A4b.md for the worked example.
+std::vector<int> bSplinesTouchingX(int nNodes, int order, const std::vector<Real> &grid, Real x)
+{
+    auto knotAt = [&](int i) -> Real {
+        if (i < 0) return grid.front();
+        if (i >= nNodes) return grid.back();
+        return grid[i];
+    };
+
+    const int nBSplines = nNodes + order - 2;
+    std::vector<int> touching;
+    for (int bs = 1; bs <= nBSplines; ++bs)
+    {
+        const Real lo = knotAt(bs - order);
+        const Real hi = knotAt(bs);
+        if (x >= lo && x <= hi)
+            touching.push_back(bs);
+    }
+    return touching;
+}
+
 Real analyticHydrogenEnergy(int n, int L)
 {
     const double n_eff = static_cast<double>(n + L);
@@ -608,12 +702,17 @@ Real eigenvalueError(Real computed, int n, int L)
 std::vector<Real> eigenstateCoefficients(const std::vector<Real> &evec,
                                           int iEn,
                                           int nEn,
-                                          int nBSplines)
+                                          int nBSplines,
+                                          std::optional<std::vector<int>> dropSet)
 {
+    const ColumnMap map = resolveDropSet(nBSplines, nEn, dropSet);
+    const std::vector<int> &colOf = map.colOf;
+
     std::vector<Real> coeffs(nBSplines, 0.0);
     const Real *col = &evec[(iEn - 1) * nEn];
-    for (int k = 0; k < nEn; ++k)
-        coeffs[1 + k] = col[k];
+    for (int physicalIdx = 1; physicalIdx <= nBSplines; ++physicalIdx)
+        if (colOf[physicalIdx] != 0)
+            coeffs[physicalIdx - 1] = col[colOf[physicalIdx] - 1];
     return coeffs;
 }
 

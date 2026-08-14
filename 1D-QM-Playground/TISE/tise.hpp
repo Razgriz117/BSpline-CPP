@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 #include <map>
@@ -125,8 +126,21 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
 // Returns {Hmat, Smat}, each of size order * nEn.
 // `potential` maps domain strings (e.g. "[0, inf)") to muparser expressions in
 // `x`; the piece whose domain contains a given x is evaluated to give V(x).
+//
+// === A4b: generalized drop-set (REQ-F-050 table row 4) ===
+// `dropSet`, if provided, is the exact set of 1-based physical B-spline
+// indices to exclude from the eigenproblem (may include interior indices,
+// e.g. B-splines flanking a singular point -- see bSplinesTouchingX).
+// nullopt (the default) reproduces the original hardcoded convention,
+// dropping exactly {1, bs.getNBSplines()} -- bit-identical to this
+// function's pre-A4b behavior (proved in docs/planning/engineer-a-plan-A4b.md).
+// `nEn` MUST equal bs.getNBSplines() minus the resolved drop-set's size, or
+// this throws std::runtime_error (see the plan doc for why this check
+// exists -- a mismatch here previously risked a silent out-of-bounds write).
 std::pair<std::vector<Real>, std::vector<Real>>
-fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L, std::map<std::string, std::string> potential);
+fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
+                    std::map<std::string, std::string> potential,
+                    std::optional<std::vector<int>> dropSet = std::nullopt);
 
 // Solve H c = E S c via LAPACK DSBGV.
 // H and S are consumed (overwritten); pass by value intentionally.
@@ -241,6 +255,22 @@ std::vector<StrategicKnot> strategicKnotsFromJoins(const std::vector<DetectedJoi
 std::vector<Real> buildStrategicRadialGrid(int nNodes, Real rMin, Real rMax,
                                             const std::vector<StrategicKnot> &knots);
 
+// === A4b: generalized B-spline drop-set (REQ-F-050 table row 4) ===
+// Physical B-spline indices (1-based) whose support touches x, given the
+// same (nNodes, order, grid) that will be passed to BSpline::init. Support
+// of B-spline Bs spans extended-knot indices [Bs-order, Bs] (verified
+// against BSpline::init's own construction, BSpline.cpp:204-230: the
+// extended grid clamps to grid.front()/grid.back() outside [0,nNodes-1],
+// and each B-spline's defining knot vector starts at extended index
+// Bs-order). Closed-interval ("touches", not strict interior support): a
+// B-spline whose support ends exactly at x is included -- appropriate for
+// identifying removal candidates at exactly a singular x, where being
+// slightly inclusive is the conservative choice. Note: touching a domain
+// *boundary* point pulls in an entire cluster of `order` B-splines (all of
+// them clamp to the same boundary knot), not just one -- see
+// docs/planning/engineer-a-plan-A4b.md for the worked example.
+std::vector<int> bSplinesTouchingX(int nNodes, int order, const std::vector<Real> &grid, Real x);
+
 // Analytic hydrogenic energy: E = -1 / (2 * (n + L)^2).
 Real analyticHydrogenEnergy(int n, int L);
 
@@ -248,12 +278,19 @@ Real analyticHydrogenEnergy(int n, int L);
 Real eigenvalueError(Real computed, int n, int L);
 
 // Extract eigenvector column iEn (1-based) from the column-major evec array
-// and embed it into a zero-padded vector of length nBSplines.
-// coeffs[0] = 0, coeffs[1..nEn] = evec column, coeffs[nEn+1] = 0.
+// and embed it into a zero-padded vector of length nBSplines. Physical
+// indices in `dropSet` (or {1,nBSplines} if omitted -- see
+// fillBandedMatrices, same contract) get 0; kept indices get their
+// eigenvector component, in ascending physical-index order (must match
+// whatever dropSet fillBandedMatrices was called with, or coefficients
+// will be silently misattributed -- both functions share the same
+// resolveDropSet helper, so passing the same dropSet to both guarantees
+// consistency).
 std::vector<Real> eigenstateCoefficients(const std::vector<Real> &evec,
                                           int iEn,
                                           int nEn,
-                                          int nBSplines);
+                                          int nBSplines,
+                                          std::optional<std::vector<int>> dropSet = std::nullopt);
 
 // Write a single eigenstate to `out`: npts lines of "x  psi(x)".
 void writeEigenstate(std::ostream &out,

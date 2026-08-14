@@ -1280,3 +1280,243 @@ TEST_F(WriteEigenstateTest, LastXIsRMax)
     while (in >> x >> y) lastX = x;
     EXPECT_NEAR(lastX, 0.9, 1e-14);
 }
+
+// ---------------------------------------------------------------------------
+// fillBandedMatrices -- generalized drop-set (A4b)
+// ---------------------------------------------------------------------------
+
+TEST(FillBandedMatricesDropSetTest, ExplicitClassicDropSetMatchesDefault)
+{
+    const int order = 8, nNodes = 15;
+    std::vector<double> grid(nNodes);
+    for (int i = 0; i < nNodes; ++i) grid[i] = i;
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    const int nBSplines = bs.getNBSplines();
+    const int nEn = nBSplines - 2;
+
+    std::map<std::string, std::string> potential = {{"[0," + std::to_string(nNodes - 1) + "]", "x"}};
+    auto [H1, S1] = tise::fillBandedMatrices(bs, nEn, order, 0, potential);
+    auto [H2, S2] = tise::fillBandedMatrices(bs, nEn, order, 0, potential, std::vector<int>{1, nBSplines});
+
+    EXPECT_EQ(H1, H2);
+    EXPECT_EQ(S1, S2);
+}
+
+TEST(FillBandedMatricesDropSetTest, InteriorDropSetMatchesDirectIntegralAtMappedPositions)
+{
+    // order=4, nNodes=6 -> nBSplines=8. dropSet={1,4,8}: both classic ends
+    // plus one interior index. Kept={2,3,5,6,7} (nEn=5) get columns
+    // 1,2,3,4,5 respectively (hand-derived: docs/planning/engineer-a-plan-A4b.md).
+    const int order = 4, nNodes = 6;
+    std::vector<double> grid = {0, 1, 2, 3, 4, 5};
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    ASSERT_EQ(bs.getNBSplines(), 8);
+
+    std::map<std::string, std::string> potential = {{"[0,5]", "1.0"}};
+    std::vector<int> dropSet = {1, 4, 8};
+    const int nEn = 5;
+    auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, 0, potential, dropSet);
+
+    bspline::D2DFun fUni = [](double, const double *) { return 1.0; };
+    bspline::D2DFun fPot = [&](double x, const double *) { return tise::evaluateFunction(potential, x); };
+    double parvec[1] = {0.0};
+    auto bandIndex = [&](int row, int col) { return (row - 1) + (col - 1) * order; };
+    auto directH = [&](int iBs1, int iBs2) {
+        return bs.integral(fUni, iBs1, iBs2, 1, 1) / 2.0 + bs.integral(fPot, iBs1, iBs2, 0, 0, parvec);
+    };
+
+    // Physical (5,5) -> col(3,3), row=4+3-3=4, idx=bandIndex(4,3)=11.
+    EXPECT_NEAR(H[bandIndex(4, 3)], directH(5, 5), 1e-12);
+    // Physical (3,5) -> col(2,3), row=4+2-3=3, idx=bandIndex(3,3)=10.
+    EXPECT_NEAR(H[bandIndex(3, 3)], directH(3, 5), 1e-12);
+    // Physical (2,5) -> col(1,3), row=4+1-3=2, idx=bandIndex(2,3)=9.
+    EXPECT_NEAR(H[bandIndex(2, 3)], directH(2, 5), 1e-12);
+}
+
+TEST(FillBandedMatricesDropSetTest, EmptyDropSetKeepsAllBSplines)
+{
+    const int order = 4, nNodes = 6;
+    std::vector<double> grid = {0, 1, 2, 3, 4, 5};
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    const int nBSplines = bs.getNBSplines();
+    ASSERT_EQ(nBSplines, 8);
+
+    std::map<std::string, std::string> potential = {{"[0,5]", "1.0"}};
+    auto [H, S] = tise::fillBandedMatrices(bs, nBSplines, order, 0, potential, std::vector<int>{});
+
+    // Physical B-spline 1 (normally dropped) now has column 1; its diagonal
+    // overlap S(1,1) = ||B_1||^2 > 0 must appear at bandIndex(order,1).
+    auto bandIndex = [&](int row, int col) { return (row - 1) + (col - 1) * order; };
+    EXPECT_GT(S[bandIndex(order, 1)], 0.0);
+}
+
+TEST(FillBandedMatricesDropSetTest, MismatchedNEnThrows)
+{
+    const int order = 4, nNodes = 6;
+    std::vector<double> grid = {0, 1, 2, 3, 4, 5};
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    std::map<std::string, std::string> potential = {{"[0,5]", "1.0"}};
+    // nBSplines=8, dropSet={1,8} -> true nEn=6, but pass 5.
+    EXPECT_THROW(
+        tise::fillBandedMatrices(bs, 5, order, 0, potential, std::vector<int>{1, 8}),
+        std::runtime_error);
+}
+
+TEST(FillBandedMatricesDropSetTest, OutOfRangeDropSetIndexThrows)
+{
+    const int order = 4, nNodes = 6;
+    std::vector<double> grid = {0, 1, 2, 3, 4, 5};
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    std::map<std::string, std::string> potential = {{"[0,5]", "1.0"}};
+    EXPECT_THROW(
+        tise::fillBandedMatrices(bs, 7, order, 0, potential, std::vector<int>{0, 8}),
+        std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// eigenstateCoefficients -- generalized drop-set (A4b)
+// ---------------------------------------------------------------------------
+
+TEST(EigenstateCoefficientsDropSetTest, InteriorDropSetZeroesExactlyDroppedIndices)
+{
+    // Same nBSplines=8/dropSet={1,4,8} as the fillBandedMatrices test above.
+    // Synthetic single-column evec: components 10,20,30,40,50 for the 5
+    // kept columns.
+    const int nBSplines = 8, nEn = 5;
+    std::vector<double> evec = {10, 20, 30, 40, 50};
+    std::vector<int> dropSet = {1, 4, 8};
+
+    auto coeffs = tise::eigenstateCoefficients(evec, 1, nEn, nBSplines, dropSet);
+    ASSERT_EQ(coeffs.size(), 8u);
+
+    EXPECT_DOUBLE_EQ(coeffs[0], 0.0); // physical 1, dropped
+    EXPECT_DOUBLE_EQ(coeffs[3], 0.0); // physical 4, dropped
+    EXPECT_DOUBLE_EQ(coeffs[7], 0.0); // physical 8, dropped
+    EXPECT_DOUBLE_EQ(coeffs[1], 10.0); // physical 2 -> column 1
+    EXPECT_DOUBLE_EQ(coeffs[2], 20.0); // physical 3 -> column 2
+    EXPECT_DOUBLE_EQ(coeffs[4], 30.0); // physical 5 -> column 3
+    EXPECT_DOUBLE_EQ(coeffs[5], 40.0); // physical 6 -> column 4
+    EXPECT_DOUBLE_EQ(coeffs[6], 50.0); // physical 7 -> column 5
+}
+
+TEST(EigenstateCoefficientsDropSetTest, ClassicDropSetMatchesDefault)
+{
+    const int nBSplines = 8, nEn = 6;
+    std::vector<double> evec = {1, 2, 3, 4, 5, 6};
+    auto c1 = tise::eigenstateCoefficients(evec, 1, nEn, nBSplines);
+    auto c2 = tise::eigenstateCoefficients(evec, 1, nEn, nBSplines, std::vector<int>{1, nBSplines});
+    EXPECT_EQ(c1, c2);
+}
+
+TEST(EigenstateCoefficientsDropSetTest, MismatchedNEnThrows)
+{
+    std::vector<double> evec(5, 0.0);
+    EXPECT_THROW(
+        tise::eigenstateCoefficients(evec, 1, 5, 8, std::vector<int>{1, 8}), // true nEn=6
+        std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// bSplinesTouchingX
+// ---------------------------------------------------------------------------
+
+TEST(BSplinesTouchingXTest, MatchesHandComputedSupportAtInteriorPoint)
+{
+    std::vector<double> grid(11);
+    for (int i = 0; i < 11; ++i) grid[i] = i;
+    auto touching = tise::bSplinesTouchingX(11, 4, grid, 4.5);
+    std::vector<int> expected = {5, 6, 7, 8};
+    EXPECT_EQ(touching, expected);
+}
+
+TEST(BSplinesTouchingXTest, MatchesHandComputedSupportAtGridBoundary)
+{
+    std::vector<double> grid(11);
+    for (int i = 0; i < 11; ++i) grid[i] = i;
+    auto touching = tise::bSplinesTouchingX(11, 4, grid, 5.0);
+    std::vector<int> expected = {5, 6, 7, 8, 9};
+    EXPECT_EQ(touching, expected);
+}
+
+TEST(BSplinesTouchingXTest, EmptyOutsideDomain)
+{
+    std::vector<double> grid(11);
+    for (int i = 0; i < 11; ++i) grid[i] = i;
+    auto touching = tise::bSplinesTouchingX(11, 4, grid, 15.0);
+    EXPECT_TRUE(touching.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Round-trip and end-to-end (A4b's actual purpose: detection -> removal)
+// ---------------------------------------------------------------------------
+
+TEST(DropSetRoundTripTest, CoefficientsZeroExactlyAtDroppedIndicesAfterSolve)
+{
+    const int order = 8, nNodes = 21;
+    std::vector<double> grid(nNodes);
+    for (int i = 0; i < nNodes; ++i) grid[i] = i * 10.0 / (nNodes - 1);
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    const int nBSplines = bs.getNBSplines();
+
+    std::map<std::string, std::string> potential = {{"[0,10]", "0"}};
+    const int interior = nBSplines / 2;
+    std::vector<int> dropSet = {1, interior, nBSplines};
+    const int nEn = nBSplines - 3;
+
+    auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, 0, potential, dropSet);
+    auto result = tise::solveGeneralizedEigenproblem(std::move(H), std::move(S), nEn, order);
+    ASSERT_EQ(result.dim, nEn);
+
+    auto coeffs = tise::eigenstateCoefficients(result.vectors, 1, nEn, nBSplines, dropSet);
+    EXPECT_DOUBLE_EQ(coeffs[0], 0.0);
+    EXPECT_DOUBLE_EQ(coeffs[interior - 1], 0.0);
+    EXPECT_DOUBLE_EQ(coeffs[nBSplines - 1], 0.0);
+}
+
+TEST(SingularPotentialBSplineRemovalTest, RemovingBSplinesNearSingularityProducesFiniteSolution)
+{
+    // Coulomb-like singular potential at x=0 (mirrors A4a's own
+    // DetectPotentialStructureTest.SingularAtCoulombOrigin). Runs the full
+    // detection-to-removal pipeline: detectPotentialStructure finds the
+    // Singular join, bSplinesTouchingX turns it into a drop-set, the
+    // generalized fillBandedMatrices/eigenstateCoefficients use it -- this
+    // is what makes A4a's Singular detection "more than detection-only"
+    // per the master plan's own framing of A4b's purpose.
+    const int order = 8, nNodes = 41;
+    const double rMin = 0.0, rMax = 40.0;
+    std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x + 1/x^2"}};
+
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 1u);
+    ASSERT_EQ(joins[0].type, tise::JoinType::Singular);
+    ASSERT_DOUBLE_EQ(joins[0].x, 0.0);
+
+    auto grid = tise::buildUniformRadialGrid(nNodes, rMin, rMax);
+    // x=0 is the domain's own left boundary, not an interior point -- pulls
+    // in the entire first cluster of `order` B-splines (hand-traced above),
+    // not just one.
+    auto dropSet = tise::bSplinesTouchingX(nNodes, order, grid, joins[0].x);
+    ASSERT_EQ(dropSet.size(), static_cast<size_t>(order));
+
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    const int nBSplines = bs.getNBSplines();
+    const int nEn = nBSplines - static_cast<int>(dropSet.size());
+
+    auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, 0, potential, dropSet);
+    auto result = tise::solveGeneralizedEigenproblem(std::move(H), std::move(S), nEn, order);
+
+    ASSERT_EQ(result.values.size(), static_cast<size_t>(nEn));
+    for (double e : result.values)
+        EXPECT_TRUE(std::isfinite(e));
+
+    auto coeffs = tise::eigenstateCoefficients(result.vectors, 1, nEn, nBSplines, dropSet);
+    for (int bsIdx : dropSet)
+        EXPECT_DOUBLE_EQ(coeffs[bsIdx - 1], 0.0);
+}
