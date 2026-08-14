@@ -174,6 +174,73 @@ ContainmentCheck checkWellContainment(const bspline::BSpline &bs,
                                        Real xBoundary,
                                        Real tol = 1e-3);
 
+// === A4a: strategic node placement (REQ-F-050), required core only ===
+// A4b (generalizing the hardcoded "drop B_1/B_N" convention so singular-
+// potential B-spline removal is more than detection-only) is deferred --
+// see docs/planning/engineer-a-plan.md Section A4. Singular joins are
+// detected here but not remediated by this task.
+
+// One of the four required-treatment categories from the task's source
+// table (docs/planning/tise-task-breakdown.md, "A4. Strategic node
+// placement"): Step (V itself jumps), StitchedKink (V continuous, V' jumps),
+// Singular (V diverges, e.g. 1/r), or Continuous (no special treatment).
+enum class JoinType
+{
+    Continuous,
+    Step,
+    StitchedKink,
+    Singular
+};
+
+// A detected join (interior piece-to-piece boundary) or flagged domain edge
+// in the potential's piecewise structure, at position x.
+struct DetectedJoin
+{
+    Real x;
+    JoinType type;
+};
+
+// A single knot location that should receive `extraMultiplicity` additional
+// degenerate copies beyond the ordinary grid point already there (or
+// spliced in if not already present -- see buildStrategicRadialGrid).
+struct StrategicKnot
+{
+    Real x;
+    int extraMultiplicity;
+};
+
+// Detect step/stitched-kink/singular structure in a piecewise potential's
+// domain joins and finite outer domain edges. Interior joins (two pieces
+// meet) are always emitted, even Continuous ones -- so a Continuous join's
+// presence in the output means "detected, not actionable", not "silently
+// dropped". Finite domain edges (a piece's own outer boundary with no
+// neighbor, e.g. x=0 in {"(0,100]": "-1/x+1/x^2"}) are only emitted if
+// singular there -- an ordinary box wall isn't actionable for this task.
+// See docs/planning/engineer-a-plan-A4.md for the detection algorithm and
+// threshold derivations.
+std::vector<DetectedJoin> detectPotentialStructure(const std::map<std::string, std::string> &potential);
+
+// Convert detected joins into strategic knots, per the multiplicity formula
+// derived in docs/planning/engineer-a-plan-A4.md: Step -> order-3,
+// StitchedKink -> order-4 (both clamped at 0 -- a case this codebase's
+// order values, 4 and 8, only actually reach for StitchedKink at order=4).
+// Singular/Continuous produce no knot (Singular's remediation -- B-spline
+// removal -- is A4b, out of scope here).
+std::vector<StrategicKnot> strategicKnotsFromJoins(const std::vector<DetectedJoin> &joins, int order);
+
+// Build a radial grid combining a uniform base (buildUniformRadialGrid) with
+// degenerate knots at each StrategicKnot's location: extraMultiplicity
+// repeated copies, splicing in a brand-new grid point first if `x` doesn't
+// already coincide (within 1e-12) with a uniform grid point. Returns the
+// FULL combined grid.
+//
+// CONTRACT: callers MUST pass the returned vector's own .size() as
+// BSpline::init's `numberOfNodes` argument, not the original nNodes --
+// BSpline::init only reads the first numberOfNodes entries of the grid it's
+// given and silently drops the rest (verified against BSpline.cpp:190-216).
+std::vector<Real> buildStrategicRadialGrid(int nNodes, Real rMin, Real rMax,
+                                            const std::vector<StrategicKnot> &knots);
+
 // Analytic hydrogenic energy: E = -1 / (2 * (n + L)^2).
 Real analyticHydrogenEnergy(int n, int L);
 

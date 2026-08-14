@@ -973,6 +973,249 @@ TEST_F(WellContainmentSyntheticTest, DerivativeJustAboveToleranceIsFlagged)
 }
 
 // ---------------------------------------------------------------------------
+// detectPotentialStructure
+// ---------------------------------------------------------------------------
+
+TEST(DetectPotentialStructureTest, StepAtBothBarrierEdges)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,5)", "0"}, {"[5,6]", "10"}, {"(6,10]", "0"}
+    };
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 2u);
+    std::sort(joins.begin(), joins.end(),
+              [](const tise::DetectedJoin &a, const tise::DetectedJoin &b) { return a.x < b.x; });
+    EXPECT_DOUBLE_EQ(joins[0].x, 5.0);
+    EXPECT_EQ(joins[0].type, tise::JoinType::Step);
+    EXPECT_DOUBLE_EQ(joins[1].x, 6.0);
+    EXPECT_EQ(joins[1].type, tise::JoinType::Step);
+}
+
+TEST(DetectPotentialStructureTest, StitchedKinkAtCornerJoin)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,5)", "x"}, {"[5,10]", "10-x"}
+    };
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 1u);
+    EXPECT_DOUBLE_EQ(joins[0].x, 5.0);
+    EXPECT_EQ(joins[0].type, tise::JoinType::StitchedKink);
+}
+
+TEST(DetectPotentialStructureTest, SingularAtCoulombOrigin)
+{
+    std::map<std::string, std::string> potential = {
+        {"(0, 100]", "-1/x + 1/x^2"}
+    };
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 1u);
+    EXPECT_DOUBLE_EQ(joins[0].x, 0.0);
+    EXPECT_EQ(joins[0].type, tise::JoinType::Singular);
+}
+
+TEST(DetectPotentialStructureTest, ContinuousJoinNotFlagged)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,5)", "x*x"}, {"[5,10]", "x*x"}
+    };
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 1u);
+    EXPECT_DOUBLE_EQ(joins[0].x, 5.0);
+    EXPECT_EQ(joins[0].type, tise::JoinType::Continuous);
+}
+
+TEST(DetectPotentialStructureTest, SingularAtInteriorJoin)
+{
+    // 1/(1-x) diverges approaching x=1 from the left; exercises
+    // classifyJoin's own Singular branch (distinct from the domain-edge
+    // singularity path SingularAtCoulombOrigin covers).
+    std::map<std::string, std::string> potential = {
+        {"[0,1)", "1/(1-x)"}, {"[1,2]", "0"}
+    };
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 1u);
+    EXPECT_DOUBLE_EQ(joins[0].x, 1.0);
+    EXPECT_EQ(joins[0].type, tise::JoinType::Singular);
+}
+
+TEST(DetectPotentialStructureTest, SingularAtRightDomainEdge)
+{
+    // 1/(100-x) diverges approaching x=100 from the left; exercises the
+    // last-piece (right) global-edge singularity push, distinct from
+    // SingularAtCoulombOrigin's left-edge case.
+    std::map<std::string, std::string> potential = {
+        {"[0, 100)", "1/(100-x)"}
+    };
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 1u);
+    EXPECT_DOUBLE_EQ(joins[0].x, 100.0);
+    EXPECT_EQ(joins[0].type, tise::JoinType::Singular);
+}
+
+TEST(DetectPotentialStructureTest, HandlesInteriorJoinWithInfiniteWidthPiece)
+{
+    // Right piece [5, inf) has infinite width, exercising
+    // isSingularApproaching's isfinite(pieceWidth)==false fallback (falls
+    // back to the plain scale=max(|x0|,1) probe, matching A1's own formula,
+    // since there's no finite piece boundary to clamp against). -1/x^2 is
+    // smooth at x=5 (only singular at x=0, outside this piece), so the
+    // join is a genuine Step (0 vs -1/25), not Singular -- confirming the
+    // fallback doesn't spuriously flag a non-singular infinite-width piece.
+    std::map<std::string, std::string> potential = {
+        {"[0,5)", "0"}, {"[5, inf)", "-1/x^2"}
+    };
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 1u);
+    EXPECT_DOUBLE_EQ(joins[0].x, 5.0);
+    EXPECT_EQ(joins[0].type, tise::JoinType::Step);
+}
+
+// ---------------------------------------------------------------------------
+// strategicKnotsFromJoins
+// ---------------------------------------------------------------------------
+
+TEST(StrategicKnotsFromJoinsTest, MultiplicityFormulaPerOrder)
+{
+    for (int order : {4, 6, 8})
+    {
+        std::vector<tise::DetectedJoin> joins = {
+            {1.0, tise::JoinType::Step}, {2.0, tise::JoinType::StitchedKink}
+        };
+        auto knots = tise::strategicKnotsFromJoins(joins, order);
+
+        auto findKnotAt = [&](double x) -> const tise::StrategicKnot * {
+            for (const auto &k : knots)
+                if (k.x == x) return &k;
+            return nullptr;
+        };
+
+        const tise::StrategicKnot *step = findKnotAt(1.0);
+        ASSERT_NE(step, nullptr);
+        EXPECT_EQ(step->extraMultiplicity, order - 3);
+
+        const tise::StrategicKnot *kink = findKnotAt(2.0);
+        if (order - 4 > 0)
+        {
+            ASSERT_NE(kink, nullptr);
+            EXPECT_EQ(kink->extraMultiplicity, order - 4);
+        }
+        else
+        {
+            EXPECT_EQ(kink, nullptr);
+        }
+    }
+}
+
+TEST(StrategicKnotsFromJoinsTest, StitchedKinkClampsToZeroAtOrderFour)
+{
+    std::vector<tise::DetectedJoin> joins = {{3.0, tise::JoinType::StitchedKink}};
+    auto knots = tise::strategicKnotsFromJoins(joins, 4);
+    EXPECT_TRUE(knots.empty());
+}
+
+TEST(StrategicKnotsFromJoinsTest, SingularAndContinuousProduceNoKnots)
+{
+    std::vector<tise::DetectedJoin> joins = {
+        {1.0, tise::JoinType::Singular}, {2.0, tise::JoinType::Continuous}
+    };
+    auto knots = tise::strategicKnotsFromJoins(joins, 8);
+    EXPECT_TRUE(knots.empty());
+}
+
+// ---------------------------------------------------------------------------
+// buildStrategicRadialGrid
+// ---------------------------------------------------------------------------
+
+TEST(BuildStrategicRadialGridTest, ExistingPointGetsExtraMultiplicityOnly)
+{
+    // nNodes=11 on [0,10] -> spacing 1.0; x=5.0 already on the grid.
+    std::vector<tise::StrategicKnot> knots = {{5.0, 3}};
+    auto grid = tise::buildStrategicRadialGrid(11, 0.0, 10.0, knots);
+    EXPECT_EQ(grid.size(), 11u + 3u);
+    EXPECT_EQ(std::count(grid.begin(), grid.end(), 5.0), 1 + 3);
+}
+
+TEST(BuildStrategicRadialGridTest, NewPointInsertionSplicesAndAddsMultiplicity)
+{
+    // nNodes=11 on [0,10] -> spacing 1.0; x=5.5 is NOT on the grid.
+    std::vector<tise::StrategicKnot> knots = {{5.5, 2}};
+    auto grid = tise::buildStrategicRadialGrid(11, 0.0, 10.0, knots);
+    EXPECT_EQ(grid.size(), 11u + 1u + 2u);
+    EXPECT_EQ(std::count(grid.begin(), grid.end(), 5.5), 1 + 2);
+    EXPECT_TRUE(std::is_sorted(grid.begin(), grid.end()));
+}
+
+TEST(BuildStrategicRadialGridTest, RemainsNonDecreasing)
+{
+    std::vector<tise::StrategicKnot> knots = {{2.0, 4}, {5.5, 3}, {8.0, 1}};
+    auto grid = tise::buildStrategicRadialGrid(11, 0.0, 10.0, knots);
+    EXPECT_TRUE(std::is_sorted(grid.begin(), grid.end()));
+}
+
+TEST(BuildStrategicRadialGridTest, ReturnedSizeAccountsForAllInsertions)
+{
+    // One on-grid knot (5.0, +3) and one off-grid knot (5.5, +2): total
+    // extra entries = 3 (multiplicity only) + (1 splice + 2 multiplicity).
+    std::vector<tise::StrategicKnot> knots = {{5.0, 3}, {5.5, 2}};
+    auto grid = tise::buildStrategicRadialGrid(11, 0.0, 10.0, knots);
+    EXPECT_EQ(grid.size(), 11u + 3u + (1u + 2u));
+}
+
+// ---------------------------------------------------------------------------
+// Strategic node placement -- literal "Done when" criterion
+// ---------------------------------------------------------------------------
+
+TEST(StrategicNodePlacementAccuracyTest, ImprovesOverUniformGridForBoxBarrier)
+{
+    // Particle in a box [0,10] with a rectangular barrier on [5,6]
+    // (docs/TDSE-original-design/2026-06-28-config-yaml-schema-design.md's
+    // own worked example -- the task-breakdown's literal "Done when" case).
+    // Ground-state eigenvalue only; L is unused by fillBandedMatrices' own
+    // potential evaluation (kept only for eigenvalueError's hydrogen-
+    // specific analytic comparison, not used here), passed as 0.
+    std::map<std::string, std::string> potential = {
+        {"[0,5)", "0"}, {"[5,6]", "10"}, {"(6,10]", "0"}
+    };
+    const int order = 8;
+    const int L = 0;
+    const double rMin = 0.0, rMax = 10.0;
+
+    auto groundStateEnergy = [&](const std::vector<double> &grid, int nNodesForInit) {
+        bspline::BSpline bs;
+        int info = bs.init(nNodesForInit, order, grid);
+        EXPECT_EQ(info, 0);
+        int nEn = bs.getNBSplines() - 2;
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        auto result = tise::solveGeneralizedEigenproblem(std::move(H), std::move(S), nEn, order);
+        return result.values[0];
+    };
+
+    // Fine uniform reference: converged ground truth.
+    const int nFine = 201;
+    double eFine = groundStateEnergy(tise::buildUniformRadialGrid(nFine, rMin, rMax), nFine);
+
+    // Coarse uniform: 21 nodes, spacing 0.5 -- x=5 and x=6 already fall
+    // exactly on the grid, deliberately, so the strategic comparison below
+    // adds only knot degeneracy, no new distinct spatial points -- the
+    // cleanest possible reading of the task's "same node count" wording.
+    const int nCoarse = 21;
+    double eCoarseUniform = groundStateEnergy(tise::buildUniformRadialGrid(nCoarse, rMin, rMax), nCoarse);
+
+    // Coarse strategic: same 21-node uniform base, degenerate knots added
+    // at the two Step joins (x=5, x=6).
+    auto joins = tise::detectPotentialStructure(potential);
+    auto knots = tise::strategicKnotsFromJoins(joins, order);
+    auto strategicGrid = tise::buildStrategicRadialGrid(nCoarse, rMin, rMax, knots);
+    // Per buildStrategicRadialGrid's contract: pass the returned grid's OWN
+    // size, not nCoarse -- see Gap 1 above.
+    double eCoarseStrategic = groundStateEnergy(strategicGrid, static_cast<int>(strategicGrid.size()));
+
+    double errUniform = std::abs(eCoarseUniform - eFine);
+    double errStrategic = std::abs(eCoarseStrategic - eFine);
+    EXPECT_LT(errStrategic, errUniform);
+}
+
+// ---------------------------------------------------------------------------
 // writeEigenstate
 // ---------------------------------------------------------------------------
 

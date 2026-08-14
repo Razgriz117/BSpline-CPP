@@ -47,7 +47,23 @@ double radialPotential(double x, int L)
 // given a string, e.g. [0, 20), return true if input x falls in the bounds and false otherwise
 // Bounds may be finite numbers or (+/-)inf/infinity (case-insensitive); brackets
 // select inclusive ([, ]) vs. exclusive ((, )) endpoints.
-bool inInterval(double x, const std::string& interval)
+//
+// Regex/bound-parsing logic factored into parseInterval() (below) so A4a's
+// detectPotentialStructure can reuse it to get numeric piece bounds without
+// duplicating this nontrivial regex. File-local only -- not exposed in
+// tise.hpp, since no caller outside this file needs the numeric bounds
+// directly.
+namespace
+{
+struct ParsedInterval
+{
+    double lower;
+    double upper;
+    bool lowerInclusive;
+    bool upperInclusive;
+};
+
+ParsedInterval parseInterval(const std::string& interval)
 {
     static const std::regex re(
         R"(^\s*([\[\(])\s*(-?(?:\d+(?:\.\d+)?)|[+-]?(?:inf|infinity))\s*,\s*(-?(?:\d+(?:\.\d+)?)|[+-]?(?:inf|infinity))\s*([\]\)])\s*$)",
@@ -75,15 +91,20 @@ bool inInterval(double x, const std::string& interval)
         return std::stod(s);
     };
 
-    bool leftInclusive = m[1] == "[";
-    bool rightInclusive = m[4] == "]";
+    ParsedInterval out;
+    out.lowerInclusive = m[1] == "[";
+    out.upperInclusive = m[4] == "]";
+    out.lower = parseBound(m[2]);
+    out.upper = parseBound(m[3]);
+    return out;
+}
+} // namespace
 
-    double left = parseBound(m[2]);
-    double right = parseBound(m[3]);
-
-    bool leftOK = leftInclusive ? (x >= left) : (x > left);
-    bool rightOK = rightInclusive ? (x <= right) : (x < right);
-
+bool inInterval(double x, const std::string& interval)
+{
+    const ParsedInterval iv = parseInterval(interval);
+    bool leftOK = iv.lowerInclusive ? (x >= iv.lower) : (x > iv.lower);
+    bool rightOK = iv.upperInclusive ? (x <= iv.upper) : (x < iv.upper);
     return leftOK && rightOK;
 }
 
@@ -381,6 +402,196 @@ ContainmentCheck checkWellContainment(const bspline::BSpline &bs,
     out.psiPrimeAtBoundary = bs.eval(xBoundary, coeffs.data(), n, 1);
     out.notWellContained = std::abs(out.psiPrimeAtBoundary) > tol;
     return out;
+}
+
+// === A4a: strategic node placement (REQ-F-050), required core only ===
+namespace
+{
+// Shrinking-offset probe toward x0 from one side, reusing A1's numeric core
+// (classifySequenceConvergence) but inverted: offsets shrink toward x0
+// instead of growing toward infinity -- valid because that function's
+// divergence test only compares finite-difference magnitudes across the
+// given array, with no built-in assumption about sample direction (see
+// docs/planning/engineer-a-plan-A4.md). `sign` is -1 to sample the piece
+// left of x0, +1 for the piece right of x0; `pieceWidth` is that piece's
+// own width, used to clamp the starting offset so the probe can never step
+// outside a narrow piece (e.g. the box+barrier's width-1 barrier slab) --
+// A1's own scale formula alone isn't safe for this inward direction.
+bool isSingularApproaching(const std::map<std::string, std::string> &potential,
+                            Real x0, Real sign, Real pieceWidth)
+{
+    constexpr int kNumSamples = 16;
+    constexpr Real kRatio = 4.0;
+    const Real scale = std::max(std::abs(x0), 1.0);
+    const Real h0 = std::isfinite(pieceWidth) ? std::min(scale, 0.25 * pieceWidth) : scale;
+
+    std::vector<Real> V(kNumSamples);
+    for (int k = 0; k < kNumSamples; ++k)
+        V[k] = evaluateFunction(potential, x0 + sign * h0 / std::pow(kRatio, k));
+
+    return classifySequenceConvergence(V, kRatio).isDivergent;
+}
+
+// One-sided value estimate at x0, approaching from `sign` (-1 = left piece,
+// +1 = right piece). Richardson-extrapolated over step sizes h and h/2 to
+// cancel the O(h) bias from necessarily sampling strictly inside the piece
+// (open piece boundaries, e.g. "[0,5)", never include x0=5 itself):
+// V(x0+sign*h) = V0 + sign*h*V0' + O(h^2), so 2*V(h/2) - V(h) = V0 + O(h^2).
+Real oneSidedValue(const std::map<std::string, std::string> &potential,
+                    Real x0, Real sign, Real h)
+{
+    const Real gH  = evaluateFunction(potential, x0 + sign * h);
+    const Real gH2 = evaluateFunction(potential, x0 + sign * h / 2.0);
+    return 2.0 * gH2 - gH;
+}
+
+// One-sided slope (dV/dx) estimate at x0, same side convention. Builds a
+// standard one-sided 2nd-order finite-difference derivative,
+// f'(a) ~ [-3f(a) + 4f(a+h) - f(a+2h)] / (2h), centered at a = x0+sign*h
+// (not x0 itself, since x0 may not be in this piece's domain) -- that
+// off-centering is an O(h) bias, which the same Richardson trick (evaluate
+// at h and h/2, then 2*D(h/2) - D(h)) cancels, leaving O(h^2) error --
+// negligible at h~1e-4 against the StitchedKink threshold below.
+Real oneSidedSlope(const std::map<std::string, std::string> &potential,
+                    Real x0, Real sign, Real h)
+{
+    auto forwardDeriv = [&](Real step) {
+        const Real g1 = evaluateFunction(potential, x0 + sign * step);
+        const Real g2 = evaluateFunction(potential, x0 + sign * 2.0 * step);
+        const Real g3 = evaluateFunction(potential, x0 + sign * 3.0 * step);
+        return sign * (-3.0 * g1 + 4.0 * g2 - g3) / (2.0 * step);
+    };
+    const Real dH  = forwardDeriv(h);
+    const Real dH2 = forwardDeriv(h / 2.0);
+    return 2.0 * dH2 - dH;
+}
+} // namespace
+
+std::vector<DetectedJoin> detectPotentialStructure(const std::map<std::string, std::string> &potential)
+{
+    struct PieceInfo { Real lower, upper; };
+    std::vector<PieceInfo> pieces;
+    pieces.reserve(potential.size());
+    for (const auto &entry : potential)
+    {
+        const ParsedInterval iv = parseInterval(entry.first);
+        pieces.push_back({iv.lower, iv.upper});
+    }
+    // Sort by numeric lower bound -- std::map's native order is lexicographic
+    // on the domain *string* (e.g. "[10,...)" sorts before "[5,...)"), which
+    // would silently misorder joins if used directly.
+    std::sort(pieces.begin(), pieces.end(),
+              [](const PieceInfo &a, const PieceInfo &b) { return a.lower < b.lower; });
+
+    constexpr Real kValueJumpTol = 1e-6; // O(1)-O(10) potential magnitudes in
+                                          // this codebase; a genuine Step is
+                                          // an O(1) jump, ~6 orders of margin.
+    constexpr Real kSlopeJumpTol = 1e-4; // one-sided slope estimate's O(h^2)
+                                          // truncation error is ~1e-8 at
+                                          // h=1e-4, ~4 orders below this.
+    constexpr Real kFdStep = 1e-4;
+
+    auto clampedStep = [&](Real width) {
+        return std::isfinite(width) ? std::min(kFdStep, 0.1 * width) : kFdStep;
+    };
+
+    auto classifyJoin = [&](Real x0, Real leftWidth, Real rightWidth) {
+        if (isSingularApproaching(potential, x0, -1.0, leftWidth) ||
+            isSingularApproaching(potential, x0, +1.0, rightWidth))
+            return JoinType::Singular;
+
+        const Real hL = clampedStep(leftWidth);
+        const Real hR = clampedStep(rightWidth);
+        const Real vL = oneSidedValue(potential, x0, -1.0, hL);
+        const Real vR = oneSidedValue(potential, x0, +1.0, hR);
+        if (std::abs(vL - vR) > kValueJumpTol)
+            return JoinType::Step;
+
+        const Real sL = oneSidedSlope(potential, x0, -1.0, hL);
+        const Real sR = oneSidedSlope(potential, x0, +1.0, hR);
+        if (std::abs(sL - sR) > kSlopeJumpTol)
+            return JoinType::StitchedKink;
+
+        return JoinType::Continuous;
+    };
+
+    std::vector<DetectedJoin> joins;
+
+    for (std::size_t i = 0; i + 1 < pieces.size(); ++i)
+    {
+        const Real x0 = pieces[i].upper;
+        const Real leftWidth = pieces[i].upper - pieces[i].lower;
+        const Real rightWidth = pieces[i + 1].upper - pieces[i + 1].lower;
+        joins.push_back({x0, classifyJoin(x0, leftWidth, rightWidth)});
+    }
+
+    // Global domain edges: only flagged if singular (an ordinary box wall
+    // isn't interesting to strategic node placement). Also probes each
+    // piece's own endpoints, not just inter-piece joins, so a single-piece
+    // potential like {"(0, inf)": "-1/x + 1/x^2"} still gets its x=0
+    // singularity flagged even though it has no "join" at all.
+    if (!pieces.empty())
+    {
+        const PieceInfo &first = pieces.front();
+        if (std::isfinite(first.lower))
+        {
+            const Real width = first.upper - first.lower;
+            if (isSingularApproaching(potential, first.lower, +1.0, width))
+                joins.push_back({first.lower, JoinType::Singular});
+        }
+        const PieceInfo &last = pieces.back();
+        if (std::isfinite(last.upper))
+        {
+            const Real width = last.upper - last.lower;
+            if (isSingularApproaching(potential, last.upper, -1.0, width))
+                joins.push_back({last.upper, JoinType::Singular});
+        }
+    }
+
+    return joins;
+}
+
+std::vector<StrategicKnot> strategicKnotsFromJoins(const std::vector<DetectedJoin> &joins, int order)
+{
+    std::vector<StrategicKnot> knots;
+    knots.reserve(joins.size());
+    for (const auto &j : joins)
+    {
+        int extra = 0;
+        switch (j.type)
+        {
+            case JoinType::Step:         extra = std::max(0, order - 3); break;
+            case JoinType::StitchedKink: extra = std::max(0, order - 4); break;
+            case JoinType::Singular:
+            case JoinType::Continuous:   extra = 0; break;
+        }
+        if (extra > 0)
+            knots.push_back({j.x, extra});
+    }
+    return knots;
+}
+
+std::vector<Real> buildStrategicRadialGrid(int nNodes, Real rMin, Real rMax,
+                                            const std::vector<StrategicKnot> &knots)
+{
+    std::vector<Real> grid = buildUniformRadialGrid(nNodes, rMin, rMax);
+
+    std::vector<StrategicKnot> sorted = knots;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const StrategicKnot &a, const StrategicKnot &b) { return a.x < b.x; });
+
+    for (const auto &knot : sorted)
+    {
+        auto it = std::lower_bound(grid.begin(), grid.end(), knot.x);
+        const bool alreadyPresent = (it != grid.end()) && (std::abs(*it - knot.x) < 1e-12);
+
+        if (!alreadyPresent)
+            it = grid.insert(it, knot.x); // splice a new base point at knot.x
+
+        grid.insert(it + 1, knot.extraMultiplicity, knot.x); // extra degenerate copies
+    }
+
+    return grid;
 }
 
 Real analyticHydrogenEnergy(int n, int L)
