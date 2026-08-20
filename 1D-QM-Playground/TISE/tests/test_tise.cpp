@@ -661,3 +661,93 @@ TEST_F(WriteEigenstateTest, LastXIsRMax)
     while (in >> x >> y) lastX = x;
     EXPECT_NEAR(lastX, 0.9, 1e-14);
 }
+
+// ---------------------------------------------------------------------------
+// matchAsymptotic — phase shift vs. the exact spherical square-well solution
+//
+// For an L=0 (s-wave) attractive square well V(r) = -V0 for r < a, 0 for
+// r >= a, the continuum phase shift at energy E > 0 has a closed form (finite
+// spherical well scattering, e.g. Sakurai "Modern Quantum Mechanics"):
+//   k     = sqrt(2E)          exterior wavenumber
+//   kappa = sqrt(2(E + V0))   interior wavenumber
+//   delta = -k*a + atan[ (k/kappa) * tan(kappa*a) ]
+// delta is only physically defined mod pi (sin(kr+delta) and
+// sin(kr+delta+pi) are the same scattering state up to an overall sign), so
+// comparisons below reduce both sides into (-pi/2, pi/2] before comparing.
+// ---------------------------------------------------------------------------
+
+static double wrapPhaseModPi(double delta)
+{
+    return delta - M_PI * std::round(delta / M_PI);
+}
+
+static double squareWellPhaseShift(double E, double V0, double a)
+{
+    double k = std::sqrt(2.0 * E);
+    double kappa = std::sqrt(2.0 * (E + V0));
+    return -k * a + std::atan((k / kappa) * std::tan(kappa * a));
+}
+
+class SquareWellPhaseShiftTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> gridPts(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            gridPts[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, gridPts), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        // Attractive square well of depth V0 and radius a; a coincides with a
+        // grid node (spacing (rMax-rMin)/(nNodes-1) = 0.5) so a B-spline knot
+        // sits exactly at the potential's discontinuity instead of smoothing
+        // over it.
+        std::map<std::string, std::string> potential = {
+            {"[0, " + std::to_string(a) + ")", "-" + std::to_string(V0)},
+            {"[" + std::to_string(a) + ", " + std::to_string(rMax) + "]", "0.0"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        eigen  = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+        states = tise::buildContinuumState(order, nEn, H, S, eigen, energyGrid);
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 41, order = 6, L = 0;
+    double rMin = 0.0, rMax = 20.0;
+    double V0 = 2.0, a = 0.5;
+    int nBSplines = 0, nEn = 0;
+    tise::EigenResult eigen;
+    std::vector<double> energyGrid = {0.5};
+    std::vector<std::vector<double>> states;
+};
+
+TEST_F(SquareWellPhaseShiftTest, MatchesAnalyticSquareWellFormula)
+{
+    double R = 15.0; // well outside the well (a=0.5), well inside rMax=20
+    auto ar = tise::matchAsymptotic(bs, states, energyGrid, R);
+
+    double expected = squareWellPhaseShift(energyGrid[0], V0, a);
+    EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), wrapPhaseModPi(expected), 5e-3)
+        << "computed delta=" << ar.delta[0] << " expected=" << expected;
+}
+
+TEST_F(SquareWellPhaseShiftTest, PhaseShiftIndependentOfMatchingRadius)
+{
+    // Physically, once R is outside the well, the continuum wavefunction is
+    // an exact standing wave A*sin(kr+delta); delta extracted at different R
+    // (mod pi) must therefore agree with itself, independent of the
+    // analytic-formula tolerance used above.
+    std::vector<double> Rs = {10.0, 12.0, 15.0, 18.0};
+    double deltaAtR0 = wrapPhaseModPi(
+        tise::matchAsymptotic(bs, states, energyGrid, Rs[0]).delta[0]);
+
+    for (double R : Rs)
+    {
+        double delta = wrapPhaseModPi(
+            tise::matchAsymptotic(bs, states, energyGrid, R).delta[0]);
+        EXPECT_NEAR(delta, deltaAtR0, 1e-3)
+            << "phase shift not independent of matching radius R=" << R;
+    }
+}
