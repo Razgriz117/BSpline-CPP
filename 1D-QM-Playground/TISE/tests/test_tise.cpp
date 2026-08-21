@@ -1520,3 +1520,55 @@ TEST(SingularPotentialBSplineRemovalTest, RemovingBSplinesNearSingularityProduce
     for (int bsIdx : dropSet)
         EXPECT_DOUBLE_EQ(coeffs[bsIdx - 1], 0.0);
 }
+
+// ---------------------------------------------------------------------------
+// computeEAcc
+// ---------------------------------------------------------------------------
+
+TEST(ComputeEAccTest, MatchesClosedForm)
+{
+    EXPECT_NEAR(tise::computeEAcc(0.5, 1.0), 2.0 * M_PI * M_PI, 1e-12);
+}
+
+TEST(ComputeEAccTest, ScalesInverselyWithMassAndSpacingSquared)
+{
+    double base = tise::computeEAcc(0.5, 1.0);
+
+    // Doubling nodeSpacing (mass fixed): E_acc ~ 1/dx^2 -> quarters.
+    EXPECT_NEAR(tise::computeEAcc(1.0, 1.0), base / 4.0, 1e-12);
+
+    // Doubling mass (nodeSpacing fixed): E_acc ~ 1/m -> halves.
+    EXPECT_NEAR(tise::computeEAcc(0.5, 2.0), base / 2.0, 1e-12);
+}
+
+// ---------------------------------------------------------------------------
+// warnIfContinuumExceedsEAcc
+// ---------------------------------------------------------------------------
+
+TEST(WarnIfContinuumExceedsEAccTest, FiresWhenEMaxExceeds)
+{
+    std::ostringstream warn;
+    EXPECT_TRUE(tise::warnIfContinuumExceedsEAcc(10.0, 5.0, warn));
+    EXPECT_FALSE(warn.str().empty());
+}
+
+TEST(WarnIfContinuumExceedsEAccTest, SilentWhenEMaxBelow)
+{
+    std::ostringstream warn;
+    EXPECT_FALSE(tise::warnIfContinuumExceedsEAcc(3.0, 5.0, warn));
+    EXPECT_TRUE(warn.str().empty());
+}
+
+TEST(WarnIfContinuumExceedsEAccTest, BoundaryEqualDoesNotFire)
+{
+    std::ostringstream warn;
+    EXPECT_FALSE(tise::warnIfContinuumExceedsEAcc(5.0, 5.0, warn));
+    EXPECT_TRUE(warn.str().empty());
+}
+
+TEST(WarnIfContinuumExceedsEAccTest, WarningTextMentionsUnreliableResults)
+{
+    std::ostringstream warn;
+    tise::warnIfContinuumExceedsEAcc(10.0, 5.0, warn);
+    EXPECT_NE(warn.str().find("unreliable"), std::string::npos);
+}

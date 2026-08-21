@@ -304,4 +304,34 @@ void writeEigenstate(std::ostream &out,
 // `potential` is the piecewise potential passed through to fillBandedMatrices.
 EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential);
 
+// === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
+// Basis accuracy ceiling (docs/planning/architecture-06-20.md "Continuum
+// range" -> "Basis accuracy limit"; duplicated docs/SDD.md Appendix B
+// "Continuum range" entry; see also SDD Sec. 6.4, Sec. 8). States whose
+// half de Broglie wavelength is commensurate with or smaller than the
+// B-spline node spacing cannot be accurately represented:
+//   lambda/2 = pi/k <~ dx_node  ==>  k >~ pi/dx_node  ==>  E >~ pi^2 / (2 m dx_node^2)
+// The source relation is an asymptotic ("<~"/">~") scaling bound, not an
+// exact equality; this function takes its leading-order coefficient as
+// the concrete E_acc threshold, per this task's closed-form "Done when"
+// criterion -- treat the result as an order-of-magnitude ceiling, not a
+// razor-sharp cutoff. `nodeSpacing` is a single scalar spacing; for a
+// non-uniform grid (see A4's buildStrategicRadialGrid) the
+// physically-correct value to pass is the *minimum* inter-node gap, not
+// an average -- that reduction is a future call-site concern, not
+// performed here (see docs/planning/engineer-a-plan-A5.md, Gaps).
+Real computeEAcc(Real nodeSpacing, Real mass);
+
+// Warns (to warnOut, default stderr -- SDD Sec. 8's "physics warning"
+// class: computation completed, but a result may be unreliable) iff the
+// requested continuum ceiling eMax exceeds the basis accuracy ceiling
+// eAcc (from computeEAcc), and returns true iff it did so. Strict '>':
+// eMax exactly equal to eAcc is the marginal case and does not warn,
+// mirroring checkWellContainment's/classifyBoundStates' existing
+// strict-inequality boundary convention. Standalone: no dependency on
+// Engineer B's energy-grid loop (B2) -- wiring this at that call site is
+// future integration work, matching A1-A4's "standalone, unwired"
+// precedent.
+bool warnIfContinuumExceedsEAcc(Real eMax, Real eAcc, std::ostream &warnOut = std::cerr);
+
 } // namespace tise

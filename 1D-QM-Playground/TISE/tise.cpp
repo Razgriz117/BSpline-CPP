@@ -752,4 +752,21 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::m
     return solveGeneralizedEigenproblem(std::move(H), std::move(S), nEn, order);
 }
 
+// === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
+Real computeEAcc(Real nodeSpacing, Real mass)
+{
+    return kPi * kPi / (2.0 * mass * nodeSpacing * nodeSpacing);
+}
+
+bool warnIfContinuumExceedsEAcc(Real eMax, Real eAcc, std::ostream &warnOut)
+{
+    const bool exceeds = eMax > eAcc;
+    if (exceeds)
+        warnOut << "Warning: requested continuum E_max=" << eMax
+                << " exceeds the basis accuracy ceiling E_acc=" << eAcc
+                << " (set by the B-spline node spacing); results at energies "
+                << "above E_acc are unreliable.\n";
+    return exceeds;
+}
+
 } // namespace tise
