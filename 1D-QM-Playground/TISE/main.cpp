@@ -55,6 +55,12 @@ std::map<std::string, std::string> parsePiecewise(const std::string& arg) {
 
 int main(int argc, char *argv[])
 {
+    if (argc < 2)
+    {
+        std::cerr << "Usage: " << argv[0] << " '<JSON array of {\"domain\":...,\"function\":...} pieces>'\n";
+        return EXIT_FAILURE;
+    }
+
     // argv[1]: JSON-encoded array describing the piecewise potential, e.g.
     // [{"domain": "[0, 20)", "function": "x"}, {"domain": "[20, 40]", "function": "x^2"}]
     auto potential = parsePiecewise(argv[1]);
@@ -118,6 +124,13 @@ int main(int argc, char *argv[])
     // ------------------------------------------------------------------
     // Project Part 2: propagate a Gaussian wavepacket in time
     // ------------------------------------------------------------------
+    // NOTE (known limitation -- tise-task-breakdown.md Sec. 4 item 4): this call
+    // is unconditional -- time evolution always runs after the TISE solve above,
+    // regardless of intent. config.yaml already defines a matching run.run_tdse
+    // flag (docs/SDD.md Sec. 6.1), but main.cpp has no YAML parsing of its own and
+    // never reads it; gating this call on that flag needs the (out-of-scope)
+    // config-driven Controller<->TISE plumbing from the interface phases. Flagged
+    // here, not fixed, per the cleanup task's own scope.
     try
     {
         tevol::runTimeEvolution(bs, er, nBSplines,

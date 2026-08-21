@@ -1106,7 +1106,7 @@ REQ-NF-010 (≥80% unit + integration coverage) is a **per-phase gate**, not an 
   target_link_libraries(tise_solver PRIVATE yaml-cpp)
   ```
 
-- An expression parser for `potential.function`/`tdse.field.expression` ([§6.1](#61-configuration-schema), [§6.4](#64-data-validation-rules)) — candidates from `docs/planning/resources.md` are [FunctionParser](http://warp.povusers.org/FunctionParser/) and [NFParam](https://github.com/nativeformat/NFParam); not yet chosen definitively.
+- An expression parser for `potential.function`/`tdse.field.expression` ([§6.1](#61-configuration-schema), [§6.4](#64-data-validation-rules)) — **adopted: [muparser](https://beltoforion.de/en/muparser/)**, wired via `pkg_check_modules(MUPARSER REQUIRED IMPORTED_TARGET muparser)` in `TISE/CMakeLists.txt` and used by `tise::evaluateFunction` (`TISE/tise.cpp`). The candidates originally shortlisted from `docs/planning/resources.md`, [FunctionParser](http://warp.povusers.org/FunctionParser/) and [NFParam](https://github.com/nativeformat/NFParam), were superseded by this choice.
 - On the Python side: `PyYAML` or `ruamel.yaml` for the Controller; a plotting library (matplotlib, implied by existing `plot.py`/`heatmap.py`) for Analysis.
 - Also listed in `resources.md` as available if needed: [Boost.Math interpolation](https://www.boost.org/doc/libs/1_77_0/libs/math/doc/html/interpolation.html), [nlohmann/json](https://github.com/nlohmann/json).
 
