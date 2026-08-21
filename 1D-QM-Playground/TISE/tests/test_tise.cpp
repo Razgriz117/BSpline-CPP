@@ -668,8 +668,8 @@ TEST_F(WriteEigenstateTest, LastXIsRMax)
 // For an L=0 (s-wave) attractive square well V(r) = -V0 for r < a, 0 for
 // r >= a, the continuum phase shift at energy E > 0 has a closed form (finite
 // spherical well scattering):
-//   k     = sqrt(E)          exterior wavenumber
-//   kappa = sqrt(E + V0)     interior wavenumber
+//   k     = sqrt(2*E)          exterior wavenumber
+//   kappa = sqrt(2*(E + V0))     interior wavenumber
 //   delta = -k*a + atan[ (k/kappa) * tan(kappa*a) ] + n*pi, for integer n.
 // delta is only physically defined mod pi (sin(kr+delta) and
 // sin(kr+delta+pi) are the same scattering state up to an overall sign), so
