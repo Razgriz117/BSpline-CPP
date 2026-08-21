@@ -239,18 +239,41 @@ std::vector<std::vector<Real>> buildContinuumState(
 
 }
 
-AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, std::vector<Real> grid, Real R)
+AsymptoticResult matchAsymptotic(
+    const bspline::BSpline &bs, 
+    std::vector<std::vector<Real>> states, 
+    const EigenResult &eigen, 
+    std::vector<Real> grid, Real R
+)
 {
     AsymptoticResult result;
     result.A_E = std::vector<Real>(grid.size(), 0.0);
     result.delta = std::vector<Real>(grid.size(), 0.0);
     result.dDeltaDE = std::vector<Real>(grid.size(), 0.0);
 
+    int nEn = eigen.dim;
+    int nBSplines = bs.getNBSplines();
+
     // for each E, first find \bar psi_E(R) and \bar psi'_E(R), then calculate A_E, delta
     for (int E_idx = 0; E_idx < grid.size(); ++E_idx)
     {
-        Real psi_R = bs.eval(R, states[E_idx].data(), states[E_idx].size(), 0);
-        Real psiPrime_R = bs.eval(R, states[E_idx].data(), states[E_idx].size(), 1);
+        // states[E_idx][i] (i=0..nEn-1) give the coefficients for bound eigenstate phi_i which builds |\bar psi_E>, 
+        // (and states[E_idx][nEn] is always 1.0, the coefficient for B_N)
+        // To compute the scalar product needed to find \bar psi_E(R) and \bar psi'_E(R) with bs.eval, however, 
+        // we need ALL coefficients to correspond to the B-Splines, not phi_n!!!
+        std::vector<Real> fc(nBSplines, 0.0);
+        for (int j = 0; j < nEn; ++j)
+        {
+            Real coeff = 0.0;
+            for (int n = 0; n < nEn; ++n)
+                coeff += states[E_idx][n] * eigen.vectors[n * eigen.ldz + j];
+            fc[1 + j] = coeff;
+        }
+        fc[nEn + 1] = states[E_idx][nEn];
+
+        // NOW we can use bs.eval
+        Real psi_R = bs.eval(R, fc.data(), fc.size(), 0);
+        Real psiPrime_R = bs.eval(R, fc.data(), fc.size(), 1);
 
         Real k = sqrt(2 * grid[E_idx]);
 
@@ -421,7 +444,7 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::m
 
     auto energyGrid = buildEnergyGrid(E_threshold, E_max, N_E);
     std::vector<std::vector<tise::Real>> states = buildContinuumState(order, nEn, H, S, er, energyGrid);
-    AsymptoticResult ar = matchAsymptotic(bs, states, energyGrid, 100);
+    AsymptoticResult ar = matchAsymptotic(bs, states, er, energyGrid, 100);
 
     std::ofstream phaseShiftsOut("phase_shifts.dat");
     std::vector<std::ofstream> continuumStateFiles;

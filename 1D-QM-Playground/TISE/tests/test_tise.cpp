@@ -667,10 +667,10 @@ TEST_F(WriteEigenstateTest, LastXIsRMax)
 //
 // For an L=0 (s-wave) attractive square well V(r) = -V0 for r < a, 0 for
 // r >= a, the continuum phase shift at energy E > 0 has a closed form (finite
-// spherical well scattering, e.g. Sakurai "Modern Quantum Mechanics"):
-//   k     = sqrt(2E)          exterior wavenumber
-//   kappa = sqrt(2(E + V0))   interior wavenumber
-//   delta = -k*a + atan[ (k/kappa) * tan(kappa*a) ]
+// spherical well scattering):
+//   k     = sqrt(E)          exterior wavenumber
+//   kappa = sqrt(E + V0)     interior wavenumber
+//   delta = -k*a + atan[ (k/kappa) * tan(kappa*a) ] + n*pi, for integer n.
 // delta is only physically defined mod pi (sin(kr+delta) and
 // sin(kr+delta+pi) are the same scattering state up to an overall sign), so
 // comparisons below reduce both sides into (-pi/2, pi/2] before comparing.
@@ -683,8 +683,8 @@ static double wrapPhaseModPi(double delta)
 
 static double squareWellPhaseShift(double E, double V0, double a)
 {
-    double k = std::sqrt(2.0 * E);
-    double kappa = std::sqrt(2.0 * (E + V0));
+    double k = std::sqrt(2*E);
+    double kappa = std::sqrt(2*(E + V0));
     return -k * a + std::atan((k / kappa) * std::tan(kappa * a));
 }
 
@@ -726,7 +726,7 @@ protected:
 TEST_F(SquareWellPhaseShiftTest, MatchesAnalyticSquareWellFormula)
 {
     double R = 15.0; // well outside the well (a=0.5), well inside rMax=20
-    auto ar = tise::matchAsymptotic(bs, states, energyGrid, R);
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R);
 
     double expected = squareWellPhaseShift(energyGrid[0], V0, a);
     EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), wrapPhaseModPi(expected), 5e-3)
@@ -741,12 +741,12 @@ TEST_F(SquareWellPhaseShiftTest, PhaseShiftIndependentOfMatchingRadius)
     // analytic-formula tolerance used above.
     std::vector<double> Rs = {10.0, 12.0, 15.0, 18.0};
     double deltaAtR0 = wrapPhaseModPi(
-        tise::matchAsymptotic(bs, states, energyGrid, Rs[0]).delta[0]);
+        tise::matchAsymptotic(bs, states, eigen, energyGrid, Rs[0]).delta[0]);
 
     for (double R : Rs)
     {
         double delta = wrapPhaseModPi(
-            tise::matchAsymptotic(bs, states, energyGrid, R).delta[0]);
+            tise::matchAsymptotic(bs, states, eigen, energyGrid, R).delta[0]);
         EXPECT_NEAR(delta, deltaAtR0, 1e-3)
             << "phase shift not independent of matching radius R=" << R;
     }

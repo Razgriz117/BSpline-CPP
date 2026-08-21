@@ -63,7 +63,12 @@ std::vector<std::vector<Real>> buildContinuumState(
     std::vector<Real> grid
 );
 
-AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, std::vector<Real> grid, Real R);
+// `states` holds, per buildContinuumState's contract, coefficients of the
+// confined eigenstates {phi_n} (plus the B_N term) -- not raw B-spline
+// coefficients. `eigen` (the same EigenResult states was built from) is
+// required to transform each energy's coefficients into true B-spline
+// coefficients before evaluating psi_E(R) and psi_E'(R).
+AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, const EigenResult &eigen, std::vector<Real> grid, Real R);
 
 // Writes phase_shifts.dat-style output (epsilon_i, delta, dDeltaDE) to `out`,
 // and one continuum_state_NNN.dat-style block (x, psi_E(x)) per energy to
