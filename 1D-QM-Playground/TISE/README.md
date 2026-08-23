@@ -152,28 +152,37 @@ The test sources live in `tests/`.
 
 ## Building with `g++` (manual build)
 
-From the project root directory:
+From the project root directory (`TISE/`). This mirrors what `CMakeLists.txt` does for the `H-BoundStates` target:
 
-1. Compile the source files:
-
-   ```bash
-   g++ -O2 -std=cpp17 -c BSpline.cpp
-   g++ -O2 -std=cpp17 -c main.cpp
-   ```
-
-2. Link them with LAPACK and BLAS:
+1. Compile each translation unit `H-BoundStates` actually links (note `-std=c++17`, not `-std=cpp17`):
 
    ```bash
-   g++ -O2 -std=cpp17 -o H-BoundStates main.o BSpline.o -llapack -lblas
+   g++ -O2 -std=c++17 -c BSpline.cpp
+   g++ -O2 -std=c++17 -c tise.cpp $(pkg-config --cflags muparser)
+   g++ -O2 -std=c++17 -I/usr/include/eigen3 -c time_evolution.cpp
+   g++ -O2 -std=c++17 -I/usr/include/eigen3 -c main.cpp
    ```
 
-3. Run the executable **from the project directory (or wherever `H-BoundStates` resides)**, passing the potential as a JSON argument (see [Specifying the Potential](#specifying-the-potential)):
+2. Link them with LAPACK, BLAS, and muparser:
+
+   ```bash
+   g++ -O2 -std=c++17 -o H-BoundStates main.o tise.o time_evolution.o BSpline.o \
+       -llapack -lblas $(pkg-config --libs muparser)
+   ```
+
+3. Create the `timesteps` output directory. `main.cpp` runs time evolution after the bound-state solve and writes per-step output under a directory named by the `TIMESTEPS_DIR` macro; the CMake build defines this to an absolute path and creates it via a custom target automatically, but this manual recipe doesn't define the macro, so `main.cpp` falls back to the relative path `./timesteps`, which must exist beforehand:
+
+   ```bash
+   mkdir -p timesteps
+   ```
+
+4. Run the executable **from the project directory (or wherever `H-BoundStates` resides)**, passing the potential as a JSON argument (see [Specifying the Potential](#specifying-the-potential)):
 
    ```bash
    ./H-BoundStates '[{"domain": "(0, 100]", "function": "-1/x"}]'
    ```
 
-This will print eigenvalues and their errors to the terminal and create files like `EigenState_001`, `EigenState_002`, … in the same directory.
+This will print eigenvalues and their errors to the terminal and create files like `EigenState_001`, `EigenState_002`, … in the same directory, plus per-timestep output under `timesteps/`.
 
 ---
 
