@@ -1216,6 +1216,210 @@ TEST(StrategicNodePlacementAccuracyTest, ImprovesOverUniformGridForBoxBarrier)
 }
 
 // ---------------------------------------------------------------------------
+// precomputeBoundaryCoupling
+//
+// Per docs/planning/tise-task-breakdown.md §3 "B1. Precompute boundary-
+// coupling elements": validate <phi_n|B_N> and <phi_n|H|B_N> against a
+// directly-computed (brute-force bs.integral call, no shortcuts) reference,
+// for a small basis size. B_N here is the true "last B-spline... normally
+// dropped to enforce psi(R)=0 for bound states" (1-based bs index nBSplines,
+// i.e. nEn+2) -- NOT B_{nEn+1}, which is already the last spline spanning the
+// confined nEn-dimensional bound-state basis itself. Using B_{nEn+1} as B_N
+// would put B_N inside span{phi_n}, which forces <phi_n|H|B_N> = E_n<phi_n|B_N>
+// identically (since H*phi_n = E_n*S*phi_n), collapsing buildContinuumState's
+// c_n(E) to a constant independent of E -- see git history for this fix.
+// ---------------------------------------------------------------------------
+
+class PrecomputeBoundaryCouplingTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        // Muparser encoding of tise::radialPotential(x, L), as in
+        // FillBandedMatricesRadialPotentialTest.
+        std::map<std::string, std::string> potential = {
+            {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
+        Hmat = H;
+        Smat = S;
+        eigen = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 11, order = 4, L = 1; // small basis; L=1 so H is non-trivial
+    double rMin = 0.1, rMax = 10.0;
+    int nBSplines = 0, nEn = 0;
+    std::vector<double> Hmat, Smat;
+    tise::EigenResult eigen;
+};
+
+TEST_F(PrecomputeBoundaryCouplingTest, ReturnsOneCoefficientPerEigenstate)
+{
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen);
+    EXPECT_EQ(static_cast<int>(coeffs1.size()), nEn);
+    EXPECT_EQ(static_cast<int>(coeffs2.size()), nEn);
+}
+
+TEST_F(PrecomputeBoundaryCouplingTest, MatchesBruteForceIntegrals)
+{
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen);
+    ASSERT_EQ(static_cast<int>(coeffs1.size()), nEn);
+    ASSERT_EQ(static_cast<int>(coeffs2.size()), nEn);
+
+    auto unity  = [](double, const double *) { return 1.0; };
+    auto potFun = [this](double x, const double *) { return tise::radialPotential(x, L); };
+
+    // B_N: the true dropped last B-spline (1-based bs index nBSplines),
+    // outside the confined nEn-dimensional bound-state basis.
+    int iBsN = nBSplines;
+
+    // Brute-force <B_i|B_N> and <B_i|H|B_N> for each confined B-spline
+    // i = 2..nEn+1 (0-based k = i-2), independent of fillBandedMatrices'
+    // banded storage / precomputeBoundaryCoupling's HB_N extraction.
+    std::vector<double> S_row(nEn), H_row(nEn);
+    for (int k = 0; k < nEn; ++k)
+    {
+        int iBs = k + 2;
+        S_row[k] = bs.integral(unity, iBs, iBsN);
+        double kinetic   = bs.integral(unity, iBs, iBsN, 1, 1) / 2.0;
+        double potential = bs.integral(potFun, iBs, iBsN);
+        H_row[k] = kinetic + potential;
+    }
+
+    // phi_n = sum_k c_{k,n} |B_{k+2}>, so <phi_n|B_N> = sum_k c_{k,n} <B_{k+2}|B_N>
+    // and <phi_n|H|B_N> = sum_k c_{k,n} <B_{k+2}|H|B_N>. eigen.vectors is
+    // column-major with leading dimension eigen.ldz.
+    for (int n = 0; n < nEn; ++n)
+    {
+        double expectedOverlap = 0.0, expectedHCoupling = 0.0;
+        for (int k = 0; k < nEn; ++k)
+        {
+            double c = eigen.vectors[n * eigen.ldz + k];
+            expectedOverlap   += c * S_row[k];
+            expectedHCoupling += c * H_row[k];
+        }
+        EXPECT_NEAR(coeffs2[n], expectedOverlap,   1e-9) << "<phi_n|B_N> mismatch at n=" << n;
+        EXPECT_NEAR(coeffs1[n], expectedHCoupling, 1e-9) << "<phi_n|H|B_N> mismatch at n=" << n;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// buildContinuumState
+//
+// Per docs/planning/tise-task-breakdown.md §3 "B2. Energy-grid loop and
+// closed-form coefficients": for each energy on a grid, compute
+// c_n = (<phi_n|H|B_N> - E<phi_n|B_N>) / (E - E_n) and
+// |psi_bar_E> = sum_n |phi_n> c_n + |B_N>.
+// ---------------------------------------------------------------------------
+
+class BuildContinuumStateTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        std::map<std::string, std::string> potential = {
+            {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
+        Hmat = H;
+        Smat = S;
+        eigen = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+
+        // Energy grid well above the bound-state spectrum (eigen.values are
+        // all < 2 for this basis), so E - E_n never vanishes.
+        Egrid = {2.0, 5.0, 10.0};
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 11, order = 4, L = 1;
+    double rMin = 0.1, rMax = 10.0;
+    int nBSplines = 0, nEn = 0;
+    std::vector<double> Hmat, Smat;
+    tise::EigenResult eigen;
+    std::vector<double> Egrid;
+};
+
+TEST_F(BuildContinuumStateTest, ReturnsOneStatePerEnergyGridPoint)
+{
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
+    EXPECT_EQ(static_cast<int>(states.size()), static_cast<int>(Egrid.size()));
+}
+
+TEST_F(BuildContinuumStateTest, EachStateHasNEnPlusOneCoefficients)
+{
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
+    for (const auto &state : states)
+        EXPECT_EQ(static_cast<int>(state.size()), nEn + 1);
+}
+
+TEST_F(BuildContinuumStateTest, LastCoefficientIsAlwaysOne)
+{
+    // The B_N term's coefficient in |psi_bar_E> = sum_n |phi_n> c_n + |B_N>
+    // is exactly 1, for every energy on the grid.
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
+    for (size_t e = 0; e < states.size(); ++e)
+        EXPECT_DOUBLE_EQ(states[e][nEn], 1.0) << "B_N coefficient wrong at E_idx=" << e;
+}
+
+TEST_F(BuildContinuumStateTest, CoefficientsVaryWithEnergy)
+{
+    // Regression guard: c_n(E) must actually depend on E. (It collapses to a
+    // constant, independent of E, if B_N is mistakenly drawn from inside
+    // span{phi_n} rather than the true dropped last B-spline -- see
+    // PrecomputeBoundaryCouplingTest above.)
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
+    ASSERT_GE(states.size(), 2u);
+
+    bool anyDifferent = false;
+    for (int n = 0; n < nEn; ++n)
+        if (std::abs(states[0][n] - states[1][n]) > 1e-9)
+            anyDifferent = true;
+    EXPECT_TRUE(anyDifferent) << "coefficients identical across different energies";
+}
+
+TEST_F(BuildContinuumStateTest, SatisfiesDefiningEigenrelation)
+{
+    // The doc's B2 "Done when" criterion: <phi_n|(E-H)|psi_bar_E> ~ 0 for
+    // every confined n, at each sampled energy. |psi_bar_E> = sum_n c_n|phi_n>
+    // + |B_N>, and {phi_n} is S-orthonormal with H phi_n = E_n S phi_n (the
+    // defining property of solveGeneralizedEigenproblem's output), so this
+    // reduces to E*(c_n + <phi_n|B_N>) - (c_n*E_n + <phi_n|H|B_N>) ~ 0.
+    // <phi_n|B_N> and <phi_n|H|B_N> are precomputeBoundaryCoupling's
+    // coeffs2/coeffs1, independently validated against brute-force
+    // bs.integral() calls by PrecomputeBoundaryCouplingTest above -- so this
+    // is not simply re-checking the algebra that defined c_n.
+    auto states = tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, Egrid);
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen);
+
+    for (size_t eIdx = 0; eIdx < Egrid.size(); ++eIdx)
+    {
+        double E = Egrid[eIdx];
+        for (int n = 0; n < nEn; ++n)
+        {
+            double c = states[eIdx][n];
+            double lhs = E * (c + coeffs2[n]) - (c * eigen.values[n] + coeffs1[n]);
+            EXPECT_NEAR(lhs, 0.0, 1e-9)
+                << "<phi_n|(E-H)|psi_bar_E> nonzero at n=" << n << ", E=" << E;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // writeEigenstate
 // ---------------------------------------------------------------------------
 
@@ -1571,4 +1775,94 @@ TEST(WarnIfContinuumExceedsEAccTest, WarningTextMentionsUnreliableResults)
     std::ostringstream warn;
     tise::warnIfContinuumExceedsEAcc(10.0, 5.0, warn);
     EXPECT_NE(warn.str().find("unreliable"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// matchAsymptotic — phase shift vs. the exact spherical square-well solution
+//
+// For an L=0 (s-wave) attractive square well V(r) = -V0 for r < a, 0 for
+// r >= a, the continuum phase shift at energy E > 0 has a closed form (finite
+// spherical well scattering):
+//   k     = sqrt(2*E)          exterior wavenumber
+//   kappa = sqrt(2*(E + V0))     interior wavenumber
+//   delta = -k*a + atan[ (k/kappa) * tan(kappa*a) ] + n*pi, for integer n.
+// delta is only physically defined mod pi (sin(kr+delta) and
+// sin(kr+delta+pi) are the same scattering state up to an overall sign), so
+// comparisons below reduce both sides into (-pi/2, pi/2] before comparing.
+// ---------------------------------------------------------------------------
+
+static double wrapPhaseModPi(double delta)
+{
+    return delta - M_PI * std::round(delta / M_PI);
+}
+
+static double squareWellPhaseShift(double E, double V0, double a)
+{
+    double k = std::sqrt(2*E);
+    double kappa = std::sqrt(2*(E + V0));
+    return -k * a + std::atan((k / kappa) * std::tan(kappa * a));
+}
+
+class SquareWellPhaseShiftTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> gridPts(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            gridPts[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, gridPts), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        // Attractive square well of depth V0 and radius a; a coincides with a
+        // grid node (spacing (rMax-rMin)/(nNodes-1) = 0.5) so a B-spline knot
+        // sits exactly at the potential's discontinuity instead of smoothing
+        // over it.
+        std::map<std::string, std::string> potential = {
+            {"[0, " + std::to_string(a) + ")", "-" + std::to_string(V0)},
+            {"[" + std::to_string(a) + ", " + std::to_string(rMax) + "]", "0.0"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
+        eigen  = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+        states = tise::buildContinuumState(order, nEn, H, S, eigen, energyGrid);
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 41, order = 6, L = 0;
+    double rMin = 0.0, rMax = 20.0;
+    double V0 = 2.0, a = 0.5;
+    int nBSplines = 0, nEn = 0;
+    tise::EigenResult eigen;
+    std::vector<double> energyGrid = {0.5};
+    std::vector<std::vector<double>> states;
+};
+
+TEST_F(SquareWellPhaseShiftTest, MatchesAnalyticSquareWellFormula)
+{
+    double R = 15.0; // well outside the well (a=0.5), well inside rMax=20
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R);
+
+    double expected = squareWellPhaseShift(energyGrid[0], V0, a);
+    EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), wrapPhaseModPi(expected), 5e-3)
+        << "computed delta=" << ar.delta[0] << " expected=" << expected;
+}
+
+TEST_F(SquareWellPhaseShiftTest, PhaseShiftIndependentOfMatchingRadius)
+{
+    // Physically, once R is outside the well, the continuum wavefunction is
+    // an exact standing wave A*sin(kr+delta); delta extracted at different R
+    // (mod pi) must therefore agree with itself, independent of the
+    // analytic-formula tolerance used above.
+    std::vector<double> Rs = {10.0, 12.0, 15.0, 18.0};
+    double deltaAtR0 = wrapPhaseModPi(
+        tise::matchAsymptotic(bs, states, eigen, energyGrid, Rs[0]).delta[0]);
+
+    for (double R : Rs)
+    {
+        double delta = wrapPhaseModPi(
+            tise::matchAsymptotic(bs, states, eigen, energyGrid, R).delta[0]);
+        EXPECT_NEAR(delta, deltaAtR0, 1e-3)
+            << "phase shift not independent of matching radius R=" << R;
+    }
 }
