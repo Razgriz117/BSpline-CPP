@@ -23,8 +23,6 @@ find_package(nlohmann_json 3.10.5 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MUPARSER REQUIRED IMPORTED_TARGET muparser)
 add_library(muparser::muparser ALIAS PkgConfig::MUPARSER)
-# yaml-cpp: parses config.yaml for the tise_solver subprocess CLI.
-find_package(yaml-cpp REQUIRED)
 
 if (BUILD_TESTING)
     enable_testing()
@@ -97,6 +95,14 @@ target_link_libraries(H-BoundStates PRIVATE
 )
 
 # TISE solver subprocess CLI stub (Controller<->TISE contract, docs/SDD.md §7.2.1)
-add_executable(tise_solver tise_solver_main.cpp)
-target_compile_features(tise_solver PRIVATE cxx_std_17)
-target_link_libraries(tise_solver PRIVATE yaml-cpp)
+# Scoped to this target only: a REQUIRED find_package here would run at
+# top-level configure time and take H-BoundStates down with it if yaml-cpp
+# isn't discoverable, even though H-BoundStates never links it.
+find_package(yaml-cpp QUIET)
+if (yaml-cpp_FOUND)
+    add_executable(tise_solver tise_solver_main.cpp)
+    target_compile_features(tise_solver PRIVATE cxx_std_17)
+    target_link_libraries(tise_solver PRIVATE yaml-cpp)
+else()
+    message(WARNING "yaml-cpp not found -- skipping tise_solver target (H-BoundStates is unaffected)")
+endif()
