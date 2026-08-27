@@ -851,7 +851,7 @@ flowchart TD
 | Field | Type | Description |
 |---|---|---|
 | `n_pts_eigenstate` | int | Spatial grid points for eigenstate wavefunction output |
-| `error_threshold` | float | Eigenvalue accuracy cutoff for reporting |
+| `error_threshold` | float | Eigenvalue accuracy cutoff for reporting. **Not currently consumed by `tise_solver`** (see ADR-0007) — meaningful only to the separate, hydrogen-specific `H-BoundStates` demo executable, which compares computed eigenvalues against the analytic hydrogen spectrum. |
 
 **`tise.continuum`** (REQ-F-040)
 
@@ -917,8 +917,8 @@ Continuum-state construction ([§5.2.3](#523-internal-design)) additionally requ
 |---|---|---|
 | `data/tise/eigenvalues.dat` | Plain text (2-col) | Index, $E_n$ |
 | `data/tise/eigenvectors.dat` | Plain text (matrix) | Columns are $\mathbf{c}_n$ coefficient vectors |
-| `data/tise/hamiltonian.dat` | Plain text or binary | $\mathbf{H}$ matrix (banded) |
-| `data/tise/overlap.dat` | Plain text or binary | $\mathbf{S}$ matrix (banded) |
+| `data/tise/hamiltonian.dat` | Plain text (banded, `order` rows × `nEn` cols) | $\mathbf{H}$ matrix, LAPACK symmetric-banded storage |
+| `data/tise/overlap.dat` | Plain text (banded, `order` rows × `nEn` cols) | $\mathbf{S}$ matrix, LAPACK symmetric-banded storage |
 | `data/tise/phase_shifts.dat` | Plain text (3-col) | $\varepsilon_i$, $\delta(\varepsilon_i)$, $d\delta/dE$ |
 | `data/tise/continuum_state_NNN.dat` | Plain text (2-col) | $x$, $\psi_{\varepsilon_i}(x)$ per energy |
 | `data/tise/warnings.json` | JSON array | Array of `{"category": "physics"\|"operational", "message": "..."}` objects; always present after successful run |
@@ -928,6 +928,8 @@ Continuum-state construction ([§5.2.3](#523-internal-design)) additionally requ
 Plain text is preferred initially for transparency and ease of inspection with standard tools. Migration to HDF5 (via the HDF5 C++ API and `h5py` in Python) can be done later if file sizes or I/O speed become a bottleneck — the interface between programs ([§7.2](#72-inter-component-interfaces)) does not change, only the file format.
 
 *Continuum output uses the spatial grid $x_i = R/(N_x-1)(i-1)$ and the stable phase-shift-derivative formula, both defined in [§5.2.3](#523-internal-design) — not direct differentiation of $\delta(E)$.*
+
+**Banded storage convention** (resolves the format ambiguity above): `hamiltonian.dat`/`overlap.dat` store the same column-major LAPACK symmetric-banded layout `fillBandedMatrices` (`TISE/tise.cpp`) uses internally — element $(row, col)$ (1-based, $row \in [1, \text{order}]$, $col \in [1, n_{En}]$) is at flat index $(row-1)+(col-1)\cdot\text{order}$, written as plain text row-major. `eigenvectors.dat` is the *full*, zero-padded $n_\text{BSplines}$-row B-spline coefficient representation (`tise::eigenstateCoefficients`'s output per state), not the raw $n_{En}\times n_{En}$ reduced-basis LAPACK block — directly usable via `bspline::BSpline::eval` without external knowledge of which boundary B-splines were dropped. `eigenvalues.dat`/`eigenvectors.dat` include all computed states, with no bound-state filtering applied by `tise_solver` — see ADR-0007.
 
 ### 6.4 Data Validation Rules
 
