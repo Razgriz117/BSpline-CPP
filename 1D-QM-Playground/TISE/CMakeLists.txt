@@ -102,7 +102,11 @@ find_package(yaml-cpp QUIET)
 if (yaml-cpp_FOUND)
     add_executable(tise_solver tise_solver_main.cpp)
     target_compile_features(tise_solver PRIVATE cxx_std_17)
-    target_link_libraries(tise_solver PRIVATE yaml-cpp)
+    target_link_libraries(tise_solver PRIVATE
+        tise_lib
+        yaml-cpp
+        nlohmann_json::nlohmann_json
+    )
 else()
     message(WARNING "yaml-cpp not found -- skipping tise_solver target (H-BoundStates is unaffected)")
 endif()
