@@ -53,6 +53,16 @@ bool inInterval(double x, const std::string &interval);
 // std::runtime_error if no piece's domain covers x.
 double evaluateFunction(std::map<std::string, std::string> function, double x);
 
+// Parse one config.yaml `potential` list entry -- a single-quoted Python
+// dict-literal string, e.g. "{'domain': '(0, 100]', 'function': '-1/x'}"
+// (controller.py's parse_potential_piece, via ast.literal_eval, is the
+// Python-side twin of this parser -- NOT JSON, unlike main.cpp's argv-based
+// parsePiecewise). Returns {domain, function}. Throws std::runtime_error on
+// a missing key or malformed input; does not validate the domain/function
+// strings themselves -- that happens the first time evaluateFunction uses
+// them.
+std::pair<std::string, std::string> parsePotentialPiece(const std::string &piece);
+
 // Result of fitting a sampled sequence V[0..N-1] (assumed to be sampled at
 // points growing/shrinking geometrically by `ratio` per step) for convergence
 // behavior: does it diverge, is it already flat, or does it follow a

@@ -133,6 +133,48 @@ TEST(EvaluateFunctionTest, ThrowsWhenXUncovered)
 }
 
 // ---------------------------------------------------------------------------
+// parsePotentialPiece
+//
+// controller.py's parse_potential_piece (via ast.literal_eval) is the
+// Python-side twin of this parser -- config.yaml's `potential` list holds
+// single-quoted Python dict-literal strings, NOT JSON.
+// ---------------------------------------------------------------------------
+
+TEST(ParsePotentialPieceTest, ParsesRealConfigExample)
+{
+    auto [domain, function] = tise::parsePotentialPiece(
+        "{'domain': '(0, 100]', 'function': '-1/x + 1/x^2'}");
+    EXPECT_EQ(domain, "(0, 100]");
+    EXPECT_EQ(function, "-1/x + 1/x^2");
+}
+
+TEST(ParsePotentialPieceTest, ParsesConfigYamlDocstringExamples)
+{
+    auto [d1, f1] = tise::parsePotentialPiece("{'domain': '[0, 5)',  'function': '0'}");
+    EXPECT_EQ(d1, "[0, 5)");
+    EXPECT_EQ(f1, "0");
+
+    auto [d2, f2] = tise::parsePotentialPiece("{'domain': '[5, 6]',  'function': '10'}");
+    EXPECT_EQ(d2, "[5, 6]");
+    EXPECT_EQ(f2, "10");
+}
+
+TEST(ParsePotentialPieceTest, ThrowsOnMissingDomainKey)
+{
+    EXPECT_THROW(tise::parsePotentialPiece("{'function': '0'}"), std::runtime_error);
+}
+
+TEST(ParsePotentialPieceTest, ThrowsOnMissingFunctionKey)
+{
+    EXPECT_THROW(tise::parsePotentialPiece("{'domain': '[0, 5)'}"), std::runtime_error);
+}
+
+TEST(ParsePotentialPieceTest, ThrowsOnMalformedInput)
+{
+    EXPECT_THROW(tise::parsePotentialPiece("not a dict at all"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
 // classifySequenceConvergence
 // ---------------------------------------------------------------------------
 

@@ -145,6 +145,25 @@ double evaluateFunction(std::map<std::string, std::string> function, double x)
     throw std::runtime_error(oss.str());
 }
 
+std::pair<std::string, std::string> parsePotentialPiece(const std::string &piece)
+{
+    auto first = piece.find_first_not_of(" \t");
+    auto last  = piece.find_last_not_of(" \t");
+    if (first == std::string::npos || piece[first] != '{' || piece[last] != '}')
+        throw std::runtime_error("malformed potential piece (expected a {...} dict literal): " + piece);
+
+    static const std::regex domainRe(R"('domain'\s*:\s*'([^']*)')");
+    static const std::regex functionRe(R"('function'\s*:\s*'([^']*)')");
+
+    std::smatch mDomain, mFunction;
+    if (!std::regex_search(piece, mDomain, domainRe))
+        throw std::runtime_error("potential piece missing 'domain' key: " + piece);
+    if (!std::regex_search(piece, mFunction, functionRe))
+        throw std::runtime_error("potential piece missing 'function' key: " + piece);
+
+    return {mDomain[1].str(), mFunction[1].str()};
+}
+
 // === A1: boundary-condition asymptote classifier (REQ-F-030) ===
 // See docs/planning/engineer-a-plan-A1.md for the derivation of the
 // thresholds/window sizes below.
