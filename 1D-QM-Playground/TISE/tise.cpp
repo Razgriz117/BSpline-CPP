@@ -945,6 +945,44 @@ void writeEigenstate(std::ostream &out,
     }
 }
 
+void writeEigenvalues(std::ostream &out, const EigenResult &er, int nStates)
+{
+    out << "# eigenvalues.dat: index, E_n\n";
+    out << std::scientific << std::setprecision(16);
+    for (int i = 0; i < nStates; ++i)
+        out << " " << std::setw(6) << i
+            << " " << std::setw(24) << er.values[i] << "\n";
+}
+
+void writeEigenvectors(std::ostream &out, const EigenResult &er, int nBSplines, int nStates)
+{
+    std::vector<std::vector<Real>> cols(nStates);
+    for (int j = 0; j < nStates; ++j)
+        cols[j] = eigenstateCoefficients(er.vectors, j + 1, er.dim, nBSplines);
+
+    out << "# eigenvectors.dat: columns are c_n coefficient vectors\n";
+    out << std::scientific << std::setprecision(16);
+    for (int row = 0; row < nBSplines; ++row)
+    {
+        for (int j = 0; j < nStates; ++j)
+            out << " " << std::setw(24) << cols[j][row];
+        out << "\n";
+    }
+}
+
+void writeBandedMatrix(std::ostream &out, const std::vector<Real> &mat,
+                        int order, int nEn, const std::string &description)
+{
+    out << "# " << description << "\n";
+    out << std::scientific << std::setprecision(16);
+    for (int row = 0; row < order; ++row)
+    {
+        for (int col = 0; col < nEn; ++col)
+            out << " " << std::setw(24) << mat[row + col * order];
+        out << "\n";
+    }
+}
+
 EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
                        Real E_threshold, Real E_max, int N_E)
 {

@@ -363,6 +363,29 @@ void writeEigenstate(std::ostream &out,
                      Real rMin,
                      Real rMax);
 
+// Write eigenvalues.dat: 0-based index, E_n, one line per state, for the
+// first nStates entries of er.values (ascending, per EigenResult's own
+// contract). Per ADR-0007, no bound/continuum filtering is applied here --
+// callers pass er.dim to write every computed state.
+void writeEigenvalues(std::ostream &out, const EigenResult &er, int nStates);
+
+// Write eigenvectors.dat: nBSplines rows x nStates columns. Column j is the
+// full, zero-padded B-spline coefficient vector for eigenstate j+1
+// (1-based, per eigenstateCoefficients), using the DEFAULT dropSet
+// ({1,nBSplines}) -- the same convention er itself was diagonalized under
+// when filled via fillBandedMatrices(..., nEn+1, ..., {1}) and truncated to
+// its leading nEn columns for the solve (see docs/SDD.md §6.3).
+void writeEigenvectors(std::ostream &out, const EigenResult &er, int nBSplines, int nStates);
+
+// Write hamiltonian.dat/overlap.dat: preserves fillBandedMatrices' own
+// column-major banded layout (order rows x nEn cols, element (row,col) at
+// mat[(row-1)+(col-1)*order]) as plain text, row-major. Reads only the
+// leading order*nEn elements of `mat` -- a caller may pass a wider array
+// (e.g. the order*(nEn+1) continuum-coupling fill) and get back just the
+// nEn x nEn block that was actually diagonalized.
+void writeBandedMatrix(std::ostream &out, const std::vector<Real> &mat,
+                        int order, int nEn, const std::string &description);
+
 // Top-level TISE solver: build grid, fill matrices, diagonalise, then construct
 // and write continuum states/phase shifts on the energy grid
 // [E_threshold, E_max] (N_E points, per buildEnergyGrid).

@@ -1528,6 +1528,114 @@ TEST_F(WriteEigenstateTest, LastXIsRMax)
 }
 
 // ---------------------------------------------------------------------------
+// writeEigenvalues / writeEigenvectors / writeBandedMatrix
+//
+// data/tise/{eigenvalues,eigenvectors,hamiltonian,overlap}.dat writers, per
+// docs/SDD.md §6.3 and ADR-0007 (all computed states, no bound-state
+// filtering). Uses a small hand-built EigenResult fixture rather than a
+// full solve, so these stay fast and isolate the writers from solver
+// correctness.
+// ---------------------------------------------------------------------------
+
+class WriteEigenOutputTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        er.dim = 3;
+        er.ldz = 3;
+        er.values = {-0.5, -0.125, 0.3};
+        // 3x3 identity, column-major: eigenstate j has a 1 at physical
+        // index j+2 (matching the default {1,nBSplines} drop-set: kept
+        // physical indices are 2..nBSplines-1 for nBSplines=5).
+        er.vectors = {1,0,0, 0,1,0, 0,0,1};
+        nBSplines = 5;
+    }
+    tise::EigenResult er;
+    int nBSplines = 0;
+};
+
+TEST_F(WriteEigenOutputTest, WriteEigenvaluesWritesAllRequestedStatesZeroIndexed)
+{
+    std::ostringstream out;
+    tise::writeEigenvalues(out, er, 3);
+    std::istringstream in(out.str());
+    std::string line;
+    std::getline(in, line);
+    EXPECT_EQ(line[0], '#'); // header/comment line present
+
+    int idx; double val;
+    in >> idx >> val; EXPECT_EQ(idx, 0); EXPECT_DOUBLE_EQ(val, -0.5);
+    in >> idx >> val; EXPECT_EQ(idx, 1); EXPECT_DOUBLE_EQ(val, -0.125);
+    in >> idx >> val; EXPECT_EQ(idx, 2); EXPECT_DOUBLE_EQ(val, 0.3);
+}
+
+TEST_F(WriteEigenOutputTest, WriteEigenvectorsHasNBSplinesRowsAndRequestedCols)
+{
+    std::ostringstream out;
+    tise::writeEigenvectors(out, er, nBSplines, 3);
+    std::istringstream in(out.str());
+    std::string line;
+    std::getline(in, line); // header
+
+    std::vector<std::vector<double>> rows;
+    while (std::getline(in, line))
+    {
+        std::istringstream ls(line);
+        std::vector<double> row;
+        double v;
+        while (ls >> v) row.push_back(v);
+        if (!row.empty()) rows.push_back(row);
+    }
+    ASSERT_EQ(rows.size(), static_cast<size_t>(nBSplines));
+    for (const auto &row : rows)
+        ASSERT_EQ(row.size(), 3u);
+    // Zero-padded at dropped physical indices 1 and nBSplines (0-based
+    // rows 0 and nBSplines-1), matching eigenstateCoefficients' contract.
+    EXPECT_DOUBLE_EQ(rows[0][0], 0.0);
+    EXPECT_DOUBLE_EQ(rows[nBSplines - 1][0], 0.0);
+}
+
+TEST(WriteBandedMatrixTest, PreservesColumnMajorBandedLayout)
+{
+    // order=2, nEn=3: mat[(row-1)+(col-1)*order], 1-based row in [1,2], col in [1,3]
+    std::vector<tise::Real> mat = {
+        /*col1*/ 1.0, 2.0,
+        /*col2*/ 3.0, 4.0,
+        /*col3*/ 5.0, 6.0,
+    };
+    std::ostringstream out;
+    tise::writeBandedMatrix(out, mat, /*order=*/2, /*nEn=*/3, "test matrix");
+    std::istringstream in(out.str());
+    std::string line;
+    std::getline(in, line); // header
+
+    std::vector<std::vector<double>> rows;
+    while (std::getline(in, line))
+    {
+        std::istringstream ls(line);
+        std::vector<double> row;
+        double v;
+        while (ls >> v) row.push_back(v);
+        if (!row.empty()) rows.push_back(row);
+    }
+    ASSERT_EQ(rows.size(), 2u); // order rows
+    EXPECT_DOUBLE_EQ(rows[0][0], 1.0); EXPECT_DOUBLE_EQ(rows[1][0], 2.0);
+    EXPECT_DOUBLE_EQ(rows[0][2], 5.0); EXPECT_DOUBLE_EQ(rows[1][2], 6.0);
+}
+
+TEST(WriteBandedMatrixTest, IgnoresExtraColumnsBeyondNEn)
+{
+    // Simulates the real call site: mat sized order*(nEn+1) from the
+    // dropSet={1} continuum fill, but only the leading order*nEn block
+    // (the part actually diagonalized) should be written.
+    std::vector<tise::Real> mat = {1,2, 3,4, 5,6, /*extra col, must be ignored*/ 9,9};
+    std::ostringstream out;
+    tise::writeBandedMatrix(out, mat, /*order=*/2, /*nEn=*/3, "test matrix");
+    EXPECT_EQ(out.str().find("9"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // fillBandedMatrices -- generalized drop-set (A4b)
 // ---------------------------------------------------------------------------
 
