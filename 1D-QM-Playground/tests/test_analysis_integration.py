@@ -92,25 +92,25 @@ def _run_analysis_cli(config_path: Path | str, tise_dir: Path, tdse_dir: Path) -
     )
 
 
-# Mirrors TISE/tise_solver_main.cpp's own placeholder-dimension constants
-# (kPlaceholderNumEigenstates, kPlaceholderBasisSize, kPlaceholderBandwidth,
-# as of commit be3a403, confirmed by manually running the built binary
-# before writing this file). C++ constants aren't importable from Python,
-# so these are duplicated here as plain ints -- kept as named constants
-# rather than inlined magic numbers so a future shape change in the stub
-# reads as an obvious, deliberate two-sided edit rather than a silent drift.
-# If the real binary's output shape ever changes without a matching update
-# here, these tests fail loudly instead of the two sides quietly
-# disagreeing.
-_NUM_EIGENSTATES = 5  # kPlaceholderNumEigenstates: eigenvalues.dat rows; eigenvectors.dat cols
-_BASIS_SIZE = 8  # kPlaceholderBasisSize: eigenvectors.dat rows; hamiltonian.dat/overlap.dat cols
-_BANDWIDTH = 3  # kPlaceholderBandwidth: hamiltonian.dat/overlap.dat rows
+# Real shapes, derived from config.yaml's bspline.n_nodes=51, order=12 (C++
+# constants aren't importable from Python, so these are duplicated here as
+# plain ints -- kept as named constants rather than inlined magic numbers so
+# a future config/shape change reads as an obvious, deliberate two-sided
+# edit rather than a silent drift):
+#   nBSplines = n_nodes + order - 2 = 51 + 12 - 2 = 61
+#   nEn       = nBSplines - 2       = 59
+# Per ADR-0007 (docs/adr/0007-defer-bound-state-filtering-tise-eigenvalue-
+# output.md), eigenvalues.dat/eigenvectors.dat contain ALL nEn computed
+# states -- no bound-state filtering is applied by tise_solver.
+_NUM_EIGENSTATES = 59  # eigenvalues.dat rows; eigenvectors.dat cols; hamiltonian.dat/overlap.dat cols
+_BASIS_SIZE = 61  # eigenvectors.dat rows
+_BANDWIDTH = 12  # hamiltonian.dat/overlap.dat rows == bspline.order
 
-# writeContinuumOutputs() calls writeIndexValueFile(..., 2) for every
-# continuum_state_NNN.dat file -- 2 data rows is a fixed literal in the
-# stub's own source, independent of n_energies (which only controls the
-# NUMBER of such files, not each one's row count).
-_CONTINUUM_STATE_POINTS_PER_FILE = 2
+# tise.continuum.n_pts (real config.yaml's default) -- now genuinely
+# config-driven (tise::writeContinuumInfo's npts parameter), not a fixed
+# stub literal. Tests below that enable continuum reuse the real config's
+# n_pts unmodified, so this constant matches it.
+_CONTINUUM_STATE_POINTS_PER_FILE = 500
 
 
 def _write_continuum_enabled_config(tmp_config: Path, tmp_path: Path, n_energies: int) -> Path:
@@ -147,7 +147,7 @@ class TestNoContinuumRealRoundTrip:
         run_tise_solver(str(tmp_config), tise_dir, binary=tise_solver_binary)
         data = read_tise_output(tise_dir)
 
-        # eigenvalues.dat: kPlaceholderNumEigenstates rows, 2 fields each
+        # eigenvalues.dat: _NUM_EIGENSTATES (=nEn) rows, 2 fields each
         # (index, E_n), index ascending from 0 -- checked per-row rather than
         # just by count, so a reader that scrambled order or mis-typed a
         # field would be caught here too.
@@ -157,19 +157,38 @@ class TestNoContinuumRealRoundTrip:
             assert row.index == expected_index
             assert isinstance(row.energy, float)
 
-        # eigenvectors.dat: kPlaceholderBasisSize rows x kPlaceholderNumEigenstates cols.
+        # Physics-sanity checks (not just shape): EigenResult's own ascending
+        # contract, and at least one genuine bound state (E<0) must exist for
+        # this potential. The real config.yaml's potential, "-1/x + 1/x^2",
+        # is a hydrogen L=1 effective potential (see config.yaml's own
+        # comment) -- its lowest few eigenvalues have an exact analytic
+        # answer, E_n = -1/(2*(n+1)^2) for n=1,2,3,..., giving -1/8, -1/18,
+        # -1/32, independent of this project's B-spline numerics. Pinning
+        # these catches gross regressions in the solve path itself, not just
+        # in file I/O shape.
+        energies = [row.energy for row in data.eigenvalues]
+        assert energies == sorted(energies)
+        assert energies[0] < 0
+        assert energies[0] == pytest.approx(-1 / 8, abs=1e-6)
+        assert energies[1] == pytest.approx(-1 / 18, abs=1e-6)
+        assert energies[2] == pytest.approx(-1 / 32, abs=1e-6)
+
+        # eigenvectors.dat: _BASIS_SIZE (=nBSplines) rows x _NUM_EIGENSTATES (=nEn) cols.
         assert len(data.eigenvectors) == _BASIS_SIZE
         assert len(data.eigenvectors[0]) == _NUM_EIGENSTATES
         assert all(len(row) == _NUM_EIGENSTATES for row in data.eigenvectors)
 
-        # hamiltonian.dat / overlap.dat: kPlaceholderBandwidth rows x kPlaceholderBasisSize cols.
+        # hamiltonian.dat / overlap.dat: _BANDWIDTH (=order) rows x
+        # _NUM_EIGENSTATES (=nEn) cols -- NOT _BASIS_SIZE; nBSplines and nEn
+        # are distinct quantities under real physics (the placeholder stub
+        # coincidentally reused one constant for both).
         assert len(data.hamiltonian) == _BANDWIDTH
-        assert len(data.hamiltonian[0]) == _BASIS_SIZE
-        assert all(len(row) == _BASIS_SIZE for row in data.hamiltonian)
+        assert len(data.hamiltonian[0]) == _NUM_EIGENSTATES
+        assert all(len(row) == _NUM_EIGENSTATES for row in data.hamiltonian)
 
         assert len(data.overlap) == _BANDWIDTH
-        assert len(data.overlap[0]) == _BASIS_SIZE
-        assert all(len(row) == _BASIS_SIZE for row in data.overlap)
+        assert len(data.overlap[0]) == _NUM_EIGENSTATES
+        assert all(len(row) == _NUM_EIGENSTATES for row in data.overlap)
 
         # tise.continuum.enabled: false in the real config.yaml -- the real
         # binary writes neither phase_shifts.dat nor any continuum_state_*.dat
@@ -205,7 +224,7 @@ class TestContinuumEnabledRealRoundTrip:
             assert isinstance(row, PhaseShiftRow)
             assert len(row) == 3
 
-        # One continuum_state_NNN.dat per n_energies; writeContinuumOutputs()
+        # One continuum_state_NNN.dat per n_energies; tise::writeContinuumInfo
         # names them starting at i=1 (not 0), so ascending indices are
         # [1, 2, 3].
         assert len(data.continuum_states) == self.N_ENERGIES
@@ -214,8 +233,9 @@ class TestContinuumEnabledRealRoundTrip:
 
         for _index, points in data.continuum_states:
             assert isinstance(points, list)
-            # writeIndexValueFile(..., 2): a fixed literal in
-            # writeContinuumOutputs(), independent of n_energies.
+            # tise.continuum.n_pts (real config.yaml's default, unmodified
+            # by _write_continuum_enabled_config) -- genuinely config-driven
+            # now, not a fixed stub literal.
             assert len(points) == _CONTINUUM_STATE_POINTS_PER_FILE
             assert all(isinstance(point, ContinuumPoint) for point in points)
 
@@ -229,11 +249,11 @@ class TestRepeatedRunOverwritesConsistently:
     second invocation overwrites the first run's files in place) still
     yields identical, correctly-shaped data on re-read. This guards against
     a regression class neither mandatory test above would catch on a single
-    run -- e.g. a stub that opened its output files in append mode instead
-    of truncating, which would only surface as doubled/corrupted rows after
-    a SECOND run against the same directory. Cheap to include: the stub
-    writes only placeholder content, so a second invocation costs one more
-    fast subprocess call, not a second real solve."""
+    run -- e.g. output files opened in append mode instead of truncating,
+    which would only surface as doubled/corrupted rows after a SECOND run
+    against the same directory. Also implicitly confirms the real solve is
+    deterministic (same config in, byte-identical eigenvalues/eigenvectors
+    out) across repeated invocations, not just idempotent file I/O."""
 
     def test_second_run_overwrites_first_with_identical_shape_and_values(
         self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
