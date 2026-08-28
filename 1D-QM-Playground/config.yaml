@@ -44,7 +44,7 @@ tise:
   error_threshold:  1.0e-10   # eigenvalue accuracy cutoff for reporting
 
   continuum:
-    enabled:     false
+    enabled:     true
     E_threshold: 0.0          # lower bound of continuum spectrum range
     E_max:       10.0         # upper bound of continuum spectrum range
     n_energies:  100          # number of energy points in [E_threshold, E_max]

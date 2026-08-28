@@ -42,6 +42,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
+import matplotlib.pyplot as plt
 
 import yaml
 
@@ -392,6 +393,22 @@ def load_config(config_path: str) -> dict:
     return cfg
 
 
+def plot_tise(tise_data: TiseData, tise_dir: str) -> None:
+    # plot continuum states
+    continuum = tise_data.continuum_states
+    for idx, continuum_state in continuum:
+        plt.xlim(0, continuum_state[-1].x)
+        plt.xlabel("r")
+        plt.ylabel("psi")
+        # reformat continuum state data for matplotlib
+        xs = [p.x for p in continuum_state]
+        psis = [p.psi for p in continuum_state]
+        plt.plot(xs, psis)
+        plt.title(fr"Continuum state {idx}", pad=20)
+        plt.savefig(f"{tise_dir}/continuum_{idx}.png")
+        plt.close()
+
+
 def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     """Run Analysis's Phase 3 scope (Sec 7.2.3, Sec 10.2 Phase 3).
 
@@ -405,7 +422,9 @@ def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     never a raw exception.
     """
     load_config(config_path)
-    read_tise_output(Path(tise_dir))
+    tise_output = read_tise_output(Path(tise_dir))
+
+    plot_tise(tise_output, tise_dir)
 
     if not Path(tdse_dir).is_dir():
         print(
