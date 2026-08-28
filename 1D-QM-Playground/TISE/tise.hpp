@@ -411,6 +411,19 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::m
                        Real E_threshold, Real E_max, int N_E);
 
 // === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
+// Reduce a (possibly non-uniform, possibly containing degenerate/repeated
+// knots from buildStrategicRadialGrid) grid to the minimum spacing between
+// DISTINCT physical node locations, for use as computeEAcc's nodeSpacing on
+// a strategic grid. Repeated copies of the same x (the degenerate knots
+// strategic placement inserts at Step/StitchedKink joins) do not represent
+// a second, vanishingly-close physical point -- they increase local knot
+// multiplicity at one location -- so they're collapsed before taking the
+// minimum gap; naively taking min(grid[i+1]-grid[i]) over a raw strategic
+// grid would otherwise return 0.0 at any such knot. `grid` must be sorted
+// non-decreasing. Throws std::runtime_error if fewer than 2 distinct points
+// remain after collapsing.
+Real minInterNodeGap(const std::vector<Real> &grid, Real tol = 1e-12);
+
 // Basis accuracy ceiling (docs/planning/architecture-06-20.md "Continuum
 // range" -> "Basis accuracy limit"; duplicated docs/SDD.md Appendix B
 // "Continuum range" entry; see also SDD Sec. 6.4, Sec. 8). States whose
@@ -422,10 +435,8 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::m
 // the concrete E_acc threshold, per this task's closed-form "Done when"
 // criterion -- treat the result as an order-of-magnitude ceiling, not a
 // razor-sharp cutoff. `nodeSpacing` is a single scalar spacing; for a
-// non-uniform grid (see A4's buildStrategicRadialGrid) the
-// physically-correct value to pass is the *minimum* inter-node gap, not
-// an average -- that reduction is a future call-site concern, not
-// performed here (see docs/planning/engineer-a-plan-A5.md, Gaps).
+// non-uniform grid (see A4's buildStrategicRadialGrid), pass
+// minInterNodeGap(grid) above, not an average.
 Real computeEAcc(Real nodeSpacing, Real mass);
 
 // Warns (to warnOut, default stderr -- SDD Sec. 8's "physics warning"

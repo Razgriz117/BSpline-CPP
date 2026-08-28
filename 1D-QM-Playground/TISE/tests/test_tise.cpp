@@ -2004,6 +2004,37 @@ TEST(SingularPotentialBSplineRemovalTest, RemovingBSplinesNearSingularityProduce
 }
 
 // ---------------------------------------------------------------------------
+// minInterNodeGap
+// ---------------------------------------------------------------------------
+
+TEST(MinInterNodeGapTest, MatchesUniformSpacing)
+{
+    std::vector<tise::Real> grid = {0.0, 2.0, 4.0, 6.0, 8.0, 10.0};
+    EXPECT_NEAR(tise::minInterNodeGap(grid), 2.0, 1e-12);
+}
+
+TEST(MinInterNodeGapTest, SkipsDegenerateKnots)
+{
+    // Mirrors buildStrategicRadialGrid's output shape: a repeated knot at
+    // x=5 (multiplicity 3) inserted into an otherwise-uniform grid of
+    // spacing 1.0. The minimum DISTINCT-point gap is still 1.0, not 0.0.
+    std::vector<tise::Real> grid = {0,1,2,3,4,5,5,5,6,7,8,9,10};
+    EXPECT_NEAR(tise::minInterNodeGap(grid), 1.0, 1e-12);
+}
+
+TEST(MinInterNodeGapTest, FindsTheActualMinimumNotJustTheFirst)
+{
+    std::vector<tise::Real> grid = {0.0, 3.0, 5.0, 5.5, 10.0};
+    EXPECT_NEAR(tise::minInterNodeGap(grid), 0.5, 1e-12);
+}
+
+TEST(MinInterNodeGapTest, ThrowsWhenFewerThanTwoDistinctPoints)
+{
+    std::vector<tise::Real> allSame = {5.0, 5.0, 5.0};
+    EXPECT_THROW(tise::minInterNodeGap(allSame), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
 // computeEAcc
 // ---------------------------------------------------------------------------
 

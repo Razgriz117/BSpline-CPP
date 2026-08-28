@@ -1051,6 +1051,26 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::m
 }
 
 // === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
+Real minInterNodeGap(const std::vector<Real> &grid, Real tol)
+{
+    if (grid.size() < 2)
+        throw std::runtime_error("minInterNodeGap: grid must have at least 2 points");
+    Real minGap = std::numeric_limits<Real>::infinity();
+    Real lastDistinct = grid[0];
+    for (std::size_t i = 1; i < grid.size(); ++i)
+    {
+        const Real gap = grid[i] - lastDistinct;
+        if (gap > tol)
+        {
+            minGap = std::min(minGap, gap);
+            lastDistinct = grid[i];
+        }
+    }
+    if (!std::isfinite(minGap))
+        throw std::runtime_error("minInterNodeGap: fewer than 2 distinct points in grid");
+    return minGap;
+}
+
 Real computeEAcc(Real nodeSpacing, Real mass)
 {
     return kPi * kPi / (2.0 * mass * nodeSpacing * nodeSpacing);
