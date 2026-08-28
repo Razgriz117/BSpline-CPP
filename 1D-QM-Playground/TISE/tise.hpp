@@ -170,25 +170,42 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
 // Given the set of BSplines, Hamiltonian, and eigenvectors, solve for:
 // < phi_n | H | B_N > and < phi_n | B_N >, for each eigenvector
 // These are returned as {coeffs1, coeffs2}, each with length equal to the number of eigenvectors
-std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(int order, int nEn, std::vector<Real> Hmat, std::vector<Real> Smat, EigenResult eigen);
+//
+// `nBSplinesOpt`/`dropSet` generalize this beyond the classic "only B_1
+// dropped" assumption (A4b, REQ-F-050): `dropSet` is the exact set of
+// physical B-spline indices excluded from the bound-state basis that
+// produced `Hmat`/`Smat`/`eigen` (B_N itself must NOT be in it -- its raw
+// column is what this function extracts). Defaults (`nullopt`/`nullopt`)
+// reproduce the original hardcoded {1}-only assumption bit-identically.
+std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
+    int order, int nEn, std::vector<Real> Hmat, std::vector<Real> Smat, EigenResult eigen,
+    std::optional<int> nBSplinesOpt = std::nullopt,
+    std::optional<std::vector<int>> dropSet = std::nullopt);
 
-// given the output of precomputeBoundaryCoupling, construct continuum states |\bar\psi_E> (linear combinations of eigenvectors) 
+// given the output of precomputeBoundaryCoupling, construct continuum states |\bar\psi_E> (linear combinations of eigenvectors)
 // for each energy E on the input grid. The result is stored as a 2-D vector with (# Energy points) elements of length (# eigenvectors)
 // note that each energy has a state with (# eigenvectors + 1) elements, but the coefficient for the last element is always 1 (and corresponds to B_N).
+// `nBSplinesOpt`/`dropSet`: see precomputeBoundaryCoupling, forwarded as-is.
 std::vector<std::vector<Real>> buildContinuumState(
-    int order, int nEn, 
-    std::vector<Real> Hmat, 
-    std::vector<Real> Smat, 
+    int order, int nEn,
+    std::vector<Real> Hmat,
+    std::vector<Real> Smat,
     EigenResult eigen,
-    std::vector<Real> grid
+    std::vector<Real> grid,
+    std::optional<int> nBSplinesOpt = std::nullopt,
+    std::optional<std::vector<int>> dropSet = std::nullopt
 );
 
 // `states` holds, per buildContinuumState's contract, coefficients of the
 // confined eigenstates {phi_n} (plus the B_N term) -- not raw B-spline
 // coefficients. `eigen` (the same EigenResult states was built from) is
 // required to transform each energy's coefficients into true B-spline
-// coefficients before evaluating psi_E(R) and psi_E'(R).
-AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, const EigenResult &eigen, std::vector<Real> grid, Real R);
+// coefficients before evaluating psi_E(R) and psi_E'(R). `dropSet`: see
+// precomputeBoundaryCoupling -- must match whatever drop-set actually
+// produced `eigen`/`states`, or coefficients will be silently misattributed
+// to the wrong physical B-spline indices before bs.eval is called.
+AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, const EigenResult &eigen, std::vector<Real> grid, Real R,
+                                  std::optional<std::vector<int>> dropSet = std::nullopt);
 
 // Writes phase_shifts.dat-style output (epsilon_i, delta, dDeltaDE) to `out`,
 // and one continuum_state_NNN.dat-style block (x, psi_E(x)) per energy to

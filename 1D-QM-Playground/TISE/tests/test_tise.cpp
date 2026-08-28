@@ -1354,6 +1354,134 @@ TEST_F(PrecomputeBoundaryCouplingTest, MatchesBruteForceIntegrals)
 }
 
 // ---------------------------------------------------------------------------
+// precomputeBoundaryCoupling — generalized drop-set
+//
+// precomputeBoundaryCoupling originally hardcoded the classic "only B_1
+// dropped" assumption (iBs2=nEn+2, HB_N[iBs1-2]), bypassing
+// fillBandedMatrices' own colOf/resolveDropSet mechanism. These tests prove
+// the generalized version (a) is actually correct for a non-classic
+// drop-set -- specifically a NON-CONTIGUOUS one (two disjoint clusters),
+// which the old hardcoded shift-by-1 math cannot represent at all -- and
+// (b) stays bit-identical to the old hardcoded behavior when called with no
+// trailing args.
+// ---------------------------------------------------------------------------
+
+class PrecomputeBoundaryCouplingDropSetTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        nBSplines = bs.getNBSplines();
+
+        std::map<std::string, std::string> potential = {
+            {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
+        };
+        // Two disjoint clusters excluded from the DIAGONALIZED subspace:
+        // {1} (classic left wall) and an interior cluster {6,7,8} --
+        // deliberately NOT a contiguous prefix from 1, so the old
+        // iBs2=nEn+2/HB_N[iBs1-2] math would misattribute every
+        // coefficient if this generalization were wrong. B_N itself is
+        // NEVER in dropSet (mirrors solveTISE's real calling convention:
+        // fill nEn+1 columns keeping B_N's column, diagonalize only nEn).
+        dropSet = {1, 6, 7, 8};
+        nEn = nBSplines - static_cast<int>(dropSet.size()) - 1;
+
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, dropSet);
+        Hmat = H;
+        Smat = S;
+        eigen = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 21, order = 6, L = 1;
+    double rMin = 0.1, rMax = 20.0;
+    int nBSplines = 0, nEn = 0;
+    std::vector<int> dropSet;
+    std::vector<double> Hmat, Smat;
+    tise::EigenResult eigen;
+};
+
+TEST_F(PrecomputeBoundaryCouplingDropSetTest, MatchesBruteForceIntegralsWithNonContiguousDropSet)
+{
+    auto [coeffs1, coeffs2] = tise::precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen, nBSplines, dropSet);
+    ASSERT_EQ(static_cast<int>(coeffs1.size()), nEn);
+    ASSERT_EQ(static_cast<int>(coeffs2.size()), nEn);
+
+    auto unity  = [](double, const double *) { return 1.0; };
+    auto potFun = [this](double x, const double *) { return tise::radialPotential(x, L); };
+
+    int iBsN = nBSplines; // B_N itself is never in dropSet (kept for continuum coupling)
+
+    // Brute-force <B_i|B_N> / <B_i|H|B_N> for every KEPT physical index i
+    // (i.e. i in 1..nBSplines-1, i not in dropSet), independent of
+    // fillBandedMatrices' banded storage / precomputeBoundaryCoupling's own
+    // extraction logic.
+    std::vector<int> kept;
+    for (int i = 1; i < nBSplines; ++i)
+        if (std::find(dropSet.begin(), dropSet.end(), i) == dropSet.end())
+            kept.push_back(i);
+    ASSERT_EQ(static_cast<int>(kept.size()), nEn);
+
+    std::vector<double> S_row(nEn), H_row(nEn);
+    for (int k = 0; k < nEn; ++k)
+    {
+        int iBs = kept[k];
+        S_row[k] = bs.integral(unity, iBs, iBsN);
+        double kinetic   = bs.integral(unity, iBs, iBsN, 1, 1) / 2.0;
+        double potential = bs.integral(potFun, iBs, iBsN);
+        H_row[k] = kinetic + potential;
+    }
+
+    for (int n = 0; n < nEn; ++n)
+    {
+        double expectedOverlap = 0.0, expectedHCoupling = 0.0;
+        for (int k = 0; k < nEn; ++k)
+        {
+            double c = eigen.vectors[n * eigen.ldz + k];
+            expectedOverlap   += c * S_row[k];
+            expectedHCoupling += c * H_row[k];
+        }
+        EXPECT_NEAR(coeffs2[n], expectedOverlap,   1e-9) << "<phi_n|B_N> mismatch at n=" << n;
+        EXPECT_NEAR(coeffs1[n], expectedHCoupling, 1e-9) << "<phi_n|H|B_N> mismatch at n=" << n;
+    }
+}
+
+TEST_F(PrecomputeBoundaryCouplingDropSetTest, DefaultParamsReproduceClassicCallBitIdentically)
+{
+    // The classic-convention fixture: dropSet={1}, nEn=nBSplines-2 (matches
+    // PrecomputeBoundaryCouplingTest's own SetUp exactly).
+    bspline::BSpline classicBs;
+    std::vector<double> grid(nNodes);
+    for (int i = 0; i < nNodes; ++i) grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+    ASSERT_EQ(classicBs.init(nNodes, order, grid), 0);
+    int classicNBSplines = classicBs.getNBSplines();
+    int classicNEn = classicNBSplines - 2;
+
+    std::map<std::string, std::string> potential = {
+        {"(-inf, inf)", std::to_string(L) + " * (" + std::to_string(L) + " + 1.0) / (2.0 * x * x) - 1.0 / x"}
+    };
+    auto [H, S] = tise::fillBandedMatrices(classicBs, classicNEn + 1, order, L, potential, std::vector<int>{1});
+    auto eigenClassic = tise::solveGeneralizedEigenproblem(H, S, classicNEn, order);
+
+    auto withDefaults = tise::precomputeBoundaryCoupling(order, classicNEn, H, S, eigenClassic);
+    auto withExplicit = tise::precomputeBoundaryCoupling(order, classicNEn, H, S, eigenClassic,
+                                                           classicNBSplines, std::vector<int>{1});
+    EXPECT_EQ(withDefaults.first, withExplicit.first);
+    EXPECT_EQ(withDefaults.second, withExplicit.second);
+}
+
+TEST_F(PrecomputeBoundaryCouplingDropSetTest, ThrowsOnInconsistentNEn)
+{
+    EXPECT_THROW(
+        tise::precomputeBoundaryCoupling(order, nEn + 1, Hmat, Smat, eigen, nBSplines, dropSet),
+        std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
 // buildContinuumState
 //
 // Per docs/planning/tise-task-breakdown.md §3 "B2. Energy-grid loop and
@@ -2015,4 +2143,98 @@ TEST_F(SquareWellPhaseShiftTest, PhaseShiftIndependentOfMatchingRadius)
         EXPECT_NEAR(delta, deltaAtR0, 1e-3)
             << "phase shift not independent of matching radius R=" << R;
     }
+}
+
+// matchAsymptotic with a non-contiguous drop-set: rebuild the SAME square-
+// well fixture SquareWellPhaseShiftTest uses, but drop an EXTRA interior
+// cluster {30,31,32,33} from a flat region (support roughly [12,16.5], well
+// past the well's edge a=0.5) far from the matching radius R below --
+// confirming the generalized fc-placement is still physically correct
+// end-to-end (matches the analytic phase shift within the same tolerance),
+// not just index-clean.
+class MatchAsymptoticDropSetTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> gridPts(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            gridPts[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, gridPts), 0);
+        nBSplines = bs.getNBSplines();
+
+        // B_N never in dropSet -- mirrors solveTISE's real calling
+        // convention (fill nEn+1 columns keeping B_N's column, diagonalize
+        // only nEn).
+        dropSet = {1, 30, 31, 32, 33};
+
+        std::map<std::string, std::string> potential = {
+            {"[0, " + std::to_string(a) + ")", "-" + std::to_string(V0)},
+            {"[" + std::to_string(a) + ", " + std::to_string(rMax) + "]", "0.0"}
+        };
+        int nEn = nBSplines - static_cast<int>(dropSet.size()) - 1;
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, dropSet);
+        eigen  = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+        states = tise::buildContinuumState(order, nEn, H, S, eigen, energyGrid, nBSplines, dropSet);
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 41, order = 6, L = 0;
+    double rMin = 0.0, rMax = 20.0;
+    double V0 = 2.0, a = 0.5;
+    int nBSplines = 0;
+    std::vector<int> dropSet;
+    tise::EigenResult eigen;
+    std::vector<double> energyGrid = {0.5};
+    std::vector<std::vector<double>> states;
+};
+
+// Diagnostic finding (kept as a comment, not a test, since it's expected
+// physics rather than a regression to guard): R values close to the
+// removed cluster's support boundary (x=12) show growing disagreement --
+// R=8: ~0.004 rad off analytic, R=9: ~0.0002, R=10: ~0.034, R=11: ~0.11 --
+// monotonically worse approaching the depleted-basis region. bs.eval needs
+// nearby basis support to be accurate; this is a real local effect of
+// evaluating close to where B-splines were removed, not an indexing bug
+// (confirmed: the coefficient computation itself already matches brute-
+// force integration to 1e-9 in PrecomputeBoundaryCouplingDropSetTest for
+// this same kind of non-contiguous drop-set). Both tests below therefore
+// use R values with several B-spline-widths of margin from x=12.
+
+TEST_F(MatchAsymptoticDropSetTest, DeltaIsSelfConsistentAcrossMatchingRadii)
+{
+    // The load-bearing correctness check for the generalized index
+    // placement: if fc[physicalOf[j+1]-1]/fc[nBSplines-1] ever placed a
+    // coefficient at the WRONG physical index, delta extracted at
+    // different R would disagree with each OTHER, not just drift uniformly
+    // from the analytic formula -- R-independence is a much more
+    // fundamental invariant of a correctly-assembled B-spline coefficient
+    // vector than agreement with the analytic comparison below is.
+    // Tolerance 6e-3, not SquareWellPhaseShiftTest's 1e-3: this fixture's
+    // basis is 4 B-splines smaller (an interior cluster removed), so
+    // overall precision is honestly a bit lower even at a safe distance
+    // from the removed region -- empirically up to ~0.005 rad here, still
+    // roughly an order of magnitude below the ~0.03-0.11 rad seen when R
+    // approaches the cluster (see comment above), which is the actual
+    // discriminator between "smaller basis" and "indexing bug."
+    std::vector<double> Rs = {5.0, 6.0, 7.0, 8.0};
+    double deltaAtR0 = wrapPhaseModPi(
+        tise::matchAsymptotic(bs, states, eigen, energyGrid, Rs[0], dropSet).delta[0]);
+    for (double R : Rs)
+    {
+        double delta = wrapPhaseModPi(
+            tise::matchAsymptotic(bs, states, eigen, energyGrid, R, dropSet).delta[0]);
+        EXPECT_NEAR(delta, deltaAtR0, 6e-3)
+            << "phase shift not self-consistent across matching radii at R=" << R;
+    }
+}
+
+TEST_F(MatchAsymptoticDropSetTest, StillMatchesAnalyticSquareWellFormulaWithExtraInteriorCluster)
+{
+    double R = 7.0; // outside the well; 5 B-spline-widths (2.5) of margin from the dropped cluster's support at x=12
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R, dropSet);
+
+    double expected = squareWellPhaseShift(energyGrid[0], V0, a);
+    EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), wrapPhaseModPi(expected), 5e-3)
+        << "computed delta=" << ar.delta[0] << " expected=" << expected;
 }

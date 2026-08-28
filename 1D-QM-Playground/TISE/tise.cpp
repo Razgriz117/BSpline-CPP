@@ -332,7 +332,9 @@ namespace
 // the true number of surviving indices.
 struct ColumnMap
 {
-    std::vector<int> colOf;
+    std::vector<int> colOf;      // colOf[physicalIdx] = column (1-based), 0 if dropped
+    std::vector<int> physicalOf; // physicalOf[col] = physicalIdx (1-based); size nBSplines+1,
+                                  // only entries 1..nKept meaningful
     int nKept;
 };
 
@@ -347,11 +349,15 @@ ColumnMap columnIndexMap(int nBSplines, const std::vector<int> &dropSet)
         isDropped[d] = true;
     }
     std::vector<int> colOf(nBSplines + 1, 0);
+    std::vector<int> physicalOf(nBSplines + 1, 0);
     int c = 0;
     for (int idx = 1; idx <= nBSplines; ++idx)
         if (!isDropped[idx])
+        {
             colOf[idx] = ++c;
-    return {colOf, c};
+            physicalOf[c] = idx;
+        }
+    return {colOf, physicalOf, c};
 }
 
 // Shared by fillBandedMatrices/eigenstateCoefficients: resolves the
@@ -430,12 +436,14 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
 }
 
 std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
-    int order, int nEn, 
-    std::vector<Real> Hmat, 
-    std::vector<Real> Smat, 
-    EigenResult eigen)
+    int order, int nEn,
+    std::vector<Real> Hmat,
+    std::vector<Real> Smat,
+    EigenResult eigen,
+    std::optional<int> nBSplinesOpt,
+    std::optional<std::vector<int>> dropSet)
 {
-    // Calculate <phi_n | H | B_N> and <phi_n | B_N>. 
+    // Calculate <phi_n | H | B_N> and <phi_n | B_N>.
     // Note:
     // - H is in the basis made up by the B-Splines, hence H |B_N> is simply the N-th column of H.
     // - Hmat is not an N X N flattened matrix; it stores bands of width ``order`` from an ``nEn``x``nEn`` matrix, so there are ``order * nEn`` elements
@@ -445,19 +453,32 @@ std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
     // Also note:
     // - Eigenvectors are NOT in the B-Spline basis, so we can't just compute <phi_i|B_N> by taking the last element of each |phi_n>.
     // instead we need to use SB_N, the last column of S, which accounts for overlap of all B-Splines with B_N.
+    //
+    // Generalized via colOf/physicalOf (A4b, REQ-F-050) instead of the
+    // classic hardcoded "only B_1 dropped" shift-by-1 arithmetic -- see
+    // docs/planning/engineer-a-plan-A4-wiring-design.md for why this was
+    // necessary once solveTISE could pass a non-classic dropSet.
+    const int nBSplines = nBSplinesOpt.value_or(nEn + 2);
+    const ColumnMap map = columnIndexMap(nBSplines, dropSet.value_or(std::vector<int>{1}));
+    const std::vector<int> &colOf = map.colOf;
+    const int iBs2 = nBSplines; // B_N, always kept (never in dropSet)
+    const int col2 = colOf[iBs2];
+    if (map.nKept != nEn + 1 || col2 != nEn + 1)
+        throw std::runtime_error("precomputeBoundaryCoupling: nEn inconsistent with nBSplines/dropSet "
+                                  "(expected nBSplines - |dropSet| == nEn + 1, and B_N must be kept)");
 
-    std::vector<Real> HB_N(nEn), SB_N(nEn);
-    int iBs2 = nEn + 2;      // last B-spline index
-    int col  = iBs2 - 1;     // = nEn + 1, matches bandIndex's 1-indexed col
-
-    int iBs1Min = std::max(2, iBs2 - order + 1);
-    for (int iBs1 = iBs1Min; iBs1 <= iBs2 - 1; ++iBs1) {
-        int row = iBs1 + order - iBs2;            // band-local row, matches fill loop
-        int idx = (row - 1) + (col - 1) * order;  // bandIndex(row, col)
-        HB_N[iBs1 - 2] = Hmat[idx];               // iBs1=2 -> index 0
-        SB_N[iBs1 - 2] = Smat[idx];               // same band position, from Smat
+    std::vector<Real> HB_N(nEn, 0.0), SB_N(nEn, 0.0);
+    const int iBs1Min = std::max(1, iBs2 - order + 1);
+    for (int iBs1 = iBs1Min; iBs1 <= iBs2 - 1; ++iBs1)
+    {
+        const int col1 = colOf[iBs1];
+        if (col1 == 0)
+            continue;
+        const int row = order + col1 - col2;      // matches fillBandedMatrices' bandIndex row formula
+        const int idx = (row - 1) + (col2 - 1) * order;
+        HB_N[col1 - 1] = Hmat[idx];
+        SB_N[col1 - 1] = Smat[idx];
     }
-
 
     // <phi_n|H|B_N> / <phi_n|B_N> are the scalar product of phi_n with HB_N / SB_N.
     std::vector<Real> coeffs1(nEn), coeffs2(nEn);
@@ -478,14 +499,16 @@ std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
 }
 
 std::vector<std::vector<Real>> buildContinuumState(
-    int order, int nEn, 
-    std::vector<Real> Hmat, 
-    std::vector<Real> Smat, 
+    int order, int nEn,
+    std::vector<Real> Hmat,
+    std::vector<Real> Smat,
     EigenResult eigen,
-    std::vector<Real> grid)
+    std::vector<Real> grid,
+    std::optional<int> nBSplinesOpt,
+    std::optional<std::vector<int>> dropSet)
 {
-    auto [coeffs1, coeffs2] = precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen);
-    
+    auto [coeffs1, coeffs2] = precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen, nBSplinesOpt, dropSet);
+
     std::vector<std::vector<Real>> states(grid.size(), std::vector<Real>(eigen.values.size() + 1, 0.0));
 
     // Compute the coeffs for each point on the energy grid
@@ -503,10 +526,11 @@ std::vector<std::vector<Real>> buildContinuumState(
 }
 
 AsymptoticResult matchAsymptotic(
-    const bspline::BSpline &bs, 
-    std::vector<std::vector<Real>> states, 
-    const EigenResult &eigen, 
-    std::vector<Real> grid, Real R
+    const bspline::BSpline &bs,
+    std::vector<std::vector<Real>> states,
+    const EigenResult &eigen,
+    std::vector<Real> grid, Real R,
+    std::optional<std::vector<int>> dropSet
 )
 {
     AsymptoticResult result;
@@ -517,12 +541,18 @@ AsymptoticResult matchAsymptotic(
     int nEn = eigen.dim;
     int nBSplines = bs.getNBSplines();
 
+    // Generalized via colOf/physicalOf (A4b, REQ-F-050) instead of the
+    // classic hardcoded fc[1+j]/fc[nEn+1] shift-by-1 placement -- see
+    // docs/planning/engineer-a-plan-A4-wiring-design.md.
+    const ColumnMap map = columnIndexMap(nBSplines, dropSet.value_or(std::vector<int>{1}));
+    const std::vector<int> &physicalOf = map.physicalOf;
+
     // for each E, first find \bar psi_E(R) and \bar psi'_E(R), then calculate A_E, delta
     for (int E_idx = 0; E_idx < grid.size(); ++E_idx)
     {
-        // states[E_idx][i] (i=0..nEn-1) give the coefficients for bound eigenstate phi_i which builds |\bar psi_E>, 
+        // states[E_idx][i] (i=0..nEn-1) give the coefficients for bound eigenstate phi_i which builds |\bar psi_E>,
         // (and states[E_idx][nEn] is always 1.0, the coefficient for B_N)
-        // To compute the scalar product needed to find \bar psi_E(R) and \bar psi'_E(R) with bs.eval, however, 
+        // To compute the scalar product needed to find \bar psi_E(R) and \bar psi'_E(R) with bs.eval, however,
         // we need ALL coefficients to correspond to the B-Splines, not phi_n!!!
         std::vector<Real> fc(nBSplines, 0.0);
         for (int j = 0; j < nEn; ++j)
@@ -530,9 +560,9 @@ AsymptoticResult matchAsymptotic(
             Real coeff = 0.0;
             for (int n = 0; n < nEn; ++n)
                 coeff += states[E_idx][n] * eigen.vectors[n * eigen.ldz + j];
-            fc[1 + j] = coeff;
+            fc[physicalOf[j + 1] - 1] = coeff;
         }
-        fc[nEn + 1] = states[E_idx][nEn];
+        fc[nBSplines - 1] = states[E_idx][nEn];
 
         // NOW we can use bs.eval
         Real psi_R = bs.eval(R, fc.data(), fc.size(), 0);
