@@ -2269,3 +2269,102 @@ TEST_F(MatchAsymptoticDropSetTest, StillMatchesAnalyticSquareWellFormulaWithExtr
     EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), wrapPhaseModPi(expected), 5e-3)
         << "computed delta=" << ar.delta[0] << " expected=" << expected;
 }
+
+// ---------------------------------------------------------------------------
+// solveTISE — end-to-end: strategic grid + singular removal actually wired
+//
+// docs/planning/engineer-a-plan-A4-wiring-design.md. Small-scale mirror of
+// H-BoundStates' real hydrogen demo (order/domain scaled down for test
+// speed): nNodes=41, order=8, domain [0,40], potential -1/x on (0,40].
+// nBSplines = 41+8-2 = 47.
+//
+// Boundary-vs-interior finding, discovered empirically during development:
+// bSplinesTouchingX(41,8,grid,0) DOES return the full order-sized boundary
+// cluster {1,...,8} (confirmed, matches engineer-a-plan-A4b.md's own
+// order=8 worked example) -- but REMOVING that full cluster at a
+// domain-EDGE singularity is numerically harmful, not merely
+// less-accurate: it produced a ground state of -0.095 vs the analytic
+// -0.5 (a ~5x error), because it guts the basis precisely where hydrogen's
+// ground state has most of its amplitude. The domain-edge singularity is
+// already regularized by the classic single-B-spline wall exclusion (drop
+// B_1 already enforces u(0)=0) -- there is nothing left for the cluster
+// removal to usefully add there. solveTISE therefore only applies
+// bSplinesTouchingX-based removal to INTERIOR Singular joins; edge ones
+// rely on the classic wall exclusion alone. See
+// HydrogenSingularAtOriginIsHandledByClassicWallExclusionOnly below for the
+// edge case and InteriorSingularityTriggersBSplineRemoval for the case
+// this mechanism actually targets.
+// ---------------------------------------------------------------------------
+
+TEST(SolveTISETest, HydrogenSingularAtOriginIsHandledByClassicWallExclusionOnly)
+{
+    std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
+    auto sol = tise::solveTISE(41, 8, 0.0, 40.0, /*L=*/0, potential, /*E_threshold=*/0.5, /*E_max=*/1.0, /*N_E=*/2);
+
+    EXPECT_EQ(sol.nBSplines, 47);
+    EXPECT_EQ(sol.eigen.dim, 45); // classic nBSplines-2, unchanged from pre-wiring behavior
+    std::vector<int> expectedDropSet = {1, 47};
+    EXPECT_EQ(sol.dropSet, expectedDropSet);
+}
+
+TEST(SolveTISETest, InteriorSingularityTriggersBSplineRemoval)
+{
+    // A genuine interior singularity: 1/(x-20) diverges approaching x=20
+    // from the right piece, and x=20 is strictly inside (0,40), not a
+    // domain edge -- nothing else regularizes it, so this IS the case
+    // bSplinesTouchingX-based removal is for. grid[20]=20.0 exactly
+    // (nNodes=41, uniform spacing 1.0 before any augmentation), same
+    // "lands exactly on a knot" shape as engineer-a-plan-A4b.md's own
+    // x=5.0 worked example (order+1 = 9 touching indices there).
+    std::map<std::string, std::string> potential = {
+        {"[0,20)", "0"}, {"(20,40]", "1/(x-20)"}
+    };
+    auto sol = tise::solveTISE(41, 8, 0.0, 40.0, 0, potential, 0.5, 1.0, 2);
+
+    // The interior join contributes MORE than the classic {1,nBSplines}:
+    // dropSet grows beyond 2 entries, and none of the newly-added indices
+    // are 1 or nBSplines (already covered separately).
+    EXPECT_GT(static_cast<int>(sol.dropSet.size()), 2);
+    EXPECT_NE(std::find(sol.dropSet.begin(), sol.dropSet.end(), 1), sol.dropSet.end());
+    EXPECT_NE(std::find(sol.dropSet.begin(), sol.dropSet.end(), sol.nBSplines), sol.dropSet.end());
+
+    for (auto v : sol.eigen.values)
+        EXPECT_TRUE(std::isfinite(v));
+}
+
+TEST(SolveTISETest, GroundStateStillMatchesAnalyticHydrogen)
+{
+    std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
+    auto sol = tise::solveTISE(41, 8, 0.0, 40.0, 0, potential, 0.5, 1.0, 2);
+    EXPECT_NEAR(sol.eigen.values[0], tise::analyticHydrogenEnergy(1, 0), 1e-4);
+}
+
+TEST(SolveTISETest, AllEigenvaluesFinite)
+{
+    std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
+    auto sol = tise::solveTISE(41, 8, 0.0, 40.0, 0, potential, 0.5, 1.0, 2);
+    for (auto v : sol.eigen.values)
+        EXPECT_TRUE(std::isfinite(v));
+}
+
+TEST(SolveTISETest, CoefficientsZeroExactlyAtDroppedIndices)
+{
+    std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
+    auto sol = tise::solveTISE(41, 8, 0.0, 40.0, 0, potential, 0.5, 1.0, 2);
+    auto coeffs = tise::eigenstateCoefficients(sol.eigen.vectors, 1, sol.eigen.dim, sol.nBSplines, sol.dropSet);
+    for (int idx : sol.dropSet)
+        EXPECT_DOUBLE_EQ(coeffs[idx - 1], 0.0) << "expected zero at dropped physical index " << idx;
+}
+
+TEST(SolveTISETest, StepPotentialActuallyUsesAStrategicNonUniformGrid)
+{
+    // No singularity here (proves Gap 1's grid augmentation is wired at
+    // the solveTISE level, not just that the standalone A4a functions
+    // work in isolation) -- a genuine Step join at x=20 should insert
+    // extra degenerate knots, growing the grid beyond the base nNodes.
+    std::map<std::string, std::string> potential = {
+        {"[0,20)", "0"}, {"[20,40]", "10"}
+    };
+    auto sol = tise::solveTISE(41, 8, 0.0, 40.0, 0, potential, 0.5, 1.0, 2);
+    EXPECT_GT(static_cast<int>(sol.grid.size()), 41);
+}

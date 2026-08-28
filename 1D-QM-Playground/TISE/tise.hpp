@@ -403,12 +403,41 @@ void writeEigenvectors(std::ostream &out, const EigenResult &er, int nBSplines, 
 void writeBandedMatrix(std::ostream &out, const std::vector<Real> &mat,
                         int order, int nEn, const std::string &description);
 
-// Top-level TISE solver: build grid, fill matrices, diagonalise, then construct
-// and write continuum states/phase shifts on the energy grid
+// Bundles solveTISE's full output: the diagonalized EigenResult plus every
+// piece of basis-construction context a caller needs to correctly decode it
+// downstream (docs/planning/engineer-a-plan-A4-wiring.md, Gap 3). Before
+// this, solveTISE returned only EigenResult, forcing callers (main.cpp) to
+// independently reconstruct the grid/BSpline/dropSet -- harmless only while
+// solveTISE always built a plain uniform grid with the classic
+// {1,nBSplines} drop-set. Now that solveTISE may build a strategic
+// (non-uniform) grid and/or a non-classic drop-set (REQ-F-050), an
+// independent reconstruction would silently diverge from what was actually
+// solved.
+struct SolveTISEResult
+{
+    EigenResult eigen;         // as returned by solveGeneralizedEigenproblem
+    bspline::BSpline bs;       // the exact basis diagonalized against -- reuse
+                                // directly for eigenstateCoefficients/writeEigenstate/
+                                // runTimeEvolution; do not rebuild
+    std::vector<Real> grid;    // the exact (possibly non-uniform/strategic) physical
+                                // grid passed to bs.init -- needed by minInterNodeGap
+    int nBSplines;              // == bs.getNBSplines(); duplicated for convenience
+    std::vector<int> dropSet;  // FULL set of physical B-spline indices excluded from
+                                // the bound-state basis (classic wall unioned with any
+                                // A4b Singular-join clusters). Pass directly as
+                                // eigenstateCoefficients' dropSet argument -- eigen.vectors
+                                // was diagonalized against exactly this exclusion set.
+};
+
+// Top-level TISE solver: build grid (automatically strategic per REQ-F-050
+// if the potential has detectable Step/StitchedKink/Singular structure --
+// see docs/planning/engineer-a-plan-A4-wiring-design.md), fill matrices
+// (with singular-join B-splines removed per A4b), diagonalise, then
+// construct and write continuum states/phase shifts on the energy grid
 // [E_threshold, E_max] (N_E points, per buildEnergyGrid).
 // `potential` is the piecewise potential passed through to fillBandedMatrices.
-EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
-                       Real E_threshold, Real E_max, int N_E);
+SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
+                           Real E_threshold, Real E_max, int N_E);
 
 // === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
 // Reduce a (possibly non-uniform, possibly containing degenerate/repeated

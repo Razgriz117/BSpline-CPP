@@ -1013,26 +1013,89 @@ void writeBandedMatrix(std::ostream &out, const std::vector<Real> &mat,
     }
 }
 
-EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
-                       Real E_threshold, Real E_max, int N_E)
+SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
+                           Real E_threshold, Real E_max, int N_E)
 {
-    auto grid = buildUniformRadialGrid(nNodes, rMin, rMax);
+    // Gap 1 (docs/planning/engineer-a-plan-A4-wiring-design.md): strategic
+    // grid construction, automatic (architecture-06-20.md:448 -- "determined
+    // automatically... not something the user needs to set manually"), not
+    // config-gated. A potential with no detectable Step/StitchedKink
+    // structure produces an unchanged uniform grid (byte-identical to the
+    // old buildUniformRadialGrid call).
+    auto joins = detectPotentialStructure(potential);
+    auto knots = strategicKnotsFromJoins(joins, order);
+    auto grid  = buildStrategicRadialGrid(nNodes, rMin, rMax, knots);
+    const int nNodesActual = static_cast<int>(grid.size());
 
     bspline::BSpline bs;
-    int initInfo = bs.init(nNodes, order, grid);
+    int initInfo = bs.init(nNodesActual, order, grid);
     if (initInfo != 0)
         throw std::runtime_error("BSpline::init failed with code " +
                                  std::to_string(initInfo));
 
     int nBSplines = bs.getNBSplines();
-    int nEn       = nBSplines - 2;
 
-    auto [H, S] = fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
-    EigenResult er = solveGeneralizedEigenproblem(H, S, nEn, order);
+    // Gap 2: singular-join B-spline removal -- INTERIOR joins only. A
+    // Singular join located AT a domain edge (e.g. hydrogen's Coulomb
+    // singularity coinciding with the left wall at x=rMin) is already
+    // regularized by the classic single-B-spline wall exclusion (that's
+    // exactly what "drop B_1" already enforces: u(rMin)=0). Removing the
+    // FULL bSplinesTouchingX cluster there instead -- verified empirically
+    // during implementation -- guts the basis precisely where a
+    // near-origin-peaked wavefunction (e.g. hydrogen's ground state) has
+    // most of its amplitude, producing a qualitatively wrong result (a 5x
+    // ground-state error was observed for a boundary-cluster removal at
+    // order=8), not just reduced accuracy. A genuine INTERIOR singularity
+    // (no piece of the domain boundary already regularizes it) is the case
+    // this mechanism is actually for.
+    //
+    // B_N (nBSplines) is deliberately never added to fillDropSet even if a
+    // right-edge cluster would include it -- continuum construction needs
+    // its raw H/S column filled, not dropped; it's excluded from the
+    // DIAGONALIZATION instead, by truncation below (generalizes the
+    // pre-existing {1}/nEn+1/truncate-to-nEn pattern to an arbitrary-size
+    // interior cluster).
+    std::vector<int> fillDropSet = {1};
+    bool rightEdgeSingular = false;
+    for (const auto &j : joins)
+    {
+        if (j.type != JoinType::Singular)
+            continue;
+
+        const bool atLeftEdge  = std::abs(j.x - rMin) < 1e-9;
+        const bool atRightEdge = std::abs(j.x - rMax) < 1e-9;
+
+        // matchAsymptotic's flat-asymptote assumption at R~rMax is affected
+        // by a right-edge singularity regardless of whether any extra
+        // B-spline removal happens there -- always warn.
+        if (atRightEdge)
+            rightEdgeSingular = true;
+
+        if (atLeftEdge || atRightEdge)
+            continue; // already regularized by the classic wall exclusion
+
+        auto touching = bSplinesTouchingX(nNodesActual, order, grid, j.x);
+        fillDropSet.insert(fillDropSet.end(), touching.begin(), touching.end());
+    }
+    std::sort(fillDropSet.begin(), fillDropSet.end());
+    fillDropSet.erase(std::unique(fillDropSet.begin(), fillDropSet.end()), fillDropSet.end());
+    fillDropSet.erase(std::remove(fillDropSet.begin(), fillDropSet.end(), nBSplines), fillDropSet.end());
+
+    if (rightEdgeSingular)
+        std::cerr << "Warning: potential is singular at the right domain edge x=" << rMax
+                  << "; continuum phase-shift matching (matchAsymptotic) assumes a regular "
+                  << "boundary there, so continuum results should be treated with suspicion.\n";
+
+    const int nEnFilled = nBSplines - static_cast<int>(fillDropSet.size()); // == nEnBound + 1
+    const int nEnBound  = nEnFilled - 1;
+
+    auto [H, S] = fillBandedMatrices(bs, nEnFilled, order, L, potential, fillDropSet);
+    EigenResult er = solveGeneralizedEigenproblem(H, S, nEnBound, order);
 
     auto energyGrid = buildEnergyGrid(E_threshold, E_max, N_E);
-    std::vector<std::vector<tise::Real>> states = buildContinuumState(order, nEn, H, S, er, energyGrid);
-    AsymptoticResult ar = matchAsymptotic(bs, states, er, energyGrid, 100);
+    std::vector<std::vector<tise::Real>> states =
+        buildContinuumState(order, nEnBound, H, S, er, energyGrid, nBSplines, fillDropSet);
+    AsymptoticResult ar = matchAsymptotic(bs, states, er, energyGrid, rMax, fillDropSet);
 
     std::ofstream phaseShiftsOut("phase_shifts.dat");
     std::vector<std::ofstream> continuumStateFiles;
@@ -1047,7 +1110,11 @@ EigenResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::m
     }
     writeContinuumInfo(phaseShiftsOut, bs, ar, energyGrid, states, continuumStateOut, 301, rMin, rMax);
 
-    return er;
+    std::vector<int> dropSet = fillDropSet;
+    dropSet.push_back(nBSplines);
+    std::sort(dropSet.begin(), dropSet.end());
+
+    return SolveTISEResult{er, bs, grid, nBSplines, dropSet};
 }
 
 // === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
