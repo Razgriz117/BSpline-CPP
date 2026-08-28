@@ -78,11 +78,11 @@ int main(int argc, char *argv[])
     // ------------------------------------------------------------------
     // Project Part 1: solve the Time-Independent Schrödinger Equation
     // ------------------------------------------------------------------
-    tise::EigenResult er;
+    tise::SolveTISEResult sol;
     try
     {
-        er = tise::solveTISE(BS_NNODS, BS_ORDER, BS_GRMIN, BS_GRMAX, L, potential,
-                             E_THRESHOLD, E_MAX, N_E);
+        sol = tise::solveTISE(BS_NNODS, BS_ORDER, BS_GRMIN, BS_GRMAX, L, potential,
+                              E_THRESHOLD, E_MAX, N_E);
     }
     catch (const std::exception &e)
     {
@@ -90,23 +90,20 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // Rebuild the B-spline basis (needed for eigenfunction evaluation and Part 2)
-    auto grid = tise::buildUniformRadialGrid(BS_NNODS, BS_GRMIN, BS_GRMAX);
-    bspline::BSpline bs;
-    if (bs.init(BS_NNODS, BS_ORDER, grid) != 0)
-    {
-        std::cerr << "BSpline::init failed\n";
-        return EXIT_FAILURE;
-    }
-    const int nBSplines = bs.getNBSplines();
-    const int nEn       = er.dim;
+    // solveTISE already built (and diagonalized against) the basis/drop-set
+    // below -- reuse directly instead of independently rebuilding, which
+    // would silently diverge now that solveTISE may build a strategic grid
+    // and/or a non-classic drop-set (engineer-a-plan-A4-wiring.md Gaps 3/4).
+    const bspline::BSpline &bs = sol.bs;
+    const int nBSplines = sol.nBSplines;
+    const int nEn       = sol.eigen.dim;
 
     // Print accurate eigenvalues and write eigenstate files
     std::cout << std::scientific << std::setprecision(16);
     int iEn;
     for (iEn = 1; iEn <= nEn; ++iEn)
     {
-        double eig = er.values[iEn - 1];
+        double eig = sol.eigen.values[iEn - 1];
         double err = tise::eigenvalueError(eig, iEn, L);
         if (err > ERROR_THRESHOLD) break;
 
@@ -122,7 +119,7 @@ int main(int argc, char *argv[])
             std::cerr << "Cannot open " << oss.str() << "\n";
             return EXIT_FAILURE;
         }
-        auto coeffs = tise::eigenstateCoefficients(er.vectors, iEn, nEn, nBSplines);
+        auto coeffs = tise::eigenstateCoefficients(sol.eigen.vectors, iEn, nEn, nBSplines, sol.dropSet);
         tise::writeEigenstate(out, bs, coeffs, NPTS_EIGENSTATE, BS_GRMIN, BS_GRMAX);
     }
     std::cout << "Number of Accurate Eigenvalues : " << (iEn - 1) << "\n";
@@ -139,7 +136,7 @@ int main(int argc, char *argv[])
     // here, not fixed, per the cleanup task's own scope.
     try
     {
-        tevol::runTimeEvolution(bs, er, nBSplines,
+        tevol::runTimeEvolution(sol.bs, sol.eigen, sol.nBSplines,
                                 BS_GRMIN, BS_GRMAX,
                                 TIME_STEPS, DT,
                                 INITIAL_POSITION, M_OMEGA, HBAR,
