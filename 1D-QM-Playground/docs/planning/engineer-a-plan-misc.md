@@ -194,3 +194,5 @@ Implemented exactly as designed above, with one deviation found and corrected du
 8. **Diff scope:** exactly the 5 files listed in File-by-file summary; no changes to `tise.hpp`/`tise.cpp`/`test_tise.cpp`/`CMakeLists.txt`/`engineer-a-plan.md`/`architecture-06-20.md`.
 
 No commit has been made — per standing instruction, commit timing is decided separately after review.
+
+**Re-verified 2026-08-28, after wiring strategic node placement and A4b singular-join B-spline removal into `solveTISE`** (`docs/planning/engineer-a-plan-A4-wiring-design.md`): item 5's exact 4 eigenvalues above are still current — a fresh `./H-BoundStates '[{"domain": "(0, 100]", "function": "-1/x"}]'` run after that wiring reproduces them **byte-identical**. This was expected, not incidental: `-1/x`'s only detected structure is its Coulomb singularity at `x=0`, which coincides with the domain's own left wall, and `solveTISE` deliberately does not run `bSplinesTouchingX`-based B-spline removal for domain-edge singularities (only interior ones) — see that doc's "Baseline impact" section for why. `bash make_and_run.sh` re-run end-to-end too, same result.

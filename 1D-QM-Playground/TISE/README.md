@@ -231,3 +231,5 @@ You can plot these eigenfunctions using your favorite tool (Python/Matplotlib, g
 
 * **Time evolution always runs.** After solving the bound-state problem, `main.cpp` unconditionally calls `tevol::runTimeEvolution(...)` — there is currently no way to request a TISE-only run. `config.yaml` already defines a `run.run_tdse` flag for exactly this purpose (see `docs/SDD.md` §6.1), but `main.cpp` does not parse `config.yaml` (it has no YAML dependency at all) and so never reads it. Wiring this up is deferred to the Controller↔TISE configuration plumbing (`docs/planning/tise-task-breakdown.md` §4 item 4).
 
+* **Continuum phase-shift matching assumes a regular right boundary.** If the supplied potential is singular at the domain's right edge (`x = rMax`), `solveTISE` still attempts continuum construction and prints a warning to stderr, but `matchAsymptotic`'s flat-asymptote matching formula is not valid there — treat any `phase_shifts.dat`/`continuum_state_NNN.dat` output from such a run with suspicion. See `docs/planning/engineer-a-plan-A4-wiring-design.md`.
+
