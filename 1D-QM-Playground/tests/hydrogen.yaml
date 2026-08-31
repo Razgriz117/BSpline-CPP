@@ -1,0 +1,22 @@
+run:
+  run_tise:     true
+  run_tdse:     false
+  run_analysis: true
+  output_dir:   "./data/hydrogen"
+bspline:
+  n_nodes: 51
+  order:   12
+  domain:  [0.0, 100.0]
+potential:
+  - "{'domain': '(0, 100]', 'function': '-1/x + 1/x^2'}"
+tise:
+  n_pts_eigenstate: 301
+  error_threshold:  1.0e-10
+  continuum:
+    enabled:     true
+    E_threshold: 0.0
+    E_max:       0.5
+    n_energies:  5
+    n_pts:       500
+visualization:
+  eigenstates: true

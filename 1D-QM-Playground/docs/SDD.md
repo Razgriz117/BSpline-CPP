@@ -919,6 +919,7 @@ Continuum-state construction ([§5.2.3](#523-internal-design)) additionally requ
 |---|---|---|
 | `data/tise/eigenvalues.dat` | Plain text (2-col) | Index, $E_n$ |
 | `data/tise/eigenvectors.dat` | Plain text (matrix) | Columns are $\mathbf{c}_n$ coefficient vectors |
+| `data/tise/eigenstate_NNN.dat` | Plain text (2-col) | $x$, $\phi_n(x)$ per bound state; one file per state (`tise.n_pts_eigenstate` points each), written unconditionally like `eigenvalues.dat`/`eigenvectors.dat` above -- not gated by `tise.continuum.enabled`. Consumed by Analysis only when `visualization.eigenstates: true` ([§6.1](#61-configuration-schema)). |
 | `data/tise/hamiltonian.dat` | Plain text (banded, `order` rows × `nEn` cols) | $\mathbf{H}$ matrix, LAPACK symmetric-banded storage |
 | `data/tise/overlap.dat` | Plain text (banded, `order` rows × `nEn` cols) | $\mathbf{S}$ matrix, LAPACK symmetric-banded storage |
 | `data/tise/phase_shifts.dat` | Plain text (3-col) | $\varepsilon_i$, $\delta(\varepsilon_i)$, $d\delta/dE$ |
@@ -971,7 +972,7 @@ Each subsection below is a complete, standalone contract per [§2.4](#24-assumpt
 #### 7.2.2 TISE Solver to Analysis
 
 - **Direction:** Analysis reads TISE Solver output directly (no subprocess relationship between these two — both are invoked independently by the Controller).
-- **Inputs to Analysis:** `data/tise/eigenvalues.dat`, `eigenvectors.dat`, `hamiltonian.dat`, `overlap.dat`, `phase_shifts.dat`, `continuum_state_NNN.dat` ([§6.3](#63-persistent-storage-format)).
+- **Inputs to Analysis:** `data/tise/eigenvalues.dat`, `eigenvectors.dat`, `hamiltonian.dat`, `overlap.dat`, `phase_shifts.dat`, `continuum_state_NNN.dat`, `eigenstate_NNN.dat` ([§6.3](#63-persistent-storage-format)).
 - **Contract:** Analysis must tolerate `tise.continuum.enabled: false` (no continuum files present) per [§5.4.4](#544-error-handling).
 - **Related:** REQ-F-060 (asymptotic_distribution requires continuum output).
 

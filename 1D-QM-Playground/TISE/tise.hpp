@@ -186,6 +186,17 @@ std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
 // for each energy E on the input grid. The result is stored as a 2-D vector with (# Energy points) elements of length (# eigenvectors)
 // note that each energy has a state with (# eigenvectors + 1) elements, but the coefficient for the last element is always 1 (and corresponds to B_N).
 // `nBSplinesOpt`/`dropSet`: see precomputeBoundaryCoupling, forwarded as-is.
+//
+// The c_n(E) = (...)/(E-E_n) sum has a pole at every confined eigenvalue
+// (bound OR an unfiltered box-discretization artifact, per ADR-0007) --
+// `poleTolFraction`/`warnOut` add a diagnostic-only guard (no change to the
+// computed values): if a grid point in `grid` lands within
+// `poleTolFraction * (grid[1]-grid[0])` of any eigen.values[i] (only
+// checked when grid.size() >= 2), one warning line is written to `warnOut`
+// naming the energy and the closest eigenvalue. This is a physics warning
+// (SDD Sec 8: computation completed, result may be unreliable), not an
+// error -- the caller decides whether/how to surface it (see
+// tise_solver_main.cpp's warnings.json wiring).
 std::vector<std::vector<Real>> buildContinuumState(
     int order, int nEn,
     std::vector<Real> Hmat,
@@ -193,7 +204,9 @@ std::vector<std::vector<Real>> buildContinuumState(
     EigenResult eigen,
     std::vector<Real> grid,
     std::optional<int> nBSplinesOpt = std::nullopt,
-    std::optional<std::vector<int>> dropSet = std::nullopt
+    std::optional<std::vector<int>> dropSet = std::nullopt,
+    Real poleTolFraction = 0.1,
+    std::ostream &warnOut = std::cerr
 );
 
 // `states` holds, per buildContinuumState's contract, coefficients of the
@@ -212,6 +225,17 @@ AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::ve
 // `stateOut[i]`. `grid` and `states` are the energy grid and per-energy
 // B-spline coefficient vectors produced by buildContinuumState; `result` is
 // matchAsymptotic's output for that same grid.
+//
+// `states` holds, per buildContinuumState's contract, coefficients of the
+// confined eigenstates {phi_n} (plus the B_N term) -- not raw B-spline
+// coefficients (see matchAsymptotic's doc comment above, which this
+// function's `eigen`/`dropSet` parameters exist to satisfy identically):
+// `eigen` (the same EigenResult `states` was built from) is required to
+// transform each energy's coefficients into true B-spline coefficients
+// before evaluating psi_E(x). `dropSet` must match whatever drop-set
+// actually produced `eigen`/`states`, or coefficients will be silently
+// misattributed to the wrong physical B-spline indices before bs.eval is
+// called.
 void writeContinuumInfo(std::ostream &out,
                      const bspline::BSpline &bs,
                      const AsymptoticResult &result,
@@ -220,7 +244,9 @@ void writeContinuumInfo(std::ostream &out,
                      std::vector<std::ostream *> stateOut,
                      int npts,
                      Real rMin,
-                     Real rMax);
+                     Real rMax,
+                     const EigenResult &eigen,
+                     std::optional<std::vector<int>> dropSet = std::nullopt);
 
 // Solve H c = E S c via LAPACK DSBGV.
 // H and S are consumed (overwritten); pass by value intentionally.

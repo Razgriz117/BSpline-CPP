@@ -39,13 +39,16 @@ from analysis import (
     AnalysisError,
     ConfigError,
     ContinuumPoint,
+    EigenstatePoint,
     EigenvalueRow,
     PhaseShiftRow,
     TiseData,
     TiseOutputError,
     load_config,
     main,
+    plot_eigenstates,
     read_continuum_states,
+    read_eigenstates,
     read_eigenvalues,
     read_eigenvectors,
     read_hamiltonian,
@@ -470,6 +473,67 @@ class TestReadContinuumStates:
         assert read_continuum_states(tmp_path) == []
 
 
+# ─── read_eigenstates ───────────────────────────────────────────────────────
+
+
+class TestReadEigenstates:
+    def test_happy_path_multiple_files_ascending_order_and_ignores_unrelated_files(self, tmp_path):
+        _write_dat(tmp_path / "eigenvalues.dat", "# eigenvalues.dat: index, E_n", "0  -1.0")
+        _write_dat(
+            tmp_path / "eigenstate_001.dat",
+            "# eigenstate_001.dat: x, phi",
+            "0.0  0.0",
+            "1.0  0.5",
+        )
+        _write_dat(
+            tmp_path / "eigenstate_002.dat",
+            "# eigenstate_002.dat: x, phi",
+            "0.0  0.0",
+            "1.0  0.7",
+        )
+
+        result = read_eigenstates(tmp_path)
+
+        assert result == [
+            (1, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, 0.5)]),
+            (2, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, 0.7)]),
+        ]
+        # Field-name access, not just positional/tuple equality.
+        assert result[0][1][1].x == 1.0
+        assert result[0][1][1].phi == 0.5
+
+    def test_no_matching_files_in_existing_dir_returns_empty_list(self, tmp_path):
+        (tmp_path / "eigenvalues.dat").write_text("# eigenvalues.dat: index, E_n\n0  -1.0\n")
+        assert read_eigenstates(tmp_path) == []
+
+    def test_nonexistent_dir_returns_empty_list(self, tmp_path):
+        missing_dir = tmp_path / "does_not_exist"
+        assert read_eigenstates(missing_dir) == []
+
+    def test_malformed_eigenstate_file_raises_and_names_the_file(self, tmp_path):
+        _write_dat(
+            tmp_path / "eigenstate_001.dat",
+            "# eigenstate_001.dat: x, phi",
+            "0.0  0.0  0.0",  # 3 fields; eigenstate files require 2
+        )
+        with pytest.raises(TiseOutputError, match="eigenstate_001.dat"):
+            read_eigenstates(tmp_path)
+
+    def test_sorts_by_parsed_integer_not_filename_string(self, tmp_path):
+        _write_dat(tmp_path / "eigenstate_2.dat", "# eigenstate_2.dat: x, phi", "0.0  0.2")
+        _write_dat(tmp_path / "eigenstate_10.dat", "# eigenstate_10.dat: x, phi", "0.0  0.10")
+        _write_dat(tmp_path / "eigenstate_1.dat", "# eigenstate_1.dat: x, phi", "0.0  0.1")
+
+        result = read_eigenstates(tmp_path)
+
+        indices = [index for index, _points in result]
+        assert indices == [1, 2, 10]
+
+    def test_directory_matching_the_filename_pattern_is_ignored(self, tmp_path):
+        (tmp_path / "eigenstate_099.dat").mkdir()
+        assert read_eigenstates(tmp_path) == []
+
+
 # ─── read_tise_output (aggregator) ──────────────────────────────────────────
 
 
@@ -494,6 +558,12 @@ class TestReadTiseOutput:
             "0.0  0.0",
             "1.0  0.7",
         )
+        _write_dat(
+            tmp_path / "eigenstate_001.dat",
+            "# eigenstate_001.dat: x, phi",
+            "0.0  0.0",
+            "1.0  0.3",
+        )
 
         result = read_tise_output(tmp_path)
 
@@ -507,6 +577,9 @@ class TestReadTiseOutput:
                 (1, [ContinuumPoint(0.0, 0.0), ContinuumPoint(1.0, 0.5)]),
                 (2, [ContinuumPoint(0.0, 0.0), ContinuumPoint(1.0, 0.7)]),
             ],
+            eigenstates=[
+                (1, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, 0.3)]),
+            ],
         )
 
     def test_continuum_absent_case_returns_empty_phase_shifts_and_continuum_states(self, tmp_path):
@@ -519,6 +592,7 @@ class TestReadTiseOutput:
 
         assert result.phase_shifts == []
         assert result.continuum_states == []
+        assert result.eigenstates == []
         assert result.eigenvalues == [EigenvalueRow(0, -1.0), EigenvalueRow(1, -0.25)]
         assert result.eigenvectors == [[0.1, 0.2], [0.3, 0.4]]
         assert result.hamiltonian == [[1.0, 0.0], [0.0, 1.0]]
@@ -548,6 +622,58 @@ class TestReadTiseOutput:
         missing_dir = tmp_path / "does_not_exist"
         with pytest.raises(TiseOutputError, match="eigenvalues"):
             read_tise_output(missing_dir)
+
+
+# ─── plot_eigenstates ───────────────────────────────────────────────────────
+
+
+def _empty_tise_data(**overrides) -> TiseData:
+    """A TiseData with every field empty except whatever `overrides` sets --
+    plot_eigenstates only ever reads .eigenstates, so the other six fields
+    are irrelevant filler for these tests."""
+    fields = dict(
+        eigenvalues=[], eigenvectors=[], hamiltonian=[], overlap=[],
+        phase_shifts=[], continuum_states=[], eigenstates=[],
+    )
+    fields.update(overrides)
+    return TiseData(**fields)
+
+
+class TestPlotEigenstates:
+    def test_writes_one_png_per_eigenstate(self, tmp_path):
+        data = _empty_tise_data(
+            eigenstates=[
+                (1, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, 0.5), EigenstatePoint(2.0, 0.0)]),
+                (2, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, -0.3), EigenstatePoint(2.0, 0.0)]),
+            ]
+        )
+
+        plot_eigenstates(data, str(tmp_path))
+
+        assert (tmp_path / "eigenstate_1.png").is_file()
+        assert (tmp_path / "eigenstate_2.png").is_file()
+
+    def test_no_eigenstates_writes_no_files(self, tmp_path):
+        plot_eigenstates(_empty_tise_data(), str(tmp_path))
+        assert list(tmp_path.iterdir()) == []
+
+    def test_xlim_spans_full_domain_not_hardcoded_from_zero(self, tmp_path):
+        # Regression: plot_eigenstates originally copied plot_tise's
+        # plt.xlim(0, ...) verbatim, which only happens to be correct for a
+        # radial-style domain starting at rMin=0. A symmetric domain like
+        # the harmonic oscillator's [-20,20] silently clipped the entire
+        # x<0 half out of the rendered plot (visible data was still full
+        # range -- only the viewport was wrong) -- caught by actually
+        # looking at a real harmonic-oscillator run's eigenstate_2.png
+        # (n=1, odd-symmetry) and noticing only one of its two peaks showed.
+        data = _empty_tise_data(
+            eigenstates=[(1, [EigenstatePoint(-20.0, 0.0), EigenstatePoint(0.0, 0.5), EigenstatePoint(20.0, 0.0)])]
+        )
+
+        with patch("analysis.plt.xlim") as mock_xlim:
+            plot_eigenstates(data, str(tmp_path))
+
+        mock_xlim.assert_called_once_with(-20.0, 20.0)
 
 
 # ─── load_config ────────────────────────────────────────────────────────────
@@ -698,6 +824,44 @@ class TestRun:
 
         with pytest.raises(TiseOutputError, match="eigenvalues"):
             run(str(config_path), str(tise_dir), str(tdse_dir))
+
+    def test_visualization_eigenstates_true_writes_eigenstate_pngs(self, tmp_path):
+        config_path = _write_yaml(tmp_path / "config.yaml", {"visualization": {"eigenstates": True}})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        _write_dat(tise_dir / "eigenstate_001.dat", "# eigenstate_001.dat: x, phi", "0.0  0.0", "1.0  0.5")
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        run(str(config_path), str(tise_dir), str(tdse_dir))
+
+        assert (tise_dir / "eigenstate_1.png").is_file()
+
+    def test_visualization_eigenstates_absent_writes_no_eigenstate_pngs(self, tmp_path):
+        # No 'visualization' block at all -- must default to NOT plotting,
+        # not error and not plot unconditionally.
+        config_path = _write_yaml(tmp_path / "config.yaml", {"placeholder": True})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        _write_dat(tise_dir / "eigenstate_001.dat", "# eigenstate_001.dat: x, phi", "0.0  0.0", "1.0  0.5")
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        run(str(config_path), str(tise_dir), str(tdse_dir))
+
+        assert not (tise_dir / "eigenstate_1.png").exists()
+
+    def test_visualization_eigenstates_false_writes_no_eigenstate_pngs(self, tmp_path):
+        config_path = _write_yaml(tmp_path / "config.yaml", {"visualization": {"eigenstates": False}})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        _write_dat(tise_dir / "eigenstate_001.dat", "# eigenstate_001.dat: x, phi", "0.0  0.0", "1.0  0.5")
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        run(str(config_path), str(tise_dir), str(tdse_dir))
+
+        assert not (tise_dir / "eigenstate_1.png").exists()
 
 
 # ─── main (CLI entry point) ─────────────────────────────────────────────────

@@ -377,6 +377,34 @@ ColumnMap resolveDropSet(int nBSplines, int nEn, const std::optional<std::vector
                                   std::to_string(map.nKept) + ")");
     return map;
 }
+
+// Shared by matchAsymptotic/writeContinuumInfo: transform one energy's
+// buildContinuumState coefficients (in the confined-eigenstate basis
+// {phi_n} plus B_N) into true B-spline coefficients, suitable for
+// bs.eval. `stateCoeffs` is one buildContinuumState row (size nEn+1,
+// last entry always 1.0, the B_N coefficient); `physicalOf` is
+// columnIndexMap's output for whatever drop-set produced `eigen`.
+// Deliberately factored out after this exact transform was found
+// duplicated-and-diverged once already (writeContinuumInfo had the
+// pre-A4b, un-transformed version while matchAsymptotic had the fix) --
+// keeping one copy means a future correction can't reintroduce that bug.
+std::vector<Real> continuumStateToBSplineCoeffs(const std::vector<Real> &stateCoeffs,
+                                                 const EigenResult &eigen,
+                                                 int nBSplines,
+                                                 const std::vector<int> &physicalOf)
+{
+    const int nEn = eigen.dim;
+    std::vector<Real> fc(nBSplines, 0.0);
+    for (int j = 0; j < nEn; ++j)
+    {
+        Real coeff = 0.0;
+        for (int n = 0; n < nEn; ++n)
+            coeff += stateCoeffs[n] * eigen.vectors[n * eigen.ldz + j];
+        fc[physicalOf[j + 1] - 1] = coeff;
+    }
+    fc[nBSplines - 1] = stateCoeffs[nEn];
+    return fc;
+}
 } // namespace
 
 std::pair<std::vector<Real>, std::vector<Real>>
@@ -505,11 +533,15 @@ std::vector<std::vector<Real>> buildContinuumState(
     EigenResult eigen,
     std::vector<Real> grid,
     std::optional<int> nBSplinesOpt,
-    std::optional<std::vector<int>> dropSet)
+    std::optional<std::vector<int>> dropSet,
+    Real poleTolFraction,
+    std::ostream &warnOut)
 {
     auto [coeffs1, coeffs2] = precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen, nBSplinesOpt, dropSet);
 
     std::vector<std::vector<Real>> states(grid.size(), std::vector<Real>(eigen.values.size() + 1, 0.0));
+
+    const Real poleTol = grid.size() >= 2 ? poleTolFraction * (grid[1] - grid[0]) : Real(0);
 
     // Compute the coeffs for each point on the energy grid
     for(int E_idx = 0; E_idx < grid.size(); ++E_idx)
@@ -519,6 +551,27 @@ std::vector<std::vector<Real>> buildContinuumState(
             states[E_idx][i] = (coeffs1[i] - (grid[E_idx] * coeffs2[i])) / (grid[E_idx] - eigen.values[i]);
         }
         states[E_idx][nEn] = 1.0;
+
+        if (poleTol > 0.0 && nEn > 0)
+        {
+            int closest = 0;
+            Real closestGap = std::abs(grid[E_idx] - eigen.values[0]);
+            for (int i = 1; i < nEn; ++i)
+            {
+                Real gap = std::abs(grid[E_idx] - eigen.values[i]);
+                if (gap < closestGap)
+                {
+                    closestGap = gap;
+                    closest = i;
+                }
+            }
+            if (closestGap < poleTol)
+                warnOut << "Warning: continuum energy grid point E=" << grid[E_idx]
+                        << " is within " << closestGap << " of confined eigenvalue E_" << closest
+                        << "=" << eigen.values[closest] << "; this energy's continuum state is "
+                        << "likely a finite-box discretization artifact (see ADR-0007), not a "
+                        << "physical feature -- treat with suspicion.\n";
+        }
     }
 
     return states;
@@ -554,15 +607,7 @@ AsymptoticResult matchAsymptotic(
         // (and states[E_idx][nEn] is always 1.0, the coefficient for B_N)
         // To compute the scalar product needed to find \bar psi_E(R) and \bar psi'_E(R) with bs.eval, however,
         // we need ALL coefficients to correspond to the B-Splines, not phi_n!!!
-        std::vector<Real> fc(nBSplines, 0.0);
-        for (int j = 0; j < nEn; ++j)
-        {
-            Real coeff = 0.0;
-            for (int n = 0; n < nEn; ++n)
-                coeff += states[E_idx][n] * eigen.vectors[n * eigen.ldz + j];
-            fc[physicalOf[j + 1] - 1] = coeff;
-        }
-        fc[nBSplines - 1] = states[E_idx][nEn];
+        std::vector<Real> fc = continuumStateToBSplineCoeffs(states[E_idx], eigen, nBSplines, physicalOf);
 
         // NOW we can use bs.eval
         Real psi_R = bs.eval(R, fc.data(), fc.size(), 0);
@@ -610,7 +655,9 @@ void writeContinuumInfo(std::ostream &out,
                      std::vector<std::ostream *> stateOut,
                      int npts,
                      Real rMin,
-                     Real rMax)
+                     Real rMax,
+                     const EigenResult &eigen,
+                     std::optional<std::vector<int>> dropSet)
 {
     // phase_shifts.dat: 3-col epsilon_i, delta(epsilon_i), dDelta/dE
     out << std::scientific << std::setprecision(16);
@@ -621,17 +668,26 @@ void writeContinuumInfo(std::ostream &out,
             << " " << std::setw(24) << result.dDeltaDE[i] << "\n";
     }
 
+    const int nBSplines = bs.getNBSplines();
+    const ColumnMap map = columnIndexMap(nBSplines, dropSet.value_or(std::vector<int>{1}));
+    const std::vector<int> &physicalOf = map.physicalOf;
+
     // continuum_state_NNN.dat: 2-col x, psi_{epsilon_i}(x), one block per energy
     for (std::size_t i = 0; i < grid.size(); ++i)
     {
+        // states[i] holds coefficients of the confined eigenstates {phi_n}
+        // (plus B_N) -- transform into true B-spline coefficients before
+        // calling bs.eval, exactly like matchAsymptotic does (same shared
+        // helper, not a second copy of the transform).
+        std::vector<Real> fc = continuumStateToBSplineCoeffs(states[i], eigen, nBSplines, physicalOf);
+
         std::ostream &stOut = *stateOut[i];
         stOut << std::scientific << std::setprecision(16);
-        const int n = static_cast<int>(states[i].size());
         for (int ix = 1; ix <= npts; ++ix)
         {
             Real x = rMin + (rMax - rMin) *
                      static_cast<Real>(ix - 1) / static_cast<Real>(npts - 1);
-            Real psi = result.A_E[i] * bs.eval(x, states[i].data(), n);
+            Real psi = result.A_E[i] * bs.eval(x, fc.data(), fc.size(), 0);
             stOut << " " << std::setw(24) << x
                   << " " << std::setw(24) << psi << "\n";
         }
@@ -1108,7 +1164,7 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
         continuumStateFiles.emplace_back(oss.str());
         continuumStateOut.push_back(&continuumStateFiles.back());
     }
-    writeContinuumInfo(phaseShiftsOut, bs, ar, energyGrid, states, continuumStateOut, 301, rMin, rMax);
+    writeContinuumInfo(phaseShiftsOut, bs, ar, energyGrid, states, continuumStateOut, 301, rMin, rMax, er, fillDropSet);
 
     std::vector<int> dropSet = fillDropSet;
     dropSet.push_back(nBSplines);

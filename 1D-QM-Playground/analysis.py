@@ -53,6 +53,9 @@ import yaml
 # is kept lenient about width rather than assuming exactly 3 digits.
 _CONTINUUM_STATE_RE = re.compile(r"^continuum_state_(\d+)\.dat$")
 
+# Same leniency-about-width reasoning as _CONTINUUM_STATE_RE above.
+_EIGENSTATE_RE = re.compile(r"^eigenstate_(\d+)\.dat$")
+
 
 class AnalysisError(Exception):
     """Base class for all errors raised by the Analysis module."""
@@ -108,6 +111,13 @@ class ContinuumPoint(NamedTuple):
     psi: float
 
 
+class EigenstatePoint(NamedTuple):
+    """One row of an eigenstate_NNN.dat file: a grid point x, phi_n(x)."""
+
+    x: float
+    phi: float
+
+
 @dataclass(frozen=True)
 class TiseData:
     """Bundled result of reading every file under one data/tise/ directory.
@@ -116,6 +126,10 @@ class TiseData:
     was false for the run that produced tise_dir (see
     read_phase_shifts/read_continuum_states) -- an empty list here is a
     normal, successful result, not a sentinel for "not read yet".
+    eigenstates, by contrast, is unconditional -- tise_solver writes an
+    eigenstate_NNN.dat for every computed bound state regardless of
+    tise.continuum.enabled (see read_eigenstates); [] there means the run
+    predates that output existing, or the directory is otherwise empty.
 
     Note: frozen=True stops a field from being REASSIGNED (e.g.
     `some_tise_data.eigenvalues = [...]` raises FrozenInstanceError), but
@@ -131,6 +145,7 @@ class TiseData:
     overlap: list[list[float]]
     phase_shifts: list[PhaseShiftRow]
     continuum_states: list[tuple[int, list[ContinuumPoint]]]
+    eigenstates: list[tuple[int, list[EigenstatePoint]]]
 
 
 # ─── Generic .dat row parsing ───────────────────────────────────────────────
@@ -337,16 +352,55 @@ def read_continuum_states(tise_dir: Path) -> list[tuple[int, list[ContinuumPoint
     return result
 
 
+def read_eigenstates(tise_dir: Path) -> list[tuple[int, list[EigenstatePoint]]]:
+    """Read every eigenstate_NNN.dat file under `tise_dir`.
+
+    Each matching file holds 2 columns per row, (x, phi). Returns a list of
+    (index, [(x, phi), ...]) pairs, one per file, sorted by ASCENDING
+    NUMERIC index parsed from the filename's NNN -- same int()-not-string
+    sort as read_continuum_states() above.
+
+    Returns [] (does NOT raise) if `tise_dir` doesn't exist, or exists but
+    contains no matching files. Unlike continuum_state_NNN.dat, tise_solver
+    writes these unconditionally (one per bound state, regardless of
+    tise.continuum.enabled), so [] here means either an older tise_dir that
+    predates this output, or an otherwise-empty directory -- not a
+    config-driven "disabled" case. If a matching file IS present but
+    malformed, this raises TiseOutputError -- absence is tolerated,
+    corruption is not.
+    """
+    if not tise_dir.is_dir():
+        return []
+
+    matches: list[tuple[int, Path]] = []
+    for entry in tise_dir.iterdir():
+        if not entry.is_file():
+            continue
+        m = _EIGENSTATE_RE.match(entry.name)
+        if m:
+            matches.append((int(m.group(1)), entry))
+
+    matches.sort(key=lambda pair: pair[0])
+
+    result: list[tuple[int, list[EigenstatePoint]]] = []
+    for index, path in matches:
+        rows = _read_data_rows(path, path.name)
+        _check_row_width(rows, 2, path, path.name)
+        result.append((index, [EigenstatePoint(row[0], row[1]) for row in rows]))
+
+    return result
+
+
 # ─── Aggregator ──────────────────────────────────────────────────────────────
 
 
 def read_tise_output(tise_dir: Path) -> TiseData:
     """Read every file under one data/tise/ directory into one TiseData.
 
-    Calls all six reader functions above. No special-casing is needed for
+    Calls all seven reader functions above. No special-casing is needed for
     a nonexistent `tise_dir`: read_eigenvalues() runs first and naturally
     raises TiseOutputError (its file can't be found under a nonexistent
-    directory) before any of the other five readers run.
+    directory) before any of the other six readers run.
     """
     eigenvalues = read_eigenvalues(tise_dir / "eigenvalues.dat")
     eigenvectors = read_eigenvectors(tise_dir / "eigenvectors.dat")
@@ -354,6 +408,7 @@ def read_tise_output(tise_dir: Path) -> TiseData:
     overlap = read_overlap(tise_dir / "overlap.dat")
     phase_shifts = read_phase_shifts(tise_dir / "phase_shifts.dat")
     continuum_states = read_continuum_states(tise_dir)
+    eigenstates = read_eigenstates(tise_dir)
 
     return TiseData(
         eigenvalues=eigenvalues,
@@ -362,6 +417,7 @@ def read_tise_output(tise_dir: Path) -> TiseData:
         overlap=overlap,
         phase_shifts=phase_shifts,
         continuum_states=continuum_states,
+        eigenstates=eigenstates,
     )
 
 
@@ -409,6 +465,22 @@ def plot_tise(tise_data: TiseData, tise_dir: str) -> None:
         plt.close()
 
 
+def plot_eigenstates(tise_data: TiseData, tise_dir: str) -> None:
+    """Plot |phi_n(x)|^2 for each bound eigenstate (docs/SDD.md Sec 6.1's
+    visualization.eigenstates toggle) -- squared, unlike plot_tise's raw
+    psi, per that same spec entry."""
+    for idx, eigenstate in tise_data.eigenstates:
+        xs = [p.x for p in eigenstate]
+        densities = [p.phi**2 for p in eigenstate]
+        plt.xlim(eigenstate[0].x, eigenstate[-1].x)
+        plt.xlabel("x")
+        plt.ylabel(r"$|\phi_n(x)|^2$")
+        plt.plot(xs, densities)
+        plt.title(fr"Eigenstate {idx}", pad=20)
+        plt.savefig(f"{tise_dir}/eigenstate_{idx}.png")
+        plt.close()
+
+
 def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     """Run Analysis's Phase 3 scope (Sec 7.2.3, Sec 10.2 Phase 3).
 
@@ -421,10 +493,12 @@ def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     Raises AnalysisError (ConfigError or TiseOutputError) on failure;
     never a raw exception.
     """
-    load_config(config_path)
+    cfg = load_config(config_path)
     tise_output = read_tise_output(Path(tise_dir))
 
     plot_tise(tise_output, tise_dir)
+    if cfg.get("visualization", {}).get("eigenstates", False):
+        plot_eigenstates(tise_output, tise_dir)
 
     if not Path(tdse_dir).is_dir():
         print(

@@ -53,15 +53,24 @@ class TestRunTiseSolverRealSubprocess:
     def test_success_writes_expected_files_and_no_continuum_output(
         self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
     ):
+        # config.yaml's own default has had tise.continuum.enabled: true
+        # since commit 99b7683 -- force it off here so this test still
+        # exercises the no-continuum-output contract it's named for.
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["tise"]["continuum"]["enabled"] = False
+        no_continuum_config = tmp_path / "config_no_continuum.yaml"
+        with open(no_continuum_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
         tise_dir = tmp_path / "data" / "tise"
 
-        run_tise_solver(str(tmp_config), tise_dir, binary=tise_solver_binary)
+        run_tise_solver(str(no_continuum_config), tise_dir, binary=tise_solver_binary)
 
         for name in ("eigenvalues.dat", "eigenvectors.dat", "hamiltonian.dat", "overlap.dat", "warnings.json"):
             assert (tise_dir / name).is_file(), f"expected output file missing: {name}"
 
-        # The real config.yaml has tise.continuum.enabled: false -- the
-        # continuum-only outputs must NOT be written.
+        # continuum disabled above -- the continuum-only outputs must NOT be written.
         assert not (tise_dir / "phase_shifts.dat").exists()
         assert list(tise_dir.glob("continuum_state_*.dat")) == []
 
@@ -241,7 +250,20 @@ class TestRunEndToEnd:
     """
 
     def test_run_end_to_end_success(self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path, capsys):
-        run(str(tmp_config))
+        # config.yaml's own default has had tise.continuum.enabled: true
+        # since commit 99b7683, which (with its E_max=10 default) now
+        # legitimately produces physics warnings (E_max exceeds the basis's
+        # own accuracy ceiling) -- force continuum off here so this test's
+        # "a clean run produces zero warnings" claim stays true and
+        # meaningful, rather than asserting away real, expected warnings.
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["tise"]["continuum"]["enabled"] = False
+        no_continuum_config = tmp_path / "config_no_continuum.yaml"
+        with open(no_continuum_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        run(str(no_continuum_config))
 
         tise_dir = tmp_path / "data" / "tise"
         assert (tise_dir / "eigenvalues.dat").is_file()

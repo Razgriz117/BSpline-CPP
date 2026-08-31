@@ -167,6 +167,11 @@ int main(int argc, char *argv[])
         const int nBSplines = bs.getNBSplines();
         const int nEn       = nBSplines - 2;
 
+        // Spatial grid density for eigenstate_NNN.dat, written unconditionally
+        // below regardless of tise.continuum.enabled -- previously read by
+        // nothing in this file.
+        const int nPtsEigenstate = config["tise"]["n_pts_eigenstate"].as<int>();
+
         // Continuum settings. yaml-cpp idiom: an undefined/missing Node
         // converts to false without throwing, so configs that omit
         // tise.continuum entirely, or set enabled: false, correctly skip
@@ -264,7 +269,11 @@ int main(int argc, char *argv[])
             }
 
             auto energyGrid = tise::buildEnergyGrid(E_threshold, E_max, n_energies);
-            auto states = tise::buildContinuumState(order, nEn, H, S, er, energyGrid);
+            std::ostringstream poleWarnOut;
+            auto states = tise::buildContinuumState(order, nEn, H, S, er, energyGrid,
+                                                      std::nullopt, std::nullopt, 0.1, poleWarnOut);
+            if (!poleWarnOut.str().empty())
+                addWarning(warnings, "physics", poleWarnOut.str());
             auto ar = tise::matchAsymptotic(bs, states, er, energyGrid, /*R=*/rMax);
 
             std::ofstream phaseShiftsOut(outputDir / "phase_shifts.dat");
@@ -279,7 +288,7 @@ int main(int argc, char *argv[])
                 continuumStateOut.push_back(&continuumStateFiles.back());
             }
             tise::writeContinuumInfo(phaseShiftsOut, bs, ar, energyGrid, states, continuumStateOut,
-                                      n_pts, rMin, rMax);
+                                      n_pts, rMin, rMax, er);
         }
 
         // Core output files -- all nEn states, per ADR-0007.
@@ -290,6 +299,20 @@ int main(int argc, char *argv[])
         {
             std::ofstream out(outputDir / "eigenvectors.dat");
             tise::writeEigenvectors(out, er, nBSplines, er.dim);
+        }
+        // eigenstate_NNN.dat: spatial phi_n(x), one file per bound state,
+        // unconditionally (same "TISE writes everything" ADR-0007 policy as
+        // eigenvalues.dat/eigenvectors.dat above -- gating what to PLOT from
+        // this is analysis.py's visualization.eigenstates job, not this
+        // binary's). Mirrors H-BoundStates' own main.cpp:114-123 pattern,
+        // minus that demo's hydrogen-specific accuracy-threshold early exit.
+        for (int j = 1; j <= nEn; ++j)
+        {
+            std::ostringstream oss;
+            oss << "eigenstate_" << std::setw(3) << std::setfill('0') << j << ".dat";
+            std::ofstream out(outputDir / oss.str());
+            auto coeffs = tise::eigenstateCoefficients(er.vectors, j, nEn, nBSplines);
+            tise::writeEigenstate(out, bs, coeffs, nPtsEigenstate, rMin, rMax);
         }
         {
             std::ofstream out(outputDir / "hamiltonian.dat");

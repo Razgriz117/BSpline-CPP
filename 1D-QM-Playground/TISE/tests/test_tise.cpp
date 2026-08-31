@@ -1589,6 +1589,37 @@ TEST_F(BuildContinuumStateTest, SatisfiesDefiningEigenrelation)
     }
 }
 
+// Pole-proximity warning (Change 2): the 1/(E-E_n) sum has no guard against
+// a requested continuum energy landing close to a confined eigenvalue
+// (bound OR unfiltered box-discretization artifact, per ADR-0007). Reuses
+// this fixture's own eigen.values rather than a new one.
+
+TEST_F(BuildContinuumStateTest, WarnsWhenGridPointIsCloseToAnEigenvalue)
+{
+    const double dE = 0.01;
+    const double target = eigen.values[0] + 0.05 * dE; // 0.05*dE < default poleTolFraction=0.1*dE
+    std::vector<double> grid = {target, target + dE};
+
+    std::ostringstream warn;
+    tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, grid,
+                               std::nullopt, std::nullopt, 0.1, warn);
+
+    EXPECT_NE(warn.str().find("discretization artifact"), std::string::npos);
+}
+
+TEST_F(BuildContinuumStateTest, NoWarningWhenGridPointIsFarFromEveryEigenvalue)
+{
+    const double dE = 0.01;
+    const double target = eigen.values.back() + 1000.0 * dE; // beyond the entire confined spectrum
+    std::vector<double> grid = {target, target + dE};
+
+    std::ostringstream warn;
+    tise::buildContinuumState(order, nEn, Hmat, Smat, eigen, grid,
+                               std::nullopt, std::nullopt, 0.1, warn);
+
+    EXPECT_EQ(warn.str(), "");
+}
+
 // ---------------------------------------------------------------------------
 // writeEigenstate
 // ---------------------------------------------------------------------------
@@ -2268,6 +2299,159 @@ TEST_F(MatchAsymptoticDropSetTest, StillMatchesAnalyticSquareWellFormulaWithExtr
     double expected = squareWellPhaseShift(energyGrid[0], V0, a);
     EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), wrapPhaseModPi(expected), 5e-3)
         << "computed delta=" << ar.delta[0] << " expected=" << expected;
+}
+
+// ---------------------------------------------------------------------------
+// writeContinuumInfo — regression test for the coefficient-basis bug: the
+// function must transform buildContinuumState's eigenstate-basis
+// coefficients into true B-spline coefficients before calling bs.eval,
+// exactly like matchAsymptotic already does (see tise.hpp's doc comment on
+// matchAsymptotic). A free particle (V=0) makes the flat-asymptote formula
+// exact EVERYWHERE (not just asymptotically beyond a matching radius), so
+// the entire written wavefunction has one closed-form answer: A*sin(kx),
+// A=sqrt(2/(pi*k)), zero phase shift -- no confounding potential-shape
+// assumptions, unlike the real config.yaml's Coulomb-tailed potential.
+// ---------------------------------------------------------------------------
+
+class FreeParticleContinuumTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> gridPts(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            gridPts[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, gridPts), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        std::map<std::string, std::string> potential = {
+            {"[" + std::to_string(rMin) + ", " + std::to_string(rMax) + "]", "0"}
+        };
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
+        eigen  = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+        states = tise::buildContinuumState(order, nEn, H, S, eigen, energyGrid);
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 51, order = 12, L = 0;
+    double rMin = 0.0, rMax = 100.0;
+    int nBSplines = 0, nEn = 0;
+    tise::EigenResult eigen;
+    std::vector<double> energyGrid = {0.1};
+    std::vector<std::vector<double>> states;
+};
+
+TEST_F(FreeParticleContinuumTest, EigenvaluesMatchInfiniteSquareWell)
+{
+    double boxLength = rMax - rMin;
+    for (int i = 0; i < nEn && i < 20; ++i)
+    {
+        int n = i + 1;
+        double expected = (n * n) * M_PI * M_PI / (2 * boxLength * boxLength);
+        EXPECT_NEAR(eigen.values[i], expected, 1e-9);
+    }
+}
+
+TEST_F(FreeParticleContinuumTest, PhaseShiftMatchesZeroScattering)
+{
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax);
+    EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), 0.0, 1e-6);
+}
+
+TEST_F(FreeParticleContinuumTest, WrittenWavefunctionMatchesAnalyticSine)
+{
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax);
+
+    std::ostringstream phaseOut;
+    std::ostringstream stateOut;
+    std::vector<std::ostream *> stateOutPtrs = {&stateOut};
+    const int npts = 200;
+    tise::writeContinuumInfo(phaseOut, bs, ar, energyGrid, states, stateOutPtrs, npts, rMin, rMax, eigen);
+
+    const double k = std::sqrt(2 * energyGrid[0]);
+    const double A = std::sqrt(2.0 / (M_PI * k));
+
+    // A continuum state's overall sign is not physically meaningful (the
+    // same freedom an eigenvector has, up to which sign the underlying
+    // LAPACK solve happens to return) -- +sin(kx) and -sin(kx) are equally
+    // valid. Determine the sign via the aggregate correlation across every
+    // point first (robust to any single point landing near a node), then
+    // require every point to agree under that ONE consistent sign.
+    std::vector<double> xs, psis;
+    {
+        std::istringstream probe(stateOut.str());
+        double x, psi;
+        while (probe >> x >> psi) { xs.push_back(x); psis.push_back(psi); }
+    }
+    double correlation = 0.0;
+    for (std::size_t i = 0; i < xs.size(); ++i)
+        correlation += psis[i] * A * std::sin(k * xs[i]);
+    const double sign = correlation >= 0.0 ? 1.0 : -1.0;
+
+    std::istringstream in(stateOut.str());
+    double x, psi;
+    int count = 0;
+    while (in >> x >> psi)
+    {
+        double expected = sign * A * std::sin(k * x);
+        EXPECT_NEAR(psi, expected, 5e-3) << "at x=" << x;
+        ++count;
+    }
+    EXPECT_EQ(count, npts);
+}
+
+TEST_F(FreeParticleContinuumTest, WavefunctionIsZeroAtLeftWall)
+{
+    // Structural Dirichlet condition (physical B-spline #1 excluded from
+    // the basis) -- must hold exactly, not just "happens to be small like
+    // the rest of the analytic sine curve".
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax);
+
+    std::ostringstream phaseOut;
+    std::ostringstream stateOut;
+    std::vector<std::ostream *> stateOutPtrs = {&stateOut};
+    tise::writeContinuumInfo(phaseOut, bs, ar, energyGrid, states, stateOutPtrs, 10, rMin, rMax, eigen);
+
+    std::istringstream in(stateOut.str());
+    double x, psi;
+    in >> x >> psi;
+    EXPECT_NEAR(x, rMin, 1e-9);
+    EXPECT_NEAR(psi, 0.0, 1e-9);
+}
+
+// A potential-agnostic self-consistency identity: writeContinuumInfo's
+// output at the matching radius R, scaled by A_E, must agree in MAGNITUDE
+// with matchAsymptotic's own sqrt(2/(pi*k))*sin(k*R+delta) -- true for ANY
+// potential (not just the free particle) once both functions place
+// coefficients at the same physical B-spline indices. Reuses the existing
+// square-well fixture rather than a new one.
+//
+// Magnitude, not signed value: delta's defining atan(...) keeps its cosine
+// branch positive regardless of psiPrime_R's actual sign, so
+// sin(k*R+delta)'s sign only agrees with writeContinuumInfo's raw psi(R)
+// when psiPrime_R happens to be positive -- an accident of the matching
+// radius chosen, not a property this identity should depend on. Squaring
+// away that sign ambiguity still leaves a check a coefficient-basis bug
+// cannot pass (it produces a wrong magnitude, not just a wrong sign).
+TEST_F(SquareWellPhaseShiftTest, WrittenWavefunctionAgreesWithMatchAsymptoticAtR)
+{
+    double R = 15.0;
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R);
+
+    std::ostringstream phaseOut;
+    std::ostringstream stateOut;
+    std::vector<std::ostream *> stateOutPtrs = {&stateOut};
+    tise::writeContinuumInfo(phaseOut, bs, ar, energyGrid, states, stateOutPtrs, 2, rMin, R, eigen);
+
+    std::istringstream in(stateOut.str());
+    double x, psi, lastX = 0.0, lastPsi = 0.0;
+    while (in >> x >> psi) { lastX = x; lastPsi = psi; }
+    EXPECT_NEAR(lastX, R, 1e-9);
+
+    double k = std::sqrt(2 * energyGrid[0]);
+    double expected = std::sqrt(2.0 / M_PI / k) * std::sin(k * R + ar.delta[0]);
+    EXPECT_NEAR(std::abs(lastPsi), std::abs(expected), 1e-6);
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ it.
 
 from __future__ import annotations
 
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -57,7 +58,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from analysis import ContinuumPoint, EigenvalueRow, PhaseShiftRow, read_tise_output
+from analysis import ContinuumPoint, EigenstatePoint, EigenvalueRow, PhaseShiftRow, read_tise_output
 from controller import run_tise_solver
 
 pytestmark = pytest.mark.integration
@@ -112,6 +113,26 @@ _BANDWIDTH = 12  # hamiltonian.dat/overlap.dat rows == bspline.order
 # n_pts unmodified, so this constant matches it.
 _CONTINUUM_STATE_POINTS_PER_FILE = 500
 
+# tise.n_pts_eigenstate (real config.yaml's default) -- eigenstate_NNN.dat
+# points per file, written unconditionally regardless of continuum settings.
+_EIGENSTATE_POINTS_PER_FILE = 301
+
+
+def _write_no_continuum_config(tmp_config: Path, tmp_path: Path) -> Path:
+    """Build a config variant with tise.continuum.enabled: false, regardless
+    of the real config.yaml's own current value -- config.yaml has had
+    continuum enabled by default since commit 99b7683, so
+    TestNoContinuumRealRoundTrip below can no longer rely on tmp_config's
+    unmodified copy to represent the disabled-continuum case. Same
+    load/mutate/dump pattern as _write_continuum_enabled_config below."""
+    with open(tmp_config) as f:
+        cfg = yaml.safe_load(f)
+    cfg["tise"]["continuum"]["enabled"] = False
+    out = tmp_path / "config_no_continuum.yaml"
+    with open(out, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return out
+
 
 def _write_continuum_enabled_config(tmp_config: Path, tmp_path: Path, n_energies: int) -> Path:
     """Build a config variant with tise.continuum.enabled: true and the
@@ -134,17 +155,20 @@ def _write_continuum_enabled_config(tmp_config: Path, tmp_path: Path, n_energies
 
 
 class TestNoContinuumRealRoundTrip:
-    """The real config.yaml's default (tise.continuum.enabled: false),
-    unmodified, via the tmp_config fixture: run the real tise_solver binary,
-    then read its real output back with analysis.read_tise_output, and
-    confirm the two genuinely agree on shape."""
+    """The real config.yaml's hydrogen-like potential with continuum
+    explicitly disabled (see _write_no_continuum_config -- config.yaml's own
+    default has had continuum enabled since commit 99b7683): run the real
+    tise_solver binary, then read its real output back with
+    analysis.read_tise_output, and confirm the two genuinely agree on
+    shape."""
 
     def test_real_binary_output_matches_real_reader_shape(
         self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
     ):
+        config = _write_no_continuum_config(tmp_config, tmp_path)
         tise_dir = tmp_path / "data" / "tise"
 
-        run_tise_solver(str(tmp_config), tise_dir, binary=tise_solver_binary)
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
         data = read_tise_output(tise_dir)
 
         # eigenvalues.dat: _NUM_EIGENSTATES (=nEn) rows, 2 fields each
@@ -190,11 +214,23 @@ class TestNoContinuumRealRoundTrip:
         assert len(data.overlap[0]) == _NUM_EIGENSTATES
         assert all(len(row) == _NUM_EIGENSTATES for row in data.overlap)
 
-        # tise.continuum.enabled: false in the real config.yaml -- the real
-        # binary writes neither phase_shifts.dat nor any continuum_state_*.dat
-        # file, and Analysis must degrade to empty lists for both, not raise.
+        # tise.continuum.enabled: false (forced by _write_no_continuum_config
+        # above) -- the real binary writes neither phase_shifts.dat nor any
+        # continuum_state_*.dat file, and Analysis must degrade to empty
+        # lists for both, not raise.
         assert data.phase_shifts == []
         assert data.continuum_states == []
+
+        # eigenstate_NNN.dat: written unconditionally (regardless of
+        # tise.continuum.enabled, unlike continuum_state_NNN.dat above) --
+        # one per bound state, each with n_pts_eigenstate (real config.yaml:
+        # 301) points, indexed 1.._NUM_EIGENSTATES.
+        assert len(data.eigenstates) == _NUM_EIGENSTATES
+        indices = [index for index, _points in data.eigenstates]
+        assert indices == list(range(1, _NUM_EIGENSTATES + 1))
+        for _index, points in data.eigenstates:
+            assert len(points) == _EIGENSTATE_POINTS_PER_FILE
+            assert all(isinstance(point, EigenstatePoint) for point in points)
 
 
 # ─── Mandatory test 2: continuum-enabled config variant ────────────────────
@@ -239,6 +275,11 @@ class TestContinuumEnabledRealRoundTrip:
             assert len(points) == _CONTINUUM_STATE_POINTS_PER_FILE
             assert all(isinstance(point, ContinuumPoint) for point in points)
 
+        # eigenstate_NNN.dat is written unconditionally -- confirms this
+        # holds with continuum ALSO enabled, not just in the no-continuum
+        # case TestNoContinuumRealRoundTrip above already covers in detail.
+        assert len(data.eigenstates) == _NUM_EIGENSTATES
+
 
 # ─── Optional test 3: repeated run against the same tise_dir ───────────────
 
@@ -271,6 +312,158 @@ class TestRepeatedRunOverwritesConsistently:
         assert len(second.eigenvalues) == _NUM_EIGENSTATES
         assert len(second.phase_shifts) == 3
         assert len(second.continuum_states) == 3
+
+
+# ─── Physics-correctness: free particle & harmonic oscillator vs. analytic ──
+#
+# Every quantity checked below has a closed-form analytic answer independent
+# of this project's numerics, so these are true end-to-end regression tests,
+# not shape/count checks. This is the test suite for the writeContinuumInfo
+# coefficient-basis bug (see project memory continuum_state_coefficient_bug):
+# a free particle's V=0 makes matchAsymptotic's flat-asymptote formula exact
+# everywhere (not just asymptotically), so eigenvalues, phase shifts, AND
+# the continuum wavefunction shape are all independently checkable.
+
+
+def _write_free_particle_config(tmp_config: Path, tmp_path: Path, n_energies: int, e_max: float) -> Path:
+    """Build a config variant with a V=0 potential spanning the real
+    config's own bspline.domain unchanged, continuum enabled over
+    [0, e_max]. Same load/mutate/dump pattern as
+    _write_continuum_enabled_config above."""
+    with open(tmp_config) as f:
+        cfg = yaml.safe_load(f)
+    domain = cfg["bspline"]["domain"]
+    cfg["potential"] = [f"{{'domain': '[{domain[0]}, {domain[1]}]', 'function': '0'}}"]
+    cfg["tise"]["continuum"]["enabled"] = True
+    cfg["tise"]["continuum"]["E_threshold"] = 0.0
+    cfg["tise"]["continuum"]["E_max"] = e_max
+    cfg["tise"]["continuum"]["n_energies"] = n_energies
+    out = tmp_path / "config_free_particle.yaml"
+    with open(out, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return out
+
+
+def _write_harmonic_oscillator_config(tmp_config: Path, tmp_path: Path) -> Path:
+    """Build a config variant for a 1D harmonic oscillator V(x)=0.5*omega^2*x^2
+    on a symmetric box -- overrides bspline.n_nodes/domain (a genuinely
+    different basis geometry from the real config's radial [0,100] hydrogen
+    setup; n_nodes=81 over [-20,20] was verified during the 2026-08-28
+    diagnosis session to match the first 10 analytic eigenvalues to ~3e-5)
+    and disables continuum: a confining potential has no true continuum
+    (docs/planning/architecture-06-20.md's Case-1 classification -- all
+    states are box-confined pseudostates), so only bound states are
+    physically meaningful to check here."""
+    with open(tmp_config) as f:
+        cfg = yaml.safe_load(f)
+    cfg["bspline"]["n_nodes"] = 81
+    cfg["bspline"]["domain"] = [-20.0, 20.0]
+    cfg["potential"] = ["{'domain': '[-20, 20]', 'function': '0.5 * 1.0 * x^2'}"]
+    cfg["tise"]["continuum"]["enabled"] = False
+    out = tmp_path / "config_harmonic_oscillator.yaml"
+    with open(out, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return out
+
+
+class TestFreeParticleContinuumPhysics:
+    """A free particle (V=0) on the real config's own [0,100] box: bound
+    eigenvalues are the infinite-square-well spectrum, the continuum phase
+    shift is exactly zero (mod pi) at every energy, and the continuum
+    wavefunction is an exact standing wave A*sin(kx) -- no confounding
+    potential-shape assumptions anywhere, unlike the real config.yaml's
+    Coulomb-tailed potential."""
+
+    N_ENERGIES = 5
+    E_MAX = 0.5  # comfortably inside the basis's own E_acc ceiling (~1.23 for
+    # n_nodes=51/order=12/domain width=100, per the 2026-08-28 diagnosis run)
+
+    def test_bound_eigenvalues_match_infinite_square_well(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _write_free_particle_config(tmp_config, tmp_path, self.N_ENERGIES, self.E_MAX)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        L = 100.0  # real config.yaml's bspline.domain width
+        for row in data.eigenvalues[:20]:
+            n = row.index + 1  # eigenvalues.dat is 0-indexed; box quantum number starts at 1
+            expected = (n**2) * (math.pi**2) / (2 * L**2)
+            assert row.energy == pytest.approx(expected, abs=1e-9)
+
+    def test_phase_shift_matches_zero_scattering(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _write_free_particle_config(tmp_config, tmp_path, self.N_ENERGIES, self.E_MAX)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.phase_shifts) == self.N_ENERGIES
+        for row in data.phase_shifts:
+            # delta is only physically meaningful mod pi (matchAsymptotic's
+            # own atan(...)-k*R construction bakes in an arbitrary -n*pi
+            # winding), so a true delta=0 free particle satisfies
+            # sin(delta) == 0 exactly, independent of winding number.
+            assert math.sin(row.delta) == pytest.approx(0.0, abs=1e-3)
+
+    def test_continuum_wavefunction_matches_analytic_sine(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _write_free_particle_config(tmp_config, tmp_path, self.N_ENERGIES, self.E_MAX)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.continuum_states) == self.N_ENERGIES
+        for (index, points), phase_row in zip(data.continuum_states, data.phase_shifts):
+            E = phase_row.energy
+            k = math.sqrt(2 * E)
+            amplitude = math.sqrt(2 / (math.pi * k))
+
+            # A continuum state's overall sign is not physically meaningful
+            # (the same freedom an eigenvector has, up to which sign the
+            # underlying LAPACK solve happens to return) -- +sin(kx) and
+            # -sin(kx) are equally valid. Pick the sign via the aggregate
+            # correlation across every point (robust to any single point
+            # landing near a node), then require every point to agree under
+            # that ONE consistent sign -- a genuinely wrong shape (as under
+            # the pre-fix coefficient-basis bug) cannot pass this regardless
+            # of which sign is picked.
+            correlation = sum(p.psi * amplitude * math.sin(k * p.x) for p in points)
+            sign = 1.0 if correlation >= 0 else -1.0
+
+            for point in points:
+                expected = sign * amplitude * math.sin(k * point.x)
+                assert point.psi == pytest.approx(expected, abs=5e-3), (
+                    f"continuum state {index} at x={point.x}: got {point.psi}, expected {expected}"
+                )
+            # Dirichlet wall at rMin=0: structurally forced to exactly zero
+            # (physical B-spline #1 excluded from the basis), not merely a
+            # coincidental zero of sin(kx) -- worth its own assertion.
+            assert points[0].psi == pytest.approx(0.0, abs=1e-9)
+
+
+class TestHarmonicOscillatorBoundStates:
+    """A 1D harmonic oscillator has no true continuum (Case 1: confining
+    potential, box-confined pseudostates only -- confirmed during the
+    2026-08-28 diagnosis session), so only its closed-form bound-state
+    spectrum E_n=(n+1/2)*omega is physically meaningful to validate here."""
+
+    def test_bound_eigenvalues_match_harmonic_oscillator_spectrum(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _write_harmonic_oscillator_config(tmp_config, tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        omega = 1.0
+        for row in data.eigenvalues[:10]:
+            n = row.index  # eigenvalues.dat is 0-indexed; HO quantum number also starts at 0
+            expected = (n + 0.5) * omega
+            assert row.energy == pytest.approx(expected, abs=1e-3)
 
 
 # ─── analysis.py's OWN CLI/subprocess contract (Sec 7.2.3), invoked directly ─
