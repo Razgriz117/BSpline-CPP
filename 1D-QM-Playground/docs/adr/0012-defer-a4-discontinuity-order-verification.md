@@ -6,39 +6,32 @@
   implemented and tested — this ADR defers only its *literature
   cross-check*, not the derivation's use)
 
-## ACTION NEEDED FROM A HUMAN
-
-**This ADR cannot be closed by an agent.** Formal verification requires a
-specific source PDF that does not currently exist anywhere in this
-repository:
-
-- **File needed:** `PHY5606_F25_Bsplines_v2.pdf` (L. Argenti's PHY5606
-  B-splines course notes), already listed as an external reference in
-  `docs/SDD.md` [§1.5](../SDD.md#15-references) — but, like every other
-  external reference there, cited by filename only, with no actual file
-  present.
-- **Confirmed:** `find . -iname "*.pdf"` returns nothing anywhere in this
-  repository — no PDF of any kind is checked in, not just this one.
-- **Needed action:** a human locates this file and adds it to the repo.
-  Suggested location: a new `docs/references/` directory (none exists yet;
-  none of the other external references SDD §1.5 lists have one either, so
-  creating it is itself a small new convention, not a fix for an existing
-  broken path).
-- Once added, the derivation in `docs/planning/engineer-a-plan-A4.md:381`
-  (reproduced below) should be checked line-for-line against the course
-  notes' treatment of knot multiplicity vs. spline continuity order, and
-  optionally cross-checked against C. de Boor's *A Practical Guide to
-  Splines* (also SDD §1.5, and considerably more available as a published
-  textbook than the course notes).
-
-This is flagged, not blocking: the derivation is already implemented and
-covered by hand-traced test cases (see Context below) and is not gated on
-this verification. See the companion planning doc,
-`docs/planning/a4-discontinuity-order-verification.md`, for the fallback
-numerical-verification approach if the literature cross-check turns out to
-be inconclusive once the PDF is available.
-
 ## Context
+
+> **ACTION NEEDED FROM A HUMAN — this ADR cannot be closed by an agent.**
+> Formal verification requires a specific source PDF that does not
+> currently exist anywhere in this repository. **File needed:**
+> `PHY5606_F25_Bsplines_v2.pdf` (L. Argenti's PHY5606 B-splines course
+> notes), already listed as an external reference in `docs/SDD.md`
+> [§1.5](../SDD.md#15-references) — but, like every other external
+> reference there, cited by filename only, with no actual file present.
+> **Confirmed:** `find . -iname "*.pdf"` returns nothing anywhere in this
+> repository — no PDF of any kind is checked in, not just this one.
+> **Needed action:** a human locates this file and adds it to the repo.
+> Suggested location: a new `docs/references/` directory (none exists yet;
+> none of the other external references SDD §1.5 lists have one either, so
+> creating it is itself a small new convention, not a fix for an existing
+> broken path). Once added, the derivation below should be checked
+> line-for-line against the course notes' treatment of knot multiplicity
+> vs. spline continuity order, and optionally cross-checked against
+> C. de Boor's *A Practical Guide to Splines* (also SDD §1.5, and
+> considerably more available as a published textbook than the course
+> notes). This is flagged, not blocking: the derivation below is already
+> implemented and covered by hand-traced test cases, and production
+> behavior is not gated on this verification. See the companion planning
+> doc, `docs/planning/a4-discontinuity-order-verification.md`, for the
+> fallback numerical-verification approach if the literature cross-check
+> turns out to be inconclusive once the PDF is available.
 
 `strategicKnotsFromJoins` (`TISE/tise.cpp`, derived in
 `docs/planning/engineer-a-plan-A4.md`) converts a detected potential-join
