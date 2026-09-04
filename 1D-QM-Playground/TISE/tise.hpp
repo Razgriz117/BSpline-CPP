@@ -103,11 +103,17 @@ struct ConvergenceFit
 //   - otherwise: V fits a power law V(step) ~ fittedLimit + C/step^p; `p`
 //     (powerLawExponent) is estimated via the median of successive log-ratio
 //     estimates over a tail window, which is robust to a few noisy samples.
-// Optional parameters name the thresholds/window sizes used by these checks;
+// Optional parameters name the thresholds/window size used by these checks;
 // each defaults to the value this function has always used, so existing
-// callers are unaffected unless they explicitly override one. See
-// classifySequenceConvergence's definition in tise.cpp for what each
-// controls.
+// callers are unaffected unless they explicitly override one. `windowSize`
+// in particular: the tail window used for the power-law fit starts
+// `windowSize` samples back from the end of V (i.e. at index N-windowSize);
+// the fit itself uses windowSize-2 successive-difference-ratio estimates
+// from that window (e.g. windowSize=7 -> 5 estimates), not `windowSize`
+// differences directly -- both N (=V.size()) and windowSize must be >= 3,
+// or this throws std::runtime_error (there would otherwise be no estimate
+// at all to take the median of). See classifySequenceConvergence's
+// definition in tise.cpp for what each of the other parameters controls.
 ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real ratio,
                                             Real flatnessAbsTol = 1e-10,
                                             Real flatnessRelTol = 1e-9,

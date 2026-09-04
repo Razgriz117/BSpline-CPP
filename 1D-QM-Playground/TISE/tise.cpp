@@ -229,6 +229,23 @@ ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real rati
                                             Real shrinkFactorFloor, Real divergenceThreshold,
                                             int windowSize)
 {
+    // The tail-window power-law fit below (reached when V is neither flat
+    // nor divergent) needs at least one successive-difference-ratio
+    // estimate: windowStart = max(0, N-windowSize) and windowEnd = N-3 must
+    // satisfy windowStart <= windowEnd, which reduces to exactly N >= 3 AND
+    // windowSize >= 3 (checked independently: e.g. N=100 with windowSize=2
+    // still gives windowStart=N-2 > windowEnd=N-3, no valid k; N=2 with
+    // windowSize=100 still gives windowEnd=-1, no valid k). Below that
+    // minimum, pEstimates would end up empty and pEstimates[size()/2] --
+    // this function's own median step -- would read out of bounds. This was
+    // unreachable while windowSize was a hardcoded literal (7 >= 3); it
+    // became caller-reachable once windowSize turned into a parameter, so
+    // it's validated explicitly now rather than left as a latent UB trap.
+    if (V.size() < 3)
+        throw std::runtime_error("classifySequenceConvergence: V must have at least 3 samples");
+    if (windowSize < 3)
+        throw std::runtime_error("classifySequenceConvergence: windowSize must be >= 3");
+
     const int N = static_cast<int>(V.size());
 
     std::vector<Real> dV(N - 1);
@@ -278,11 +295,13 @@ ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real rati
     // Power-law fit via successive-ratio over a tail window, avoiding both
     // near-field transients (early samples, still settling) and far-field
     // floating-point noise (very late samples, where dV is tiny and
-    // dominated by rounding error). `windowSize` sets how many of the last
-    // differences to consider (window starts windowSize back from the end);
-    // the "-3" below is unrelated to windowSize -- it's fixed headroom so
-    // the k+1 lookahead a few lines down never reads past the last valid
-    // finite difference, regardless of windowSize.
+    // dominated by rounding error). The window starts `windowSize` samples
+    // back from the end of V (windowStart = N - windowSize); the "-3" below
+    // is unrelated to windowSize -- it's fixed headroom so the k+1 lookahead
+    // a few lines down never reads past the last valid finite difference,
+    // regardless of windowSize. Net effect: the fit uses windowSize-2
+    // successive-difference-ratio estimates (e.g. windowSize=7 -> 5
+    // estimates), not windowSize differences directly.
     const int windowStart = std::max(0, N - windowSize);
     const int windowEnd = N - 3; // inclusive; dV[windowEnd + 1] must stay in range
     std::vector<Real> pEstimates;
@@ -345,6 +364,16 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
                                            Real coulombExponentTol,
                                            Real transitionWidthFraction)
 {
+    // numSamples feeds classifySequenceConvergence's V directly (below), and
+    // that function's own tail-window power-law fit needs at least 3 samples
+    // to produce a single successive-difference-ratio estimate (see its own
+    // guard for the derivation) -- fail fast here, before doing any sampling
+    // work or constructing V, so a bad numSamples reports against this
+    // function's own name rather than surfacing as a confusing failure deep
+    // inside classifySequenceConvergence.
+    if (numSamples < 3)
+        throw std::runtime_error("classifyAsymptote: numSamples must be >= 3");
+
     const Real reference = (side == DomainSide::Left) ? domain.xMin : domain.xMax;
     const Real sign = (side == DomainSide::Left) ? -1.0 : 1.0;
     // scale is the offset of the first sample from `reference`; backupScale
@@ -980,6 +1009,13 @@ bool isSingularApproaching(const std::map<std::string, std::string> &potential,
                             Real backupScale = kDefaultAsymptoteBackupScale,
                             Real pieceWidthClampFraction = 0.25)
 {
+    // Same requirement as classifyAsymptote's own guard: numSamples becomes
+    // V's size below, and classifySequenceConvergence's tail-window fit
+    // needs at least 3 samples to produce one estimate -- validated here,
+    // before any sampling work, for the same fail-fast/clear-error reason.
+    if (numSamples < 3)
+        throw std::runtime_error("isSingularApproaching: numSamples must be >= 3");
+
     const Real scale = std::max(std::abs(x0), backupScale);
     // Never let the first probe step exceed pieceWidthClampFraction of the
     // piece's own width, so a narrow piece can't have its probe overshoot

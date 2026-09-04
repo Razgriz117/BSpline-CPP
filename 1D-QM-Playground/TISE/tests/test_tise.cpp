@@ -322,6 +322,53 @@ TEST(ClassifySequenceConvergenceTest, FitsArbitraryPowerLaw)
     EXPECT_NEAR(fit.fittedLimit, 0.0, 1e-9);
 }
 
+// windowSize < 3 (or V.size() < 3) would leave the tail-window fit's
+// pEstimates empty, so pEstimates[size()/2] (the median step) would read
+// out of bounds -- both are guarded explicitly. Values here are still a
+// non-flat, non-divergent power-law sequence (same shape as
+// FitsArbitraryPowerLaw) so the guard, not the flatness/divergence
+// pre-checks, is what's actually being exercised.
+TEST(ClassifySequenceConvergenceTest, ThrowsOnWindowSizeBelowThree)
+{
+    std::vector<double> V(16);
+    for (int k = 0; k < 16; ++k)
+        V[k] = 3.0 * std::pow(4.0, -1.5 * k);
+    EXPECT_THROW(tise::classifySequenceConvergence(V, 4.0, 1e-10, 1e-9, 1e-300, 0.5, /*windowSize=*/2),
+                 std::runtime_error);
+}
+
+TEST(ClassifySequenceConvergenceTest, ThrowsOnFewerThanThreeSamples)
+{
+    std::vector<double> V = {3.0, 0.75}; // size 2, below the required minimum
+    EXPECT_THROW(tise::classifySequenceConvergence(V, 4.0), std::runtime_error);
+}
+
+// Proves windowSize actually threads through and changes the fit, not just
+// compiles: a smaller windowSize uses fewer (but still >= 1) trailing
+// difference-ratio estimates, so on a sequence whose apparent power-law
+// exponent DRIFTS across the sampled range (not a pure power law), a
+// smaller/larger windowSize picks a different sub-range of estimates and
+// so a measurably different median.
+TEST(ClassifySequenceConvergenceTest, WindowSizeChangesFittedExponentOnDriftingSequence)
+{
+    // Not a pure power law: exponent effectively drifts from ~1.0 (early
+    // terms dominated by the linear part) toward ~2.0 (late terms dominated
+    // by the quadratic part), so which trailing samples enter the fit
+    // matters.
+    std::vector<double> V(16);
+    for (int k = 0; k < 16; ++k)
+        V[k] = std::pow(4.0, -static_cast<double>(k)) + 0.05 * std::pow(4.0, -2.0 * k);
+
+    auto fitDefaultWindow = tise::classifySequenceConvergence(V, 4.0);
+    auto fitNarrowWindow  = tise::classifySequenceConvergence(V, 4.0, 1e-10, 1e-9, 1e-300, 0.5, /*windowSize=*/3);
+
+    ASSERT_FALSE(fitDefaultWindow.isDivergent);
+    ASSERT_FALSE(fitDefaultWindow.isFlat);
+    ASSERT_FALSE(fitNarrowWindow.isDivergent);
+    ASSERT_FALSE(fitNarrowWindow.isFlat);
+    EXPECT_NE(fitDefaultWindow.powerLawExponent, fitNarrowWindow.powerLawExponent);
+}
+
 // ---------------------------------------------------------------------------
 // case3WindowFunction / evaluateWindowedPotential
 // (docs/planning/boundary-condition-case-3-smoothing.md)
@@ -497,6 +544,20 @@ TEST(ClassifyAsymptoteTest, LeftSideSymmetric)
     std::ostringstream warn;
     auto result = tise::classifyAsymptote(potential, domain, tise::DomainSide::Left, warn);
     EXPECT_EQ(result.asymptoteCase, tise::AsymptoteCase::HardWall);
+}
+
+// numSamples < 3 would leave classifySequenceConvergence's tail-window fit
+// with no estimate to take the median of (see that function's own guard);
+// classifyAsymptote validates numSamples itself, before doing any sampling,
+// so the error reports against classifyAsymptote's own name.
+TEST(ClassifyAsymptoteTest, ThrowsOnNumSamplesBelowThree)
+{
+    std::map<std::string, std::string> potential = {{"[0, inf)", "x*x"}};
+    tise::SpatialDomain domain{0.0, 20.0};
+    std::ostringstream warn;
+    EXPECT_THROW(
+        tise::classifyAsymptote(potential, domain, tise::DomainSide::Right, warn, /*numSamples=*/2),
+        std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
@@ -1134,6 +1195,31 @@ TEST(DetectPotentialStructureTest, StepAtBothBarrierEdges)
     EXPECT_EQ(joins[0].type, tise::JoinType::Step);
     EXPECT_DOUBLE_EQ(joins[1].x, 6.0);
     EXPECT_EQ(joins[1].type, tise::JoinType::Step);
+}
+
+// Proves valueJumpTol actually threads through to detectPotentialStructure's
+// classification, not just compiles: same barrier-step potential as
+// StepAtBothBarrierEdges (a jump of exactly 10 at x=5), but with
+// valueJumpTol raised to 10.0 -- the strict '>' comparison then no longer
+// flags a jump of exactly 10 as a Step (both pieces are constant, so the
+// one-sided value estimates are exact, not just approximately 10), and
+// since both pieces are also flat (zero slope) on either side of the join,
+// it falls all the way through to Continuous instead of StitchedKink too.
+TEST(DetectPotentialStructureTest, RaisedValueJumpTolReclassifiesStepAsContinuous)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,5)", "0"}, {"[5,6]", "10"}, {"(6,10]", "0"}
+    };
+    auto defaultJoins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(defaultJoins.size(), 2u);
+    for (const auto &j : defaultJoins)
+        EXPECT_EQ(j.type, tise::JoinType::Step);
+
+    auto raisedTolJoins = tise::detectPotentialStructure(
+        potential, /*valueJumpTol=*/10.0, /*slopeJumpTol=*/1e-4, /*fdStep=*/1e-4, /*stepClampFraction=*/0.1);
+    ASSERT_EQ(raisedTolJoins.size(), 2u);
+    for (const auto &j : raisedTolJoins)
+        EXPECT_EQ(j.type, tise::JoinType::Continuous);
 }
 
 TEST(DetectPotentialStructureTest, StitchedKinkAtCornerJoin)
