@@ -34,9 +34,9 @@ std::vector<Real> buildUniformRadialGrid(int nNodes, Real rMin, Real rMax);
 
 // Build a uniform energy grid epsilon_i = E_threshold + (E_max - E_threshold)/N_E * i,
 // for i = 1..N_E. Sampling starts at i=1 (never i=0) to avoid the k=0 (E=E_threshold=0)
-// singularity in matchAsymptotic's matching formulas; per
-// docs/planning/tise-task-breakdown.md B2, this generalizes the PDF's
-// [0, E_max] grid to a user-supplied [E_threshold, E_max] window.
+// singularity in matchAsymptotic's matching formulas; this lets a caller pick
+// any [E_threshold, E_max] window instead of always starting the continuum
+// scan at E=0.
 std::vector<Real> buildEnergyGrid(Real E_threshold, Real E_max, int N_E);
 
 // Radial hydrogen-like potential V_L(x) = L(L+1)/(2x^2) - 1/x.
@@ -91,10 +91,29 @@ struct ConvergenceFit
     Real powerLawExponent;
 };
 
-// Shared numeric core for asymptote classification (REQ-F-030) and, later,
-// singular-point detection for strategic node placement (REQ-F-050). See
-// docs/planning/engineer-a-plan-A1.md for the algorithm.
-ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real ratio);
+// Shared numeric core for asymptote classification (REQ-F-030) and singular-
+// point detection for strategic node placement (REQ-F-050). Given a sequence
+// V sampled at points spaced geometrically by `ratio` (V[k] at "distance"
+// ratio^k from some reference point), decides among three outcomes:
+//   - isFlat: successive differences are already numerically zero -- V has
+//     converged to V[N-1].
+//   - isDivergent: successive differences are NOT shrinking fast enough
+//     between the middle and the end of the window -- V is blowing up, not
+//     settling to a finite limit (e.g. approaching a 1/x singularity).
+//   - otherwise: V fits a power law V(step) ~ fittedLimit + C/step^p; `p`
+//     (powerLawExponent) is estimated via the median of successive log-ratio
+//     estimates over a tail window, which is robust to a few noisy samples.
+// Optional parameters name the thresholds/window sizes used by these checks;
+// each defaults to the value this function has always used, so existing
+// callers are unaffected unless they explicitly override one. See
+// classifySequenceConvergence's definition in tise.cpp for what each
+// controls.
+ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real ratio,
+                                            Real flatnessAbsTol = 1e-10,
+                                            Real flatnessRelTol = 1e-9,
+                                            Real shrinkFactorFloor = 1e-300,
+                                            Real divergenceThreshold = 0.5,
+                                            int windowSize = 7);
 
 // Which side of the spatial domain a boundary/asymptote calculation refers to.
 enum class DomainSide
@@ -158,10 +177,31 @@ struct AsymptoteClassification
 // bounded sides always get a plain Dirichlet wall and never call this.
 // Case-3 warnings are written to `warnOut` (physics warning, non-fatal,
 // per SDD Sec. 8's warning taxonomy).
+//
+// Optional parameters (each defaults to the value this function has always
+// used, matching the shared constants of the same magnitude defined
+// alongside classifyAsymptote's definition in tise.cpp):
+//   - `numSamples`/`ratio`: V is sampled at `numSamples` points growing
+//     geometrically outward from the domain boundary by a factor of `ratio`
+//     per step, then handed to classifySequenceConvergence.
+//   - `backupScale`: floor on the sampling scale (the size of the first
+//     step outward) when the boundary itself sits at x=0 -- prevents a
+//     zero-width first step there.
+//   - `coulombExponentTol`: how close the fitted power-law exponent must be
+//     to 1 (a true 1/r Coulomb tail has exponent exactly 1) to be classified
+//     Coulomb rather than treated as an irregular tail.
+//   - `transitionWidthFraction`: for an Irregular classification, the
+//     recommended Case-3 taper width is this fraction of the domain's total
+//     span (xMax - xMin).
 AsymptoteClassification classifyAsymptote(const std::map<std::string, std::string> &potential,
                                            const SpatialDomain &domain,
                                            DomainSide side,
-                                           std::ostream &warnOut = std::cerr);
+                                           std::ostream &warnOut = std::cerr,
+                                           int numSamples = 16,
+                                           Real ratio = 4.0,
+                                           Real backupScale = 1.0,
+                                           Real coulombExponentTol = 0.15,
+                                           Real transitionWidthFraction = 0.1);
 
 // Fill symmetric banded Hamiltonian H and overlap S matrices (LAPACK 'U' storage).
 // Returns {Hmat, Smat}, each of size order * nEn.
@@ -174,10 +214,14 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
 // e.g. B-splines flanking a singular point -- see bSplinesTouchingX).
 // nullopt (the default) reproduces the original hardcoded convention,
 // dropping exactly {1, bs.getNBSplines()} -- bit-identical to this
-// function's pre-A4b behavior (proved in docs/planning/engineer-a-plan-A4b.md).
+// function's pre-A4b behavior (both physical B-splines flanking the box's
+// Dirichlet walls, so the fit basis excludes B_1 and B_N and every kept
+// state already satisfies psi(rMin)=psi(rMax)=0).
 // `nEn` MUST equal bs.getNBSplines() minus the resolved drop-set's size, or
-// this throws std::runtime_error (see the plan doc for why this check
-// exists -- a mismatch here previously risked a silent out-of-bounds write).
+// this throws std::runtime_error: passing a dropSet whose kept-count doesn't
+// match `nEn` previously risked writing eigenvector components past the end
+// of the caller's `nEn`-sized arrays, since the code assumed those two
+// numbers always agreed instead of checking.
 // `case3RightR`/`case3RightDelta`: Case-3 (irregular-asymptote) remediation.
 // classifyAsymptote can DETECT an irregular tail and recommend a transition
 // width, but detection alone doesn't change anything filled here -- passing
@@ -343,15 +387,25 @@ ContainmentCheck checkWellContainment(const bspline::BSpline &bs,
                                        Real tol = 1e-3);
 
 // === A4a: strategic node placement (REQ-F-050), required core only ===
-// A4b (generalizing the hardcoded "drop B_1/B_N" convention so singular-
-// potential B-spline removal is more than detection-only) is deferred --
-// see docs/planning/engineer-a-plan.md Section A4. Singular joins are
-// detected here but not remediated by this task.
+// The functions below only DETECT structure in the potential (this section)
+// and turn it into extra B-spline knots (strategicKnotsFromJoins,
+// buildStrategicRadialGrid); actually removing B-splines whose support
+// touches a detected singularity is a separate mechanism, A4b
+// (bSplinesTouchingX below, wired into buildStrategicGridAndDropSet).
 
-// One of the four required-treatment categories from the task's source
-// table (docs/planning/tise-task-breakdown.md, "A4. Strategic node
-// placement"): Step (V itself jumps), StitchedKink (V continuous, V' jumps),
-// Singular (V diverges, e.g. 1/r), or Continuous (no special treatment).
+// One of the four ways two adjacent potential pieces (or a piece's own
+// finite domain edge) can meet at a point x:
+//   - Step: V itself is discontinuous (V_left(x) != V_right(x)).
+//   - StitchedKink: V is continuous but its derivative V' jumps (a "kink",
+//     like |x| at x=0).
+//   - Singular: V diverges approaching x from at least one side (e.g. a
+//     Coulomb 1/r tail).
+//   - Continuous: neither V nor V' jumps -- nothing needs special handling.
+// Step and StitchedKink are remediated by inserting extra degenerate knots
+// at x (see strategicKnotsFromJoins); Singular is remediated by removing
+// the B-splines whose support touches x (see bSplinesTouchingX); Continuous
+// needs no remediation at all, but is still reported (see DetectedJoin
+// below) so callers can see that the join was checked, not skipped.
 enum class JoinType
 {
     Continuous,
@@ -384,19 +438,37 @@ struct StrategicKnot
 // dropped". Finite domain edges (a piece's own outer boundary with no
 // neighbor, e.g. x=0 in {"(0,100]": "-1/x+1/x^2"}) are only emitted if
 // singular there -- an ordinary box wall isn't actionable for this task.
-// See docs/planning/engineer-a-plan-A4.md for the detection algorithm and
-// threshold derivations.
-std::vector<DetectedJoin> detectPotentialStructure(const std::map<std::string, std::string> &potential);
+// At each join x0, the classification order is: first check whether either
+// side diverges approaching x0 (Singular, via classifySequenceConvergence
+// on a shrinking-offset probe); otherwise one-sided finite-difference
+// estimates of V(x0) and V'(x0) from each side are compared -- a value
+// mismatch bigger than `valueJumpTol` is a Step, a slope mismatch bigger
+// than `slopeJumpTol` (with no value jump) is a StitchedKink, and neither
+// jumping is Continuous. `fdStep`/`stepClampFraction` control the finite-
+// difference step size used for those one-sided estimates (see this
+// function's definition in tise.cpp for the exact formula and why each
+// default was chosen). Every optional parameter defaults to the value this
+// function has always used.
+std::vector<DetectedJoin> detectPotentialStructure(const std::map<std::string, std::string> &potential,
+                                                     Real valueJumpTol = 1e-6,
+                                                     Real slopeJumpTol = 1e-4,
+                                                     Real fdStep = 1e-4,
+                                                     Real stepClampFraction = 0.1);
 
-// Convert detected joins into strategic knots, per the multiplicity formula
-// derived in docs/planning/engineer-a-plan-A4.md: Step -> order-3,
-// StitchedKink -> order-4 (both clamped at 0 -- a case this codebase's
-// order values, 4 and 8, only actually reach for StitchedKink at order=4).
-// Singular/Continuous produce no knot -- Singular's remediation is B-spline
-// removal (A4b, `bSplinesTouchingX` below), a different function from this
-// one's knot-insertion job, not an unimplemented gap: A4b is implemented
-// and, since ADR-0009, wired into both solveTISE and tise_solver_main.cpp
-// via buildStrategicGridAndDropSet.
+// Convert detected joins into strategic knots. Step joins get order-3 extra
+// degenerate knots, StitchedKink joins get order-4 (both clamped at 0, so a
+// low-order basis that can't support that many degenerate knots simply gets
+// none -- this codebase's order values, 4 and 8, only actually hit that
+// clamp for StitchedKink at order=4). The intuition: inserting `k`
+// coincident knots at a point locally reduces the B-spline basis's
+// continuity there by `k` derivatives, so matching a potential's own
+// discontinuity in V (Step) or in V' (StitchedKink) means giving the basis
+// just enough reduced continuity to represent that discontinuity without
+// forcing smoothness the true solution doesn't have. Singular/Continuous
+// produce no knot here -- Singular's remediation is B-spline removal
+// (A4b, `bSplinesTouchingX` below), a different mechanism from this
+// function's knot-insertion job, wired into both solveTISE and
+// tise_solver_main.cpp via buildStrategicGridAndDropSet.
 std::vector<StrategicKnot> strategicKnotsFromJoins(const std::vector<DetectedJoin> &joins, int order);
 
 // Build a radial grid combining a uniform base (buildUniformRadialGrid) with
@@ -424,8 +496,12 @@ std::vector<Real> buildStrategicRadialGrid(int nNodes, Real rMin, Real rMax,
 // identifying removal candidates at exactly a singular x, where being
 // slightly inclusive is the conservative choice. Note: touching a domain
 // *boundary* point pulls in an entire cluster of `order` B-splines (all of
-// them clamp to the same boundary knot), not just one -- see
-// docs/planning/engineer-a-plan-A4b.md for the worked example.
+// them clamp to the same boundary knot), not just one. Worked example
+// (order=4, x = grid.front()): BSpline::init repeats the boundary knot
+// `order` times in its extended knot vector, so B-splines 1..order (whose
+// extended-index spans [1-order,1] through [0,order] all start at or before
+// that repeated boundary knot) all have support beginning exactly at x --
+// every one of them "touches" x by this closed-interval test, not just B_1.
 std::vector<int> bSplinesTouchingX(int nNodes, int order, const std::vector<Real> &grid, Real x);
 
 // Analytic hydrogenic energy: E = -1 / (2 * (n + L)^2).
@@ -485,14 +561,14 @@ void writeBandedMatrix(std::ostream &out, const std::vector<Real> &mat,
 
 // Bundles solveTISE's full output: the diagonalized EigenResult plus every
 // piece of basis-construction context a caller needs to correctly decode it
-// downstream (docs/planning/engineer-a-plan-A4-wiring.md, Gap 3). Before
-// this, solveTISE returned only EigenResult, forcing callers (main.cpp) to
-// independently reconstruct the grid/BSpline/dropSet -- harmless only while
-// solveTISE always built a plain uniform grid with the classic
-// {1,nBSplines} drop-set. Now that solveTISE may build a strategic
-// (non-uniform) grid and/or a non-classic drop-set (REQ-F-050), an
+// downstream. Before this, solveTISE returned only EigenResult, forcing
+// callers (main.cpp) to independently reconstruct the grid/BSpline/dropSet
+// -- harmless only while solveTISE always built a plain uniform grid with
+// the classic {1,nBSplines} drop-set. Now that solveTISE may build a
+// strategic (non-uniform) grid and/or a non-classic drop-set (REQ-F-050), an
 // independent reconstruction would silently diverge from what was actually
-// solved.
+// solved (e.g. decoding eigenvector coefficients against the wrong physical
+// B-spline indices), so callers must reuse this struct's own fields instead.
 // === ADR-0009: shared grid+drop-set construction (unifies solveTISE/tise_solver) ===
 // Extracted from solveTISE's own grid/dropset construction (was previously
 // inlined there only) so tise_solver_main.cpp -- which used to build a
@@ -521,8 +597,15 @@ struct StrategicGridResult
                                 // is affected regardless of B-spline removal
 };
 
+// `edgeTolerance`: how close a detected Singular join's x must be to rMin/
+// rMax to be treated as "at the domain edge" (already regularized by the
+// classic wall exclusion, so no extra B-spline removal is applied there --
+// see the "Gap 2" comment in this function's tise.cpp definition) rather
+// than a genuine interior singularity. Defaults to the value this function
+// has always used.
 StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMin, Real rMax,
-                                                   const std::map<std::string, std::string> &potential);
+                                                   const std::map<std::string, std::string> &potential,
+                                                   Real edgeTolerance = 1e-9);
 
 struct SolveTISEResult
 {
@@ -540,15 +623,30 @@ struct SolveTISEResult
                                 // was diagonalized against exactly this exclusion set.
 };
 
+// Default number of continuum_state_NNN.dat sample points solveTISE passes
+// to writeContinuumInfo. This happens to numerically match main.cpp's own
+// NPTS_EIGENSTATE (also 301, used for bound-state eigenfunction output) --
+// that is a coincidence of this demo driver's own historical choice, not a
+// shared dependency: library code (this file) must not reach into a
+// driver's constant, so the value is simply duplicated here as solveTISE's
+// own independent default.
+constexpr int kDefaultContinuumOutputPoints = 301;
+
 // Top-level TISE solver: build grid (automatically strategic per REQ-F-050
 // if the potential has detectable Step/StitchedKink/Singular structure --
-// see docs/planning/engineer-a-plan-A4-wiring-design.md), fill matrices
-// (with singular-join B-splines removed per A4b), diagonalise, then
-// construct and write continuum states/phase shifts on the energy grid
-// [E_threshold, E_max] (N_E points, per buildEnergyGrid).
+// this is decided automatically from the potential itself, not a separate
+// user-facing switch), fill matrices (with singular-join B-splines removed
+// per A4b), diagonalise, then construct and write continuum states/phase
+// shifts on the energy grid [E_threshold, E_max] (N_E points, per
+// buildEnergyGrid).
 // `potential` is the piecewise potential passed through to fillBandedMatrices.
+// `continuumOutputPoints`: number of spatial sample points per
+// continuum_state_NNN.dat block (passed through to writeContinuumInfo's
+// `npts`); see kDefaultContinuumOutputPoints above for why its default is
+// what it is.
 SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
-                           Real E_threshold, Real E_max, int N_E);
+                           Real E_threshold, Real E_max, int N_E,
+                           int continuumOutputPoints = kDefaultContinuumOutputPoints);
 
 // === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
 // Reduce a (possibly non-uniform, possibly containing degenerate/repeated

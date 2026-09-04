@@ -942,11 +942,13 @@ protected:
     }
 
     // nNodes=121 (not 31, like the hydrogenic fixture) because this potential's
-    // step discontinuity at x=5 isn't yet resolved with degenerate knots (that's
-    // task A4's strategic node placement); a uniform grid converges to the
-    // analytic odd-parity energies, just more slowly. Empirically verified:
-    // nNodes=31 gives ~1e-2 energy error, nNodes=121 gives ~2e-4. See
-    // docs/planning/engineer-a-plan-A2.md.
+    // step discontinuity at x=5 isn't resolved with degenerate knots here (this
+    // fixture builds a plain uniform grid directly, bypassing strategic node
+    // placement); a uniform grid still converges to the analytic odd-parity
+    // energies, just more slowly, since a step in V is only piecewise-linearly
+    // approximated by an ordinary B-spline basis near the discontinuity.
+    // Empirically verified: nNodes=31 gives ~1e-2 energy error, nNodes=121
+    // gives ~2e-4.
     int nNodes = 121, order = 8, L = 0; // L unused for potential selection; map fully specifies V(x)
     double rMin = 0.0, rMax = 30.0;
     int nEn = 0;
@@ -967,8 +969,10 @@ TEST_F(ClassifyBoundStatesSquareWellTest, ExactlyThreeBoundStatesBelowZero)
 TEST_F(ClassifyBoundStatesSquareWellTest, BoundEnergiesMatchAnalyticOddParityRoots)
 {
     // Analytic odd-parity roots for V0=2.0, w=5.0 (transcendental matching
-    // equation k*cot(k*w)=-kappa, cross-checked by independent
-    // finite-difference diagonalization -- see docs/planning/engineer-a-plan-A2.md).
+    // equation k*cot(k*w)=-kappa, the standard finite square-well bound-state
+    // condition for odd-parity states; these three roots were cross-checked
+    // by an independent finite-difference diagonalization of the same well,
+    // not just derived from this same B-spline solver).
     ASSERT_GE(static_cast<int>(result.values.size()), 3);
     EXPECT_NEAR(result.values[0], -1.83728, 1e-3);
     EXPECT_NEAR(result.values[1], -1.35493, 1e-3);
@@ -1359,10 +1363,9 @@ TEST(StrategicNodePlacementAccuracyTest, ImprovesOverUniformGridForBoxBarrier)
 // ---------------------------------------------------------------------------
 // precomputeBoundaryCoupling
 //
-// Per docs/planning/tise-task-breakdown.md §3 "B1. Precompute boundary-
-// coupling elements": validate <phi_n|B_N> and <phi_n|H|B_N> against a
-// directly-computed (brute-force bs.integral call, no shortcuts) reference,
-// for a small basis size. B_N here is the true "last B-spline... normally
+// Validate <phi_n|B_N> and <phi_n|H|B_N> against a directly-computed
+// (brute-force bs.integral call, no shortcuts) reference, for a small basis
+// size. B_N here is the true "last B-spline... normally
 // dropped to enforce psi(R)=0 for bound states" (1-based bs index nBSplines,
 // i.e. nEn+2) -- NOT B_{nEn+1}, which is already the last spline spanning the
 // confined nEn-dimensional bound-state basis itself. Using B_{nEn+1} as B_N
@@ -1583,10 +1586,10 @@ TEST_F(PrecomputeBoundaryCouplingDropSetTest, ThrowsOnInconsistentNEn)
 // ---------------------------------------------------------------------------
 // buildContinuumState
 //
-// Per docs/planning/tise-task-breakdown.md §3 "B2. Energy-grid loop and
-// closed-form coefficients": for each energy on a grid, compute
+// For each energy on a grid, compute
 // c_n = (<phi_n|H|B_N> - E<phi_n|B_N>) / (E - E_n) and
-// |psi_bar_E> = sum_n |phi_n> c_n + |B_N>.
+// |psi_bar_E> = sum_n |phi_n> c_n + |B_N>: the closed-form continuum-state
+// construction that avoids re-diagonalizing per energy point.
 // ---------------------------------------------------------------------------
 
 class BuildContinuumStateTest : public ::testing::Test
@@ -1919,7 +1922,10 @@ TEST(FillBandedMatricesDropSetTest, InteriorDropSetMatchesDirectIntegralAtMapped
 {
     // order=4, nNodes=6 -> nBSplines=8. dropSet={1,4,8}: both classic ends
     // plus one interior index. Kept={2,3,5,6,7} (nEn=5) get columns
-    // 1,2,3,4,5 respectively (hand-derived: docs/planning/engineer-a-plan-A4b.md).
+    // 1,2,3,4,5 respectively -- columnIndexMap assigns columns to kept
+    // physical indices in ascending order, skipping every dropped index, so
+    // physical 2->col1, 3->col2, 5->col3, 6->col4, 7->col5 (hand-checked
+    // against that definition, not just taken on faith).
     const int order = 4, nNodes = 6;
     std::vector<double> grid = {0, 1, 2, 3, 4, 5};
     bspline::BSpline bs;
@@ -2764,15 +2770,14 @@ TEST(BuildStrategicGridAndDropSetTest, RightEdgeSingularFalseForLeftEdgeSingular
 // ---------------------------------------------------------------------------
 // solveTISE — end-to-end: strategic grid + singular removal actually wired
 //
-// docs/planning/engineer-a-plan-A4-wiring-design.md. Small-scale mirror of
-// H-BoundStates' real hydrogen demo (order/domain scaled down for test
-// speed): nNodes=41, order=8, domain [0,40], potential -1/x on (0,40].
-// nBSplines = 41+8-2 = 47.
+// Small-scale mirror of H-BoundStates' real hydrogen demo (order/domain
+// scaled down for test speed): nNodes=41, order=8, domain [0,40], potential
+// -1/x on (0,40]. nBSplines = 41+8-2 = 47.
 //
 // Boundary-vs-interior finding, discovered empirically during development:
 // bSplinesTouchingX(41,8,grid,0) DOES return the full order-sized boundary
-// cluster {1,...,8} (confirmed, matches engineer-a-plan-A4b.md's own
-// order=8 worked example) -- but REMOVING that full cluster at a
+// cluster {1,...,8} (confirmed, matches bSplinesTouchingX's own worked
+// example in its tise.hpp doc comment) -- but REMOVING that full cluster at a
 // domain-EDGE singularity is numerically harmful, not merely
 // less-accurate: it produced a ground state of -0.095 vs the analytic
 // -0.5 (a ~5x error), because it guts the basis precisely where hydrogen's
@@ -2804,9 +2809,12 @@ TEST(SolveTISETest, InteriorSingularityTriggersBSplineRemoval)
     // from the right piece, and x=20 is strictly inside (0,40), not a
     // domain edge -- nothing else regularizes it, so this IS the case
     // bSplinesTouchingX-based removal is for. grid[20]=20.0 exactly
-    // (nNodes=41, uniform spacing 1.0 before any augmentation), same
-    // "lands exactly on a knot" shape as engineer-a-plan-A4b.md's own
-    // x=5.0 worked example (order+1 = 9 touching indices there).
+    // (nNodes=41, uniform spacing 1.0 before any augmentation), so x lands
+    // precisely on a knot -- a B-spline's support runs from extended index
+    // Bs-order to Bs, so a query point exactly at a knot shared by many
+    // B-splines' extended-knot spans pulls in a whole cluster of them
+    // (order+1 = 9 touching indices here), same shape as
+    // bSplinesTouchingX's own worked example in its tise.hpp doc comment.
     std::map<std::string, std::string> potential = {
         {"[0,20)", "0"}, {"(20,40]", "1/(x-20)"}
     };

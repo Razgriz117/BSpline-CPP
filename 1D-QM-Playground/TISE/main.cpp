@@ -92,8 +92,12 @@ int main(int argc, char *argv[])
 
     // solveTISE already built (and diagonalized against) the basis/drop-set
     // below -- reuse directly instead of independently rebuilding, which
-    // would silently diverge now that solveTISE may build a strategic grid
-    // and/or a non-classic drop-set (engineer-a-plan-A4-wiring.md Gaps 3/4).
+    // would silently diverge now that solveTISE may build a strategic
+    // (non-uniform) grid and/or a non-classic drop-set (REQ-F-050):
+    // reconstructing a plain uniform grid + classic {1,nBSplines} drop-set
+    // here would decode eigenvector coefficients against the wrong physical
+    // B-spline indices whenever the potential actually triggered strategic
+    // node placement or A4b singular-join B-spline removal.
     const bspline::BSpline &bs = sol.bs;
     const int nBSplines = sol.nBSplines;
     const int nEn       = sol.eigen.dim;
@@ -127,13 +131,14 @@ int main(int argc, char *argv[])
     // ------------------------------------------------------------------
     // Project Part 2: propagate a Gaussian wavepacket in time
     // ------------------------------------------------------------------
-    // NOTE (known limitation -- tise-task-breakdown.md Sec. 4 item 4): this call
-    // is unconditional -- time evolution always runs after the TISE solve above,
-    // regardless of intent. config.yaml already defines a matching run.run_tdse
-    // flag (docs/SDD.md Sec. 6.1), but main.cpp has no YAML parsing of its own and
-    // never reads it; gating this call on that flag needs the (out-of-scope)
-    // config-driven Controller<->TISE plumbing from the interface phases. Flagged
-    // here, not fixed, per the cleanup task's own scope.
+    // NOTE (known limitation, matching TISE/README.md's "Known Limitations"
+    // section): this call is unconditional -- after solving the bound-state
+    // problem above, time evolution always runs, with no way to request a
+    // TISE-only run. config.yaml already defines a run.run_tdse flag for
+    // exactly this purpose (docs/SDD.md Sec. 6.1), but main.cpp has no YAML
+    // parsing of its own (no YAML dependency at all) and so never reads it;
+    // wiring this up is deferred to the Controller<->TISE configuration
+    // plumbing, which is out of scope for this driver.
     try
     {
         tevol::runTimeEvolution(sol.bs, sol.eigen, sol.nBSplines,

@@ -245,7 +245,24 @@ int main(int argc, char *argv[])
         // is no unbounded side to classify and this is skipped entirely.
         std::optional<tise::Real> case3RightR, case3RightDelta;
         {
-            const tise::Real probeX = rMax + 1.0e6 * std::max(std::abs(rMax), tise::Real(1.0));
+            // Not a shared/parameterized library function -- there is only
+            // this one caller, so these stay plain local constants rather
+            // than optional parameters on some shared helper (see the
+            // comment on kUnboundedProbeMagnitude in
+            // validateNoOverlappingPotentialPieces for why this file, that
+            // function, and classifyAsymptote's own internal `scale` each
+            // use their own independent "probe far away" constant instead
+            // of a common one -- each solves a distinct problem).
+            constexpr tise::Real kProbeDistanceMultiplier = 1.0e6; // how many
+                // box-widths beyond rMax to probe -- far enough that a
+                // potential piece genuinely extending to +inf is virtually
+                // certain to still cover this point, without risking
+                // overflow the way an actual +inf-magnitude probe would.
+            constexpr tise::Real kProbeDistanceFloor = 1.0; // floor on
+                // std::abs(rMax) so a box edge at/near rMax=0 still gets a
+                // meaningfully far-away probe point instead of one at x=0.
+            const tise::Real probeX = rMax + kProbeDistanceMultiplier *
+                                       std::max(std::abs(rMax), kProbeDistanceFloor);
             bool coveredBeyondDomain = false;
             for (const auto &[domainStr, fn] : potential)
             {

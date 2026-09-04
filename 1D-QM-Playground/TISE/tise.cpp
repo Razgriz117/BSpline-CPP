@@ -158,11 +158,20 @@ void validateNoOverlappingPotentialPieces(const std::map<std::string, std::strin
     // A large-but-finite stand-in for +/-infinity, usable as a concrete
     // evaluateFunction-style probe x -- mirrors the same "probe far beyond
     // an infinite bound" idea tise_solver_main.cpp's own Case-3 detection
-    // already uses.
+    // uses, though with its own separate constant (each solves a distinct
+    // problem -- this one just needs *some* finite number outside every
+    // finite piece to test interval membership against; unifying the two
+    // idioms is not worth doing for that alone).
+    // kUnboundedProbeMagnitude divides by 4 (rather than using max() itself)
+    // to leave headroom against overflow in later arithmetic on the probe
+    // value (e.g. this function's own midpoint averaging below, or a
+    // caller doing further arithmetic on the reported x in its error
+    // message) -- max() itself has no room left to be added to or doubled
+    // without overflowing to infinity.
+    constexpr double kUnboundedProbeMagnitude = std::numeric_limits<double>::max() / 4.0;
     auto finiteProbe = [](double bound, bool isUpper) {
         if (std::isinf(bound))
-            return isUpper ? std::numeric_limits<double>::max() / 4.0
-                            : -std::numeric_limits<double>::max() / 4.0;
+            return isUpper ? kUnboundedProbeMagnitude : -kUnboundedProbeMagnitude;
         return bound;
     };
 
@@ -212,9 +221,13 @@ std::pair<std::string, std::string> parsePotentialPiece(const std::string &piece
 }
 
 // === A1: boundary-condition asymptote classifier (REQ-F-030) ===
-// See docs/planning/engineer-a-plan-A1.md for the derivation of the
-// thresholds/window sizes below.
-ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real ratio)
+// See classifySequenceConvergence's own declaration comment in tise.hpp for
+// what this function decides; the thresholds below are explained where each
+// is used.
+ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real ratio,
+                                            Real flatnessAbsTol, Real flatnessRelTol,
+                                            Real shrinkFactorFloor, Real divergenceThreshold,
+                                            int windowSize)
 {
     const int N = static_cast<int>(V.size());
 
@@ -231,8 +244,12 @@ ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real rati
     ConvergenceFit fit{};
     const Real nan = std::numeric_limits<Real>::quiet_NaN();
 
-    // Flatness pre-check: successive differences are all numerically zero.
-    if (maxAbsDV <= 1e-10 + 1e-9 * maxAbsV)
+    // Flatness pre-check: successive differences are all numerically zero,
+    // to within an absolute tolerance (flatnessAbsTol) plus a tolerance
+    // relative to the sequence's own magnitude (flatnessRelTol * maxAbsV) --
+    // the relative term keeps this check meaningful for a V that is large in
+    // magnitude but still flat, not just one near zero.
+    if (maxAbsDV <= flatnessAbsTol + flatnessRelTol * maxAbsV)
     {
         fit.isDivergent = false;
         fit.isFlat = true;
@@ -241,12 +258,15 @@ ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real rati
         return fit;
     }
 
-    // Divergence check: compare difference magnitude in the back half of the
-    // window vs. the middle. If it hasn't shrunk substantially, the sequence
-    // isn't converging to a finite limit.
+    // Divergence check: compare difference magnitude at the very end of the
+    // window vs. the middle (shrinkFactorFloor guards the denominator
+    // against division by a near-zero difference). If the end-to-middle
+    // ratio hasn't shrunk below divergenceThreshold, successive differences
+    // aren't shrinking fast enough for the sequence to be settling toward a
+    // finite limit -- treat it as divergent (e.g. approaching a 1/x pole).
     const int mid = (N - 2) / 2;
-    const Real shrinkFactor = std::abs(dV[N - 2]) / std::max(std::abs(dV[mid]), 1e-300);
-    if (shrinkFactor >= 0.5)
+    const Real shrinkFactor = std::abs(dV[N - 2]) / std::max(std::abs(dV[mid]), shrinkFactorFloor);
+    if (shrinkFactor >= divergenceThreshold)
     {
         fit.isDivergent = true;
         fit.isFlat = false;
@@ -256,8 +276,14 @@ ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real rati
     }
 
     // Power-law fit via successive-ratio over a tail window, avoiding both
-    // near-field transients and far-field floating-point noise.
-    const int windowStart = std::max(0, N - 7);
+    // near-field transients (early samples, still settling) and far-field
+    // floating-point noise (very late samples, where dV is tiny and
+    // dominated by rounding error). `windowSize` sets how many of the last
+    // differences to consider (window starts windowSize back from the end);
+    // the "-3" below is unrelated to windowSize -- it's fixed headroom so
+    // the k+1 lookahead a few lines down never reads past the last valid
+    // finite difference, regardless of windowSize.
+    const int windowStart = std::max(0, N - windowSize);
     const int windowEnd = N - 3; // inclusive; dV[windowEnd + 1] must stay in range
     std::vector<Real> pEstimates;
     for (int k = windowStart; k <= windowEnd && k + 1 < N - 1; ++k)
@@ -279,6 +305,27 @@ ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real rati
 namespace
 {
 constexpr Real kPi = 3.14159265358979323846;
+
+// Shared default sampling parameters for the two "probe a potential's
+// behavior approaching a point" routines, classifyAsymptote (probing
+// outward toward infinity, for REQ-F-030 asymptote classification) and
+// isSingularApproaching (probing inward toward a finite join point, for
+// A4a structure detection). Both build a geometric sequence of sample
+// points and feed it to classifySequenceConvergence, so they share these
+// defaults; each still takes its own optional parameter so a caller can
+// override just one call site without affecting the other.
+constexpr int  kDefaultAsymptoteNumSamples = 16;  // enough points for the tail-window
+                                                   // power-law fit (needs >= ~7) with
+                                                   // margin for the divergence pre-check
+constexpr Real kDefaultAsymptoteRatio = 4.0;      // geometric growth/shrink factor between
+                                                   // samples; large enough to reach the
+                                                   // true asymptotic regime in 16 steps
+                                                   // without so large a step that early
+                                                   // samples overflow/underflow
+constexpr Real kDefaultAsymptoteBackupScale = 1.0; // floor on the first sample's offset
+                                                    // when the reference point is at/near
+                                                    // x=0, where |reference| alone would
+                                                    // give a degenerate zero-width step
 }
 
 Real case3WindowFunction(Real x, Real R, Real delta, DomainSide side)
@@ -306,19 +353,27 @@ Real evaluateWindowedPotential(const std::map<std::string, std::string> &potenti
 AsymptoteClassification classifyAsymptote(const std::map<std::string, std::string> &potential,
                                            const SpatialDomain &domain,
                                            DomainSide side,
-                                           std::ostream &warnOut)
+                                           std::ostream &warnOut,
+                                           int numSamples,
+                                           Real ratio,
+                                           Real backupScale,
+                                           Real coulombExponentTol,
+                                           Real transitionWidthFraction)
 {
     const Real reference = (side == DomainSide::Left) ? domain.xMin : domain.xMax;
     const Real sign = (side == DomainSide::Left) ? -1.0 : 1.0;
-    const Real scale = std::max(std::abs(reference), 1.0);
+    // scale is the offset of the first sample from `reference`; backupScale
+    // floors it away from zero when the domain boundary itself is at/near
+    // x=0 (e.g. the left edge of a radial [0, rMax) domain), where
+    // |reference| alone would otherwise produce a degenerate zero-width
+    // first step.
+    const Real scale = std::max(std::abs(reference), backupScale);
 
-    constexpr int kNumSamples = 16;
-    constexpr Real kRatio = 4.0;
-    std::vector<Real> V(kNumSamples);
-    for (int k = 0; k < kNumSamples; ++k)
-        V[k] = evaluateFunction(potential, reference + sign * scale * std::pow(kRatio, k));
+    std::vector<Real> V(numSamples);
+    for (int k = 0; k < numSamples; ++k)
+        V[k] = evaluateFunction(potential, reference + sign * scale * std::pow(ratio, k));
 
-    const ConvergenceFit fit = classifySequenceConvergence(V, kRatio);
+    const ConvergenceFit fit = classifySequenceConvergence(V, ratio);
     const Real nan = std::numeric_limits<Real>::quiet_NaN();
 
     AsymptoteClassification result{};
@@ -344,7 +399,11 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
         return result;
     }
 
-    if (std::abs(fit.powerLawExponent - 1.0) <= 0.15)
+    // A true Coulomb tail (V ~ C/r) is a power law with exponent exactly 1;
+    // coulombExponentTol is how far the fitted exponent may drift from 1
+    // (numerical fitting noise, finite sampling) and still be called
+    // Coulomb rather than an unrecognized/irregular power law.
+    if (std::abs(fit.powerLawExponent - 1.0) <= coulombExponentTol)
     {
         result.asymptoteCase = AsymptoteCase::AnalyticAsymptote;
         result.subType = AsymptoteSubType::Coulomb;
@@ -358,7 +417,13 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
     result.subType = AsymptoteSubType::NotApplicable;
     result.fittedAsymptoticValue = fit.fittedLimit;
     result.powerLawExponent = fit.powerLawExponent;
-    result.recommendedTransitionWidth = 0.1 * (domain.xMax - domain.xMin);
+    // Neither flat nor Coulomb -- the tail shape is unrecognized. Recommend
+    // tapering it to zero (via case3WindowFunction) over a transition width
+    // that scales with the box size (transitionWidthFraction of the total
+    // domain span), so the taper is neither vanishingly thin (would still
+    // look like an abrupt truncation to the basis) nor so wide it eats into
+    // the trusted interior.
+    result.recommendedTransitionWidth = transitionWidthFraction * (domain.xMax - domain.xMin);
     result.warningEmitted = true;
 
     warnOut << "Warning: potential asymptote on the " << (side == DomainSide::Left ? "left" : "right")
@@ -411,9 +476,14 @@ ColumnMap columnIndexMap(int nBSplines, const std::vector<int> &dropSet)
 // caller's optional drop-set to the classic {1, nBSplines} default when
 // absent, and validates nEn matches the true kept count. Both functions
 // must reach this exact same check -- a mismatch here previously risked a
-// silent out-of-bounds write (see docs/planning/engineer-a-plan-A4b.md,
-// "An independent design review" section, for the worked counterexample:
-// nBSplines=10, order=4, dropSet={1,10}, nEn=7 -> 4-element OOB write).
+// silent out-of-bounds write: e.g. nBSplines=10, order=4, dropSet={1,10}
+// leaves 8 kept indices, but if a caller separately passed nEn=7, the band
+// matrices below are allocated order*nEn = 4*7 elements while the column
+// map (built from dropSet alone, independent of nEn) still produces column
+// indices up to 8 -- the last kept column's write lands a full `order`
+// (=4) elements past the end of the buffer, corrupting adjacent memory
+// with no bounds check to catch it. Checking nKept == nEn here, once, up
+// front, turns that into an immediate std::runtime_error instead.
 ColumnMap resolveDropSet(int nBSplines, int nEn, const std::optional<std::vector<int>> &dropSet)
 {
     std::vector<int> drop = dropSet.value_or(std::vector<int>{1, nBSplines});
@@ -547,9 +617,14 @@ std::pair<std::vector<Real>, std::vector<Real>> precomputeBoundaryCoupling(
     // instead we need to use SB_N, the last column of S, which accounts for overlap of all B-Splines with B_N.
     //
     // Generalized via colOf/physicalOf (A4b, REQ-F-050) instead of the
-    // classic hardcoded "only B_1 dropped" shift-by-1 arithmetic -- see
-    // docs/planning/engineer-a-plan-A4-wiring-design.md for why this was
-    // necessary once solveTISE could pass a non-classic dropSet.
+    // classic hardcoded "only B_1 dropped" shift-by-1 arithmetic: when
+    // exactly B_1 is dropped, physical index i always maps to matrix
+    // column i-1, so the old code could get away with a plain "-1" offset
+    // everywhere. Once solveTISE can also drop interior B-splines (A4b
+    // singular-join removal), that one-to-one offset no longer holds --
+    // physical index i's column depends on how many OTHER indices below it
+    // were also dropped -- so every physical-to-column lookup here goes
+    // through colOf/physicalOf instead of assuming a fixed shift.
     const int nBSplines = nBSplinesOpt.value_or(nEn + 2);
     const ColumnMap map = columnIndexMap(nBSplines, dropSet.value_or(std::vector<int>{1}));
     const std::vector<int> &colOf = map.colOf;
@@ -661,8 +736,13 @@ AsymptoticResult matchAsymptotic(
     int nBSplines = bs.getNBSplines();
 
     // Generalized via colOf/physicalOf (A4b, REQ-F-050) instead of the
-    // classic hardcoded fc[1+j]/fc[nEn+1] shift-by-1 placement -- see
-    // docs/planning/engineer-a-plan-A4-wiring-design.md.
+    // classic hardcoded fc[1+j]/fc[nEn+1] shift-by-1 placement: that offset
+    // only works when exactly B_1 is dropped (every kept physical index i
+    // sits at coefficient slot i-1). With interior B-splines also droppable,
+    // physicalOf[j] gives the true physical index kept eigenvector column j
+    // corresponds to, so continuumStateToBSplineCoeffs can place each
+    // coefficient at the right physical B-spline regardless of which
+    // interior indices were dropped.
     const ColumnMap map = columnIndexMap(nBSplines, dropSet.value_or(std::vector<int>{1}));
     const std::vector<int> &physicalOf = map.physicalOf;
 
@@ -891,27 +971,41 @@ namespace
 {
 // Shrinking-offset probe toward x0 from one side, reusing A1's numeric core
 // (classifySequenceConvergence) but inverted: offsets shrink toward x0
-// instead of growing toward infinity -- valid because that function's
-// divergence test only compares finite-difference magnitudes across the
-// given array, with no built-in assumption about sample direction (see
-// docs/planning/engineer-a-plan-A4.md). `sign` is -1 to sample the piece
+// instead of growing toward infinity. This is valid reuse because
+// classifySequenceConvergence's divergence test only looks at how finite
+// differences shrink/grow across the array it's given -- it has no built-in
+// assumption about whether the sample points are marching outward toward
+// infinity (classifyAsymptote's use) or inward toward a finite point (this
+// function's use); either way, a divergent potential produces
+// non-shrinking successive differences. `sign` is -1 to sample the piece
 // left of x0, +1 for the piece right of x0; `pieceWidth` is that piece's
 // own width, used to clamp the starting offset so the probe can never step
-// outside a narrow piece (e.g. the box+barrier's width-1 barrier slab) --
-// A1's own scale formula alone isn't safe for this inward direction.
+// outside a narrow piece (e.g. a thin barrier slab) -- classifyAsymptote's
+// own scale formula alone isn't safe here since it assumes room to grow
+// outward, not a bounded piece to stay inside of.
+//
+// numSamples/ratio/backupScale share classifyAsymptote's defaults (same
+// probing idea, just inverted direction); pieceWidthClampFraction is this
+// function's own knob on how much of the piece's width the first probe step
+// may use.
 bool isSingularApproaching(const std::map<std::string, std::string> &potential,
-                            Real x0, Real sign, Real pieceWidth)
+                            Real x0, Real sign, Real pieceWidth,
+                            int numSamples = kDefaultAsymptoteNumSamples,
+                            Real ratio = kDefaultAsymptoteRatio,
+                            Real backupScale = kDefaultAsymptoteBackupScale,
+                            Real pieceWidthClampFraction = 0.25)
 {
-    constexpr int kNumSamples = 16;
-    constexpr Real kRatio = 4.0;
-    const Real scale = std::max(std::abs(x0), 1.0);
-    const Real h0 = std::isfinite(pieceWidth) ? std::min(scale, 0.25 * pieceWidth) : scale;
+    const Real scale = std::max(std::abs(x0), backupScale);
+    // Never let the first probe step exceed pieceWidthClampFraction of the
+    // piece's own width, so a narrow piece can't have its probe overshoot
+    // into (or past) the neighboring piece.
+    const Real h0 = std::isfinite(pieceWidth) ? std::min(scale, pieceWidthClampFraction * pieceWidth) : scale;
 
-    std::vector<Real> V(kNumSamples);
-    for (int k = 0; k < kNumSamples; ++k)
-        V[k] = evaluateFunction(potential, x0 + sign * h0 / std::pow(kRatio, k));
+    std::vector<Real> V(numSamples);
+    for (int k = 0; k < numSamples; ++k)
+        V[k] = evaluateFunction(potential, x0 + sign * h0 / std::pow(ratio, k));
 
-    return classifySequenceConvergence(V, kRatio).isDivergent;
+    return classifySequenceConvergence(V, ratio).isDivergent;
 }
 
 // One-sided value estimate at x0, approaching from `sign` (-1 = left piece,
@@ -949,7 +1043,11 @@ Real oneSidedSlope(const std::map<std::string, std::string> &potential,
 }
 } // namespace
 
-std::vector<DetectedJoin> detectPotentialStructure(const std::map<std::string, std::string> &potential)
+std::vector<DetectedJoin> detectPotentialStructure(const std::map<std::string, std::string> &potential,
+                                                     Real valueJumpTol,
+                                                     Real slopeJumpTol,
+                                                     Real fdStep,
+                                                     Real stepClampFraction)
 {
     struct PieceInfo { Real lower, upper; };
     std::vector<PieceInfo> pieces;
@@ -965,16 +1063,17 @@ std::vector<DetectedJoin> detectPotentialStructure(const std::map<std::string, s
     std::sort(pieces.begin(), pieces.end(),
               [](const PieceInfo &a, const PieceInfo &b) { return a.lower < b.lower; });
 
-    constexpr Real kValueJumpTol = 1e-6; // O(1)-O(10) potential magnitudes in
-                                          // this codebase; a genuine Step is
-                                          // an O(1) jump, ~6 orders of margin.
-    constexpr Real kSlopeJumpTol = 1e-4; // one-sided slope estimate's O(h^2)
-                                          // truncation error is ~1e-8 at
-                                          // h=1e-4, ~4 orders below this.
-    constexpr Real kFdStep = 1e-4;
-
+    // valueJumpTol: O(1)-O(10) potential magnitudes in this codebase; a
+    // genuine Step is an O(1) jump, so the default (1e-6) leaves ~6 orders
+    // of margin against finite-difference noise.
+    // slopeJumpTol: the one-sided slope estimate's own O(h^2) truncation
+    // error is ~1e-8 at the default fdStep=1e-4, ~4 orders below the
+    // default slopeJumpTol (1e-4).
+    // stepClampFraction: never let the finite-difference step exceed this
+    // fraction of a piece's own width, so probing near a join can't step
+    // outside a narrow piece into its neighbor.
     auto clampedStep = [&](Real width) {
-        return std::isfinite(width) ? std::min(kFdStep, 0.1 * width) : kFdStep;
+        return std::isfinite(width) ? std::min(fdStep, stepClampFraction * width) : fdStep;
     };
 
     auto classifyJoin = [&](Real x0, Real leftWidth, Real rightWidth) {
@@ -986,12 +1085,12 @@ std::vector<DetectedJoin> detectPotentialStructure(const std::map<std::string, s
         const Real hR = clampedStep(rightWidth);
         const Real vL = oneSidedValue(potential, x0, -1.0, hL);
         const Real vR = oneSidedValue(potential, x0, +1.0, hR);
-        if (std::abs(vL - vR) > kValueJumpTol)
+        if (std::abs(vL - vR) > valueJumpTol)
             return JoinType::Step;
 
         const Real sL = oneSidedSlope(potential, x0, -1.0, hL);
         const Real sR = oneSidedSlope(potential, x0, +1.0, hR);
-        if (std::abs(sL - sR) > kSlopeJumpTol)
+        if (std::abs(sL - sR) > slopeJumpTol)
             return JoinType::StitchedKink;
 
         return JoinType::Continuous;
@@ -1088,8 +1187,11 @@ std::vector<Real> buildStrategicRadialGrid(int nNodes, Real rMin, Real rMax,
 // identifying removal candidates at exactly a singular x, where being
 // slightly inclusive is the conservative choice. Note: touching a domain
 // *boundary* point pulls in an entire cluster of `order` B-splines (all of
-// them clamp to the same boundary knot), not just one -- see
-// docs/planning/engineer-a-plan-A4b.md for the worked example.
+// them clamp to the same boundary knot), not just one. Worked example
+// (order=4, x = grid.front()): the extended knot vector repeats the
+// boundary knot `order` times, so B-splines 1..order all have support
+// beginning exactly at x and every one of them "touches" it by this
+// closed-interval test, not just B_1.
 std::vector<int> bSplinesTouchingX(int nNodes, int order, const std::vector<Real> &grid, Real x)
 {
     auto knotAt = [&](int i) -> Real {
@@ -1197,14 +1299,15 @@ void writeBandedMatrix(std::ostream &out, const std::vector<Real> &mat,
 }
 
 StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMin, Real rMax,
-                                                   const std::map<std::string, std::string> &potential)
+                                                   const std::map<std::string, std::string> &potential,
+                                                   Real edgeTolerance)
 {
-    // Gap 1 (docs/planning/engineer-a-plan-A4-wiring-design.md): strategic
-    // grid construction, automatic (architecture-06-20.md:448 -- "determined
-    // automatically... not something the user needs to set manually"), not
-    // config-gated. A potential with no detectable Step/StitchedKink
-    // structure produces an unchanged uniform grid (byte-identical to the
-    // old buildUniformRadialGrid call).
+    // Strategic grid construction is automatic, not something a caller
+    // opts into separately: detectPotentialStructure always runs first, and
+    // its result alone decides whether the grid ends up strategic. A
+    // potential with no detectable Step/StitchedKink structure produces an
+    // unchanged uniform grid, byte-identical to a plain buildUniformRadialGrid
+    // call.
     auto joins = detectPotentialStructure(potential);
     auto knots = strategicKnotsFromJoins(joins, order);
 
@@ -1282,8 +1385,8 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
         if (j.type != JoinType::Singular)
             continue;
 
-        const bool atLeftEdge  = std::abs(j.x - rMin) < 1e-9;
-        const bool atRightEdge = std::abs(j.x - rMax) < 1e-9;
+        const bool atLeftEdge  = std::abs(j.x - rMin) < edgeTolerance;
+        const bool atRightEdge = std::abs(j.x - rMax) < edgeTolerance;
 
         // matchAsymptotic's flat-asymptote assumption at R~rMax is affected
         // by a right-edge singularity regardless of whether any extra
@@ -1313,7 +1416,7 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
 }
 
 SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
-                           Real E_threshold, Real E_max, int N_E)
+                           Real E_threshold, Real E_max, int N_E, int continuumOutputPoints)
 {
     auto sgr = buildStrategicGridAndDropSet(nNodes, order, rMin, rMax, potential);
 
@@ -1343,7 +1446,8 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
         continuumStateFiles.emplace_back(oss.str());
         continuumStateOut.push_back(&continuumStateFiles.back());
     }
-    writeContinuumInfo(phaseShiftsOut, sgr.bs, ar, energyGrid, states, continuumStateOut, 301, rMin, rMax, er, sgr.fillDropSet);
+    writeContinuumInfo(phaseShiftsOut, sgr.bs, ar, energyGrid, states, continuumStateOut,
+                        continuumOutputPoints, rMin, rMax, er, sgr.fillDropSet);
 
     std::vector<int> dropSet = sgr.fillDropSet;
     dropSet.push_back(sgr.nBSplines);
@@ -1375,6 +1479,12 @@ Real minInterNodeGap(const std::vector<Real> &grid, Real tol)
 
 Real computeEAcc(Real nodeSpacing, Real mass)
 {
+    // E = pi^2 / (2 * mass * nodeSpacing^2), straight from the derivation in
+    // this function's own tise.hpp doc comment (k >~ pi/dx_node, E = k^2/2m).
+    // The `2.0` here is the standard kinetic-energy mass factor from
+    // E = p^2/(2m) = (hbar*k)^2/(2m) in atomic units (hbar=1) -- a fixed
+    // term of the physics formula itself, not a tunable numerical knob, so
+    // it stays a literal rather than becoming a named constant/parameter.
     return kPi * kPi / (2.0 * mass * nodeSpacing * nodeSpacing);
 }
 
