@@ -305,28 +305,13 @@ ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real rati
 namespace
 {
 constexpr Real kPi = 3.14159265358979323846;
-
-// Shared default sampling parameters for the two "probe a potential's
-// behavior approaching a point" routines, classifyAsymptote (probing
-// outward toward infinity, for REQ-F-030 asymptote classification) and
-// isSingularApproaching (probing inward toward a finite join point, for
-// A4a structure detection). Both build a geometric sequence of sample
-// points and feed it to classifySequenceConvergence, so they share these
-// defaults; each still takes its own optional parameter so a caller can
-// override just one call site without affecting the other.
-constexpr int  kDefaultAsymptoteNumSamples = 16;  // enough points for the tail-window
-                                                   // power-law fit (needs >= ~7) with
-                                                   // margin for the divergence pre-check
-constexpr Real kDefaultAsymptoteRatio = 4.0;      // geometric growth/shrink factor between
-                                                   // samples; large enough to reach the
-                                                   // true asymptotic regime in 16 steps
-                                                   // without so large a step that early
-                                                   // samples overflow/underflow
-constexpr Real kDefaultAsymptoteBackupScale = 1.0; // floor on the first sample's offset
-                                                    // when the reference point is at/near
-                                                    // x=0, where |reference| alone would
-                                                    // give a degenerate zero-width step
 }
+// kDefaultAsymptoteNumSamples/kDefaultAsymptoteRatio/kDefaultAsymptoteBackupScale
+// (shared by classifyAsymptote below and isSingularApproaching further down
+// this file) live in tise.hpp, not here -- see the comment there for why:
+// classifyAsymptote's own default-argument list in the header must be able
+// to name them, which an anonymous-namespace constant confined to this .cpp
+// file cannot provide.
 
 Real case3WindowFunction(Real x, Real R, Real delta, DomainSide side)
 {

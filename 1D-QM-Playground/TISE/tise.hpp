@@ -172,6 +172,33 @@ struct AsymptoteClassification
     bool             warningEmitted;
 };
 
+// Shared default sampling parameters for the two "probe a potential's
+// behavior approaching a point" routines: classifyAsymptote (probing
+// outward toward infinity, for REQ-F-030 asymptote classification, below)
+// and isSingularApproaching (probing inward toward a finite join point,
+// for A4a structure detection, file-local to tise.cpp). Both build a
+// geometric sequence of sample points and feed it to
+// classifySequenceConvergence, so they share these defaults -- declared
+// here (rather than tise.cpp's anonymous namespace, where single-function
+// constants like kValueJumpTol live) specifically because classifyAsymptote's
+// own default-argument list, below, must be able to reference them; an
+// anonymous-namespace constant is only visible within tise.cpp and can't be
+// named from a header default. isSingularApproaching's own defaults (in
+// tise.cpp) reference these same symbols instead of re-declaring their own
+// copies, so the two functions can never silently drift apart.
+constexpr int  kDefaultAsymptoteNumSamples = 16;  // enough points for the tail-window
+                                                   // power-law fit (needs >= ~7) with
+                                                   // margin for the divergence pre-check
+constexpr Real kDefaultAsymptoteRatio = 4.0;      // geometric growth/shrink factor between
+                                                   // samples; large enough to reach the
+                                                   // true asymptotic regime in 16 steps
+                                                   // without so large a step that early
+                                                   // samples overflow/underflow
+constexpr Real kDefaultAsymptoteBackupScale = 1.0; // floor on the first sample's offset
+                                                    // when the reference point is at/near
+                                                    // x=0, where |reference| alone would
+                                                    // give a degenerate zero-width step
+
 // Classify the potential's asymptote on the given unbounded domain side
 // (REQ-F-030). Assumes the caller already knows this side is unbounded;
 // bounded sides always get a plain Dirichlet wall and never call this.
@@ -179,8 +206,8 @@ struct AsymptoteClassification
 // per SDD Sec. 8's warning taxonomy).
 //
 // Optional parameters (each defaults to the value this function has always
-// used, matching the shared constants of the same magnitude defined
-// alongside classifyAsymptote's definition in tise.cpp):
+// used; `numSamples`/`ratio`/`backupScale` default to the shared constants
+// above, also used by isSingularApproaching):
 //   - `numSamples`/`ratio`: V is sampled at `numSamples` points growing
 //     geometrically outward from the domain boundary by a factor of `ratio`
 //     per step, then handed to classifySequenceConvergence.
@@ -197,9 +224,9 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
                                            const SpatialDomain &domain,
                                            DomainSide side,
                                            std::ostream &warnOut = std::cerr,
-                                           int numSamples = 16,
-                                           Real ratio = 4.0,
-                                           Real backupScale = 1.0,
+                                           int numSamples = kDefaultAsymptoteNumSamples,
+                                           Real ratio = kDefaultAsymptoteRatio,
+                                           Real backupScale = kDefaultAsymptoteBackupScale,
                                            Real coulombExponentTol = 0.15,
                                            Real transitionWidthFraction = 0.1);
 
@@ -597,6 +624,14 @@ struct StrategicGridResult
                                 // is affected regardless of B-spline removal
 };
 
+// Default tolerance for buildStrategicGridAndDropSet's `edgeTolerance`
+// below: how close a detected Singular join's x must be to rMin/rMax to
+// be treated as "at the domain edge" rather than a genuine interior
+// singularity. 1e-9 is comfortably above float round-off on the grid
+// coordinates involved (Real is double) while comfortably below any
+// physically meaningful distance between a join and the box wall.
+constexpr Real kDefaultEdgeTolerance = 1e-9;
+
 // `edgeTolerance`: how close a detected Singular join's x must be to rMin/
 // rMax to be treated as "at the domain edge" (already regularized by the
 // classic wall exclusion, so no extra B-spline removal is applied there --
@@ -605,7 +640,7 @@ struct StrategicGridResult
 // has always used.
 StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMin, Real rMax,
                                                    const std::map<std::string, std::string> &potential,
-                                                   Real edgeTolerance = 1e-9);
+                                                   Real edgeTolerance = kDefaultEdgeTolerance);
 
 struct SolveTISEResult
 {
