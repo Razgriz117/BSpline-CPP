@@ -574,7 +574,41 @@ class TestFiniteSquareWellRealSubprocess:
             expected = self._analytic_phase_shift(row.energy, self.V0, self.A)
             got = self._wrap_mod_pi(row.delta)
             want = self._wrap_mod_pi(expected)
-            assert got == pytest.approx(want, abs=5e-2)
+            # Tightened from the original 5e-2: after the strategic-knot fix
+            # this basis actually achieves <=2.4e-4 rad
+            # (docs/tests/reports/8236239/finite_square_well.md) -- the
+            # looser bound didn't discriminate the pre-fix ~0.03-0.6 rad
+            # error from the current accuracy.
+            assert got == pytest.approx(want, abs=5e-4)
+
+    def test_ddelta_dE_matches_analytic_derivative(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # Closes H2 (docs/planning/tise-known-solution-followup-plan.md):
+        # dDeltaDE previously finite-differenced sin(2*delta) across the
+        # production grid and divided by 2*cos(2*delta), giving e.g. +2.4
+        # where the true slope is -19.4. The reference here is a fine
+        # central difference of the SAME closed-form phase-shift formula
+        # (not reusing any solver code), independent of the solver's own
+        # internal fine-step mechanism.
+        config = _load_known_solution_config("finite_square_well", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.phase_shifts) > 0
+        h = 1e-5
+        for row in data.phase_shifts:
+            expected = (
+                self._analytic_phase_shift(row.energy + h, self.V0, self.A)
+                - self._analytic_phase_shift(row.energy - h, self.V0, self.A)
+            ) / (2 * h)
+            # abs=0.05 comfortably covers the largest observed deviation
+            # (~0.023, at E=0.5 -- the grid point closest to a confined
+            # eigenvalue, a known ADR-0007 box-discretization effect) while
+            # remaining many orders of magnitude tighter than the old
+            # formula's errors (which ran to double digits).
+            assert row.ddelta_dE == pytest.approx(expected, abs=0.05)
 
 
 class TestHydrogenConfigFileRealSubprocess:
@@ -597,17 +631,61 @@ class TestHydrogenConfigFileRealSubprocess:
         assert energies[1] == pytest.approx(-1 / 18, abs=1e-6)
         assert energies[2] == pytest.approx(-1 / 32, abs=1e-6)
 
+    def test_phase_shift_mod_pi_matches_report_reference(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # Reference: docs/tests/reports/8236239/hydrogen.md section 4 table,
+        # "delta mod pi (solver)" column -- independently cross-checked
+        # there against the same atan(k*psi/psi')-kR formula applied to the
+        # exact Coulomb function F_1. Compared mod pi here since the
+        # solver's own delta is a continuously-unwrapped trajectory (H3)
+        # and can differ from the report's mod-pi-reduced table by an
+        # integer multiple of pi.
+        config = _load_known_solution_config("hydrogen", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        expected_mod_pi = {0.1: 0.807586, 0.2: -1.036321, 0.3: 1.150641,
+                            0.4: 0.553418, 0.5: 0.120704}
+        assert len(data.phase_shifts) == len(expected_mod_pi)
+        for row in data.phase_shifts:
+            want = expected_mod_pi[round(row.energy, 1)]
+            got = row.delta - math.pi * round((row.delta - want) / math.pi)
+            assert got == pytest.approx(want, abs=1e-4)
+
+    def test_ddelta_dE_no_longer_diverges(self, tise_solver_binary: Path, tmp_path: Path):
+        # Regression pin for H2 (docs/planning/tise-known-solution-followup-
+        # plan.md): the old sin(2*delta)/cos(2*delta) formula gave +211.4 at
+        # E=0.1 (docs/tests/reports/8236239/hydrogen.md), from dividing by
+        # cos(2*delta)~=-0.044 -- an inherent 0/0 conditioning problem at
+        # delta=pi/4 (mod pi/2), not fixable by a finer step. The fixed
+        # fine-local-difference formula gives ~-19.8 there.
+        config = _load_known_solution_config("hydrogen", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.phase_shifts) > 0
+        for row in data.phase_shifts:
+            assert abs(row.ddelta_dE) < 50
+
 
 class TestInteriorSingularityRealSubprocess:
     """interior_singularity.yaml: a genuine INTERIOR Singular potential join
     (not at a domain edge like hydrogen's), run through the real tise_solver
-    binary. Before Part A's solveTISE/tise_solver orchestration unification,
+    binary. Before Part A of the original release-readiness plan,
     tise_solver_main.cpp had no A4b singular-B-spline-removal path at all
-    and would have silently produced degraded eigenvalues with
-    EXIT_SUCCESS and zero warning. Mirrors TISE/tests/test_tise.cpp's
-    SolveTISETest.InteriorSingularityTriggersBSplineRemoval at the
-    real-binary level -- this is the test that would have caught a missed
-    drop-set-threading site in tise_solver_main.cpp."""
+    and would have silently produced degraded eigenvalues with EXIT_SUCCESS
+    and zero warning. Before the known-solution-verification follow-up
+    plan's Part A, the A4b removal that WAS wired dropped every B-spline
+    touching the singular point on a simple-knot grid -- forcing a
+    multi-bohr dead zone and producing eigenvalues 41% too high on the
+    field-free side (docs/tests/reports/8236239/interior_singularity.md).
+    Fixed via knot multiplicity + single-B-spline drop, exactly mirroring
+    domain-edge treatment; the exact reference spectrum below is the split-
+    domain union of box states on [0,20] and repulsive-Coulomb states on
+    [20,40] (report section 3)."""
 
     def test_all_eigenvalues_and_eigenvectors_finite(
         self, tise_solver_binary: Path, tmp_path: Path
@@ -624,33 +702,51 @@ class TestInteriorSingularityRealSubprocess:
             for value in evec_row:
                 assert math.isfinite(value)
 
-    def test_bspline_removal_actually_shrinks_the_basis_below_classic(
+    def test_bspline_removal_uses_knot_multiplicity_not_classic_dropset(
         self, tise_solver_binary: Path, tmp_path: Path
     ):
-        # nBSplines = n_nodes+order-2 = 41+8-2 = 47. The classic dropset
-        # ({1} only) would give nEnBound = 47-1-1 = 45. If the interior
-        # singularity's A4b removal isn't actually reaching this config
-        # through the real binary (e.g. a regression reintroducing the
-        # pre-Part-A plain-uniform-grid/classic-dropset-only construction),
-        # nEnBound would silently drift back up to 45 -- this is the
-        # concrete number that would catch that regression. Verified
-        # manually during Part A's implementation: this config actually
-        # produces 36.
+        # nBSplines = n_nodes+order-2 = 41+8-2 = 47 on the OLD simple-knot
+        # grid; the classic dropset ({1} only) would give nEnBound = 45. The
+        # knot-multiplicity fix grows the basis by 6 (one interior join,
+        # extraMultiplicity=order-2=6) and drops only 2 physical indices
+        # (left edge + the single spline non-zero at the join), giving
+        # nEnBound = (47+6)-2-1 = 50 -- the concrete number that would catch
+        # either a regression back to the pre-fix cluster-drop (36) or an
+        # accidental fall-back to the classic dropset entirely (45).
         config = _load_known_solution_config("interior_singularity", tmp_path)
         tise_dir = tmp_path / "data" / "tise"
         run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
         data = read_tise_output(tise_dir)
 
-        assert len(data.eigenvalues) < 45
+        assert len(data.eigenvalues) == 50
+
+    def test_eigenvalues_match_exact_split_domain_spectrum(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("interior_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        energies = [row.energy for row in data.eigenvalues]
+        assert energies[0] == pytest.approx(0.0123370055, abs=1e-9)  # box n=1
+        assert energies[1] == pytest.approx(0.0493480220, abs=1e-9)  # box n=2
+        assert energies[2] == pytest.approx(0.1005405216, abs=1e-8)  # Coulomb root 1
 
 
 class TestRightEdgeSingularWarningRealSubprocess:
     """right_edge_singularity.yaml: potential singular exactly AT x=rMax
     (1/(100-x)) -- distinct from hydrogen's LEFT-edge singularity. Before
-    Part A, tise_solver_main.cpp had no access to this diagnostic at all
-    (only solveTISE/H-BoundStates, via a bare stderr print, could detect
-    it) -- this is the first-ever real-subprocess proof it reaches
-    warnings.json through the actual production binary."""
+    Part A of the original release-readiness plan, tise_solver_main.cpp had
+    no access to this diagnostic at all (only solveTISE/H-BoundStates, via
+    a bare stderr print, could detect it). Before the known-solution-
+    verification follow-up plan's Part D, continuum construction completed
+    anyway and wrote phase_shifts.dat/continuum_state_NNN.dat even though
+    the result is not a solution of the problem (psi_E(rMax) must vanish
+    physically; the construction instead produces essentially B_N alone,
+    30x larger at the wall than anywhere in the interior --
+    docs/tests/reports/8236239/right_edge_singularity.md section 4.3).
+    Continuum construction is now refused entirely for this config."""
 
     def test_warnings_json_contains_right_edge_singular_warning(
         self, tise_solver_binary: Path, tmp_path: Path
@@ -663,6 +759,33 @@ class TestRightEdgeSingularWarningRealSubprocess:
 
         messages = [w["message"] for w in warnings]
         assert any("singular at the right domain edge" in m for m in messages)
+
+    def test_bound_state_solve_is_unaffected(self, tise_solver_binary: Path, tmp_path: Path):
+        # The refusal is scoped to continuum construction only -- the bound
+        # states (17 below E=0.2, per the report) are still solved and
+        # written normally.
+        config = _load_known_solution_config("right_edge_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.eigenvalues) > 0
+        assert data.eigenvalues[0].energy == pytest.approx(0.0149922127, abs=1e-9)
+
+    def test_no_continuum_output_files_are_written(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("right_edge_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert not (tise_dir / "phase_shifts.dat").exists()
+        assert not list(tise_dir.glob("continuum_state_*.dat"))
+        assert data.phase_shifts == []
+        assert data.continuum_states == []
 
 
 class TestBoundStateDiagnosticsRealSubprocess:
@@ -705,13 +828,38 @@ class TestBoundStateDiagnosticsRealSubprocess:
         assert not any("bound state 8 " in m for m in colliding)
 
 
+def _load_case3_config_with_continuum_enabled(tmp_path: Path) -> Path:
+    """case3_irregular_tail.yaml as committed, but with tise.continuum
+    enabled -- exercises the "taper actually applied" branch (the
+    committed file itself has continuum disabled, exercising the
+    "taper gated off" branch instead -- see
+    docs/tests/reports/8236239/case3_irregular_tail.md recommendation 1)."""
+    with open(_TESTS_DIR / "case3_irregular_tail.yaml") as f:
+        cfg = yaml.safe_load(f)
+    cfg["run"]["output_dir"] = str(tmp_path / "data")
+    cfg["tise"]["continuum"] = {
+        "enabled": True, "E_threshold": 0.0, "E_max": 0.1, "n_energies": 2, "n_pts": 50,
+    }
+    out = tmp_path / "case3_irregular_tail_continuum_enabled.yaml"
+    with open(out, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return out
+
+
 class TestCase3RemediationRealSubprocess:
     """case3_irregular_tail.yaml: "1/x^1.5" on (0.1,inf), same
     proven Case-3-triggering potential TISE/tests/test_tise.cpp's
     ClassifyAsymptoteTest.Case3IrregularForPowerLawOneAndHalf and
-    FillBandedMatricesCase3WindowTest validate directly. Before Part B,
-    classifyAsymptote could DETECT this and warn, but nothing ever tapered
-    the potential -- detection without remediation."""
+    FillBandedMatricesCase3WindowTest validate directly. Before Part B of
+    the original release-readiness plan, classifyAsymptote could DETECT
+    this and warn, but nothing ever tapered the potential -- detection
+    without remediation. Before the known-solution-verification follow-up
+    plan's Part C, the taper (once wired) was applied UNCONDITIONALLY, even
+    with continuum disabled (as this committed YAML has it) -- shifting
+    bound-state energies by 1.5e-5 to 1.5e-4 Ha for zero benefit, since the
+    taper exists solely to satisfy matchAsymptotic's flat-asymptote
+    assumption for continuum matching
+    (docs/tests/reports/8236239/case3_irregular_tail.md)."""
 
     def test_all_eigenvalues_finite(self, tise_solver_binary: Path, tmp_path: Path):
         config = _load_known_solution_config("case3_irregular_tail", tmp_path)
@@ -723,10 +871,37 @@ class TestCase3RemediationRealSubprocess:
         for row in data.eigenvalues:
             assert math.isfinite(row.energy)
 
-    def test_warnings_json_reports_tapering_remediation(
+    def test_ground_state_matches_untapered_reference_when_continuum_disabled(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # Richardson-extrapolated finite-difference reference for the RAW
+        # (untapered) 1/x^1.5 potential, report section 4, E^raw column,
+        # state 1. With continuum disabled (as committed), no taper should
+        # be applied at all -- this is the number that would have caught
+        # the pre-fix unconditional-taper bug (which gave 0.0092216090127,
+        # 1.5e-5 lower).
+        config = _load_known_solution_config("case3_irregular_tail", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert data.eigenvalues[0].energy == pytest.approx(0.0092368363, abs=1e-7)
+
+    def test_warnings_json_reports_no_taper_when_continuum_disabled(
         self, tise_solver_binary: Path, tmp_path: Path
     ):
         config = _load_known_solution_config("case3_irregular_tail", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        warnings = json.loads((tise_dir / "warnings.json").read_text())
+
+        messages = [w["message"] for w in warnings]
+        assert any("Irregular" in m and "tapering" not in m for m in messages)
+
+    def test_warnings_json_reports_tapering_when_continuum_enabled(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_case3_config_with_continuum_enabled(tmp_path)
         tise_dir = tmp_path / "data" / "tise"
         run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
         warnings = json.loads((tise_dir / "warnings.json").read_text())

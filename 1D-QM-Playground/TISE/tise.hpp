@@ -244,8 +244,29 @@ std::vector<std::vector<Real>> buildContinuumState(
 // precomputeBoundaryCoupling -- must match whatever drop-set actually
 // produced `eigen`/`states`, or coefficients will be silently misattributed
 // to the wrong physical B-spline indices before bs.eval is called.
+//
+// `order`/`Hmat`/`Smat`: the same inputs buildContinuumState took to build
+// `states` -- needed here too, internally, to evaluate psi_E/psi_E'(R) at
+// auxiliary energies a small step off the requested grid (see `fineDE`
+// below), which `states` alone (built only at the production grid) can't
+// provide.
+//
+// `result.delta` is stored as a CONTINUOUS, unwrapped trajectory (first
+// point normalized into (-pi/2, pi/2], each subsequent point tracked for
+// pi-periodic atan branch jumps), not raw atan(...)-kR -- see
+// docs/tests/reports/8236239/free_particle.md ("phase_shifts.png ...
+// uninformative as drawn"). `result.dDeltaDE[i]` is a central difference of
+// this same raw-but-unwrapped delta over a small internal step `fineDE`
+// around grid[i] (clamped to keep E-h > 0), NOT a finite difference across
+// the (often much coarser, and non-smooth near delta=pi/4 mod pi/2 for any
+// step size) production grid -- see
+// docs/tests/reports/8236239/finite_square_well.md section 7 item 1 for why
+// the previous sin(2*delta)/cos(2*delta) construction across the production
+// grid was replaced.
 AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, const EigenResult &eigen, std::vector<Real> grid, Real R,
-                                  std::optional<std::vector<int>> dropSet = std::nullopt);
+                                  int order, const std::vector<Real> &Hmat, const std::vector<Real> &Smat,
+                                  std::optional<std::vector<int>> dropSet = std::nullopt,
+                                  Real fineDE = 1e-3);
 
 // Writes phase_shifts.dat-style output (epsilon_i, delta, dDeltaDE) to `out`,
 // and one continuum_state_NNN.dat-style block (x, psi_E(x)) per energy to

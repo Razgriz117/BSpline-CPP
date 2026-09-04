@@ -647,7 +647,9 @@ AsymptoticResult matchAsymptotic(
     std::vector<std::vector<Real>> states,
     const EigenResult &eigen,
     std::vector<Real> grid, Real R,
-    std::optional<std::vector<int>> dropSet
+    int order, const std::vector<Real> &Hmat, const std::vector<Real> &Smat,
+    std::optional<std::vector<int>> dropSet,
+    Real fineDE
 )
 {
     AsymptoticResult result;
@@ -663,6 +665,12 @@ AsymptoticResult matchAsymptotic(
     // docs/planning/engineer-a-plan-A4-wiring-design.md.
     const ColumnMap map = columnIndexMap(nBSplines, dropSet.value_or(std::vector<int>{1}));
     const std::vector<int> &physicalOf = map.physicalOf;
+
+    // Needed only for the fine-step dDeltaDE evaluations below (rawDeltaAt)
+    // -- cheap (a boundary-coupling solve, not a re-diagonalization), and
+    // independent of the passed-in `states` (built only at the production
+    // grid, which the fine steps fall outside of).
+    auto [coeffs1, coeffs2] = precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen, nBSplines, dropSet);
 
     // for each E, first find \bar psi_E(R) and \bar psi'_E(R), then calculate A_E, delta
     for (int E_idx = 0; E_idx < grid.size(); ++E_idx)
@@ -680,7 +688,7 @@ AsymptoticResult matchAsymptotic(
         Real k = sqrt(2 * grid[E_idx]);
 
         result.A_E[E_idx] = sqrt(
-            (2 / M_PI) / 
+            (2 / M_PI) /
             (
                 k * pow(psi_R, 2) +
                 pow(psiPrime_R, 2) / k
@@ -693,33 +701,73 @@ AsymptoticResult matchAsymptotic(
         ) - (k * R);
     }
 
-    // now that result.delta is filled, we can find result.dDeltaDE
-    for (int E_idx = 0; E_idx < grid.size(); ++E_idx)
-    {
-        Real dE = grid[1] - grid[0];
-        Real dSin2DeltaDE;
-        if (E_idx == 0)
-            dSin2DeltaDE = (std::sin(2*result.delta[E_idx+1]) - std::sin(2*result.delta[E_idx])) / dE;
-        else if (E_idx == grid.size() - 1)
-            // Standard backward difference (f(i)-f(i-1))/dE for f'(i) --
-            // confirmed correct (not flipped), verified against an
-            // independent fine-centered-difference estimate in a locally-
-            // smooth (pole-avoiding) energy window: see
-            // MatchAsymptoticDDeltaDESignTest.
-            // LastGridPointMatchesIndependentFineCentralDifference,
-            // TISE/tests/test_tise.cpp. A naive full-scale test using this
-            // well's own default energy grid instead disagreed by ~10%, but
-            // that was traced to this potential's densely-packed
-            // positive-energy pseudostate ladder (poles roughly 0.05-0.2
-            // apart) making delta(E) genuinely non-smooth near ANY
-            // 0.1-scale window, not a sign/formula error -- the same
-            // known ADR-0007 box-discretization-artifact effect
-            // buildContinuumState's own pole warning already flags.
-            dSin2DeltaDE = (std::sin(2*result.delta[E_idx]) - std::sin(2*result.delta[E_idx-1])) / dE;
-        else
-            dSin2DeltaDE = (std::sin(2*result.delta[E_idx+1]) - std::sin(2*result.delta[E_idx-1])) / (2*dE);
+    // === H2/H3 fix (docs/tests/reports/8236239/finite_square_well.md,
+    // hydrogen.md): the previous dDeltaDE finite-differenced sin(2*delta)
+    // across the PRODUCTION energy grid and divided by 2*cos(2*delta). That
+    // failed two independent ways: the production grid is far too coarse
+    // for delta's actual variation (routinely O(1) rad between points), and
+    // the sin/cos inversion is an inherent 0/0 conditioning problem at
+    // delta=pi/4 (mod pi/2) that no step size fixes. Replaced by: (1)
+    // storing a CONTINUOUS, unwrapped delta(E) instead of raw
+    // atan(...)-kR, and (2) computing dDeltaDE as a central difference of
+    // that same raw delta over a small internal step around each requested
+    // energy, independent of the production grid's own spacing.
+    auto rawDeltaAt = [&](Real E) -> Real {
+        std::vector<Real> s(nEn + 1, 0.0);
+        for (int i = 0; i < nEn; ++i)
+            s[i] = (coeffs1[i] - E * coeffs2[i]) / (E - eigen.values[i]);
+        s[nEn] = 1.0;
+        std::vector<Real> fc = continuumStateToBSplineCoeffs(s, eigen, nBSplines, physicalOf);
+        Real psi_R = bs.eval(R, fc.data(), fc.size(), 0);
+        Real psiPrime_R = bs.eval(R, fc.data(), fc.size(), 1);
+        Real k = std::sqrt(2 * E);
+        return std::atan((k * psi_R) / psiPrime_R) - (k * R);
+    };
 
-        result.dDeltaDE[E_idx] = dSin2DeltaDE / (2.0 * std::cos(2.0 * result.delta[E_idx]));
+    for (std::size_t E_idx = 0; E_idx < grid.size(); ++E_idx)
+    {
+        const Real E = grid[E_idx];
+        const Real h = std::min(fineDE, 0.5 * E); // keep E-h strictly > 0
+        Real deltaMinus = rawDeltaAt(E - h);
+        Real deltaPlus  = rawDeltaAt(E + h);
+        // Unwrap this tiny window relative to itself (atan's branch jumps
+        // by pi when psiPrime_R crosses zero) -- a resonance landing
+        // exactly inside so small a window is already surfaced separately
+        // by buildContinuumState's pole-proximity warning.
+        Real diff = deltaPlus - deltaMinus;
+        while (diff > M_PI / 2)  { deltaPlus -= M_PI; diff -= M_PI; }
+        while (diff < -M_PI / 2) { deltaPlus += M_PI; diff += M_PI; }
+        result.dDeltaDE[E_idx] = (deltaPlus - deltaMinus) / (2.0 * h);
+    }
+
+    // Unwrap the stored production-grid delta(E) itself into a continuous
+    // trajectory (closes H3 -- docs/tests/reports/8236239/free_particle.md:
+    // raw atan(...)-kR runs to -100+ and makes phase_shifts.png
+    // "uninformative as drawn"). Normalize the first point into
+    // (-pi/2, pi/2], then track pi-periodic branch jumps thereafter --
+    // using a derivative-informed (not just closest-to-previous-raw-value)
+    // prediction: delta genuinely changes by more than pi/2 between
+    // production grid points for some potentials (e.g. finite_square_well
+    // at its default n_energies:5 grid, dDeltaDE ~ -13 to -19 per unit E,
+    // ~0.1 apart -- an actual change of ~1.5-2 rad, comparable to or larger
+    // than the pi/2 "closest branch" heuristic can disambiguate on its
+    // own). result.dDeltaDE (computed above, from the fine-step method,
+    // independent of production grid spacing) gives an accurate LOCAL
+    // slope at each already-unwrapped point; a first-order Euler
+    // extrapolation from it predicts the next point far more reliably than
+    // assuming the true change is small.
+    if (!result.delta.empty())
+    {
+        while (result.delta[0] > M_PI / 2)   result.delta[0] -= M_PI;
+        while (result.delta[0] <= -M_PI / 2) result.delta[0] += M_PI;
+        for (std::size_t E_idx = 1; E_idx < result.delta.size(); ++E_idx)
+        {
+            const Real predicted = result.delta[E_idx - 1] +
+                result.dDeltaDE[E_idx - 1] * (grid[E_idx] - grid[E_idx - 1]);
+            Real diff = result.delta[E_idx] - predicted;
+            while (diff > M_PI / 2)  { result.delta[E_idx] -= M_PI; diff -= M_PI; }
+            while (diff < -M_PI / 2) { result.delta[E_idx] += M_PI; diff += M_PI; }
+        }
     }
 
     return result;
@@ -1159,6 +1207,32 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
     // old buildUniformRadialGrid call).
     auto joins = detectPotentialStructure(potential);
     auto knots = strategicKnotsFromJoins(joins, order);
+
+    // docs/tests/reports/8236239/interior_singularity.md: a genuine INTERIOR
+    // Singular join (not already regularized by a domain edge) needs knot
+    // multiplicity order-1 -- one short of a full clamp -- so that exactly
+    // ONE B-spline is non-zero there, mirroring how a domain edge's clamped
+    // knots leave exactly one boundary B-spline (B_1/B_N) non-zero. Without
+    // this, the join sits on an ordinary simple knot and the fillDropSet
+    // loop below (bSplinesTouchingX) would drop the entire ~order-sized
+    // touching cluster instead of the single point value, forcing every
+    // eigenfunction to zero over a multi-bohr "dead zone" around the join --
+    // confirmed to produce eigenvalues 41% too high on the field-free side
+    // of a box/repulsive-Coulomb split. Edge-Singular joins are excluded
+    // here (extraMultiplicity 0, same as strategicKnotsFromJoins already
+    // gives every Singular join) -- they're untouched, exactly as before.
+    for (const auto &j : joins)
+    {
+        if (j.type != JoinType::Singular)
+            continue;
+        const bool atLeftEdge  = std::abs(j.x - rMin) < 1e-9;
+        const bool atRightEdge = std::abs(j.x - rMax) < 1e-9;
+        if (atLeftEdge || atRightEdge)
+            continue;
+        if (order - 2 > 0)
+            knots.push_back({j.x, order - 2});
+    }
+
     auto grid  = buildStrategicRadialGrid(nNodes, rMin, rMax, knots);
     const int nNodesActual = static_cast<int>(grid.size());
 
@@ -1174,7 +1248,7 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
     // Singular join located AT a domain edge (e.g. hydrogen's Coulomb
     // singularity coinciding with the left wall at x=rMin) is already
     // regularized by the classic single-B-spline wall exclusion (that's
-    // exactly what "drop B_1" already enforces: u(rMin)=0). Removing the
+    // exactly what "drop B_1" already enforces: u(rMin)=0). Removing a
     // FULL bSplinesTouchingX cluster there instead -- verified empirically
     // during implementation -- guts the basis precisely where a
     // near-origin-peaked wavefunction (e.g. hydrogen's ground state) has
@@ -1183,6 +1257,17 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
     // order=8), not just reduced accuracy. A genuine INTERIOR singularity
     // (no piece of the domain boundary already regularizes it) is the case
     // this mechanism is actually for.
+    //
+    // For an interior join, dropping the FULL touching cluster (as this
+    // used to do) is likewise too aggressive: on the simple-knot grid that
+    // used to be built here, ~order B-splines touch the point, and removing
+    // all of them forces every eigenfunction to zero over a multi-bohr dead
+    // zone around it (docs/tests/reports/8236239/interior_singularity.md,
+    // confirmed 41% eigenvalue error). The knot-multiplicity bump added
+    // above leaves exactly ONE B-spline non-zero at the join -- find it
+    // numerically (bs.eval at j.x for each candidate the multiplicity-aware
+    // grid now makes bSplinesTouchingX return) and drop only that one,
+    // exactly mirroring the single-B-spline edge treatment.
     //
     // B_N (nBSplines) is deliberately never added to fillDropSet even if a
     // right-edge cluster would include it -- continuum construction needs
@@ -1209,8 +1294,13 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
         if (atLeftEdge || atRightEdge)
             continue; // already regularized by the classic wall exclusion
 
-        auto touching = bSplinesTouchingX(nNodesActual, order, grid, j.x);
-        fillDropSet.insert(fillDropSet.end(), touching.begin(), touching.end());
+        auto candidates = bSplinesTouchingX(nNodesActual, order, grid, j.x);
+        constexpr Real kNonzeroTol = 1e-6; // B-spline peak values are O(1);
+                                            // roundoff for a mathematically-
+                                            // zero candidate is ~1e-12.
+        for (int idx : candidates)
+            if (std::abs(bs.eval(j.x, idx, 0)) > kNonzeroTol)
+                fillDropSet.push_back(idx);
     }
     std::sort(fillDropSet.begin(), fillDropSet.end());
     fillDropSet.erase(std::unique(fillDropSet.begin(), fillDropSet.end()), fillDropSet.end());
@@ -1240,7 +1330,7 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
     auto energyGrid = buildEnergyGrid(E_threshold, E_max, N_E);
     std::vector<std::vector<tise::Real>> states =
         buildContinuumState(order, sgr.nEnBound, H, S, er, energyGrid, sgr.nBSplines, sgr.fillDropSet);
-    AsymptoticResult ar = matchAsymptotic(sgr.bs, states, er, energyGrid, rMax, sgr.fillDropSet);
+    AsymptoticResult ar = matchAsymptotic(sgr.bs, states, er, energyGrid, rMax, order, H, S, sgr.fillDropSet);
 
     std::ofstream phaseShiftsOut("phase_shifts.dat");
     std::vector<std::ofstream> continuumStateFiles;

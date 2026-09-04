@@ -267,13 +267,30 @@ int main(int argc, char *argv[])
                         addWarning(warnings, "physics", warnOut.str());
                     if (classification.asymptoteCase == tise::AsymptoteCase::Irregular)
                     {
-                        case3RightR = rMax;
-                        case3RightDelta = classification.recommendedTransitionWidth;
                         std::ostringstream msg;
-                        msg << "potential's right-edge tail is Irregular (Case 3); tapering it "
-                               "to 0 over a transition width of " << classification.recommendedTransitionWidth
-                            << " before x=" << rMax << " rather than integrating the raw tail up "
-                               "to the wall (see evaluateWindowedPotential).";
+                        msg << "potential's right-edge tail is Irregular (Case 3)";
+                        // Gated on continuum.enabled (release-readiness
+                        // follow-up plan, Part C): the taper exists solely
+                        // to make matchAsymptotic's flat-asymptote
+                        // assumption valid at R=rMax for continuum
+                        // matching. Applying it unconditionally shifted
+                        // bound-state energies by up to 1.5e-4 Ha for zero
+                        // benefit whenever continuum was disabled
+                        // (docs/tests/reports/8236239/case3_irregular_tail.md).
+                        if (continuumEnabled)
+                        {
+                            case3RightR = rMax;
+                            case3RightDelta = classification.recommendedTransitionWidth;
+                            msg << "; tapering it to 0 over a transition width of "
+                                << classification.recommendedTransitionWidth
+                                << " before x=" << rMax << " rather than integrating the raw tail up "
+                                   "to the wall (see evaluateWindowedPotential).";
+                        }
+                        else
+                        {
+                            msg << "; continuum is disabled, so the raw (untapered) potential is "
+                                   "integrated to the wall -- the bound-state spectrum is unaffected.";
+                        }
                         addWarning(warnings, "physics", msg.str());
                     }
                 }
@@ -327,14 +344,31 @@ int main(int argc, char *argv[])
         // the box -- previously only solveTISE (the H-BoundStates path)
         // could detect this, via its own bare-cerr warning; this file had
         // no access to it at all before ADR-0009's shared construction.
-        if (sgr.rightEdgeSingular)
+        // Only meaningful when continuum construction is actually going to
+        // run below -- the bound-state solve itself is entirely unaffected
+        // by a right-edge singularity (the same classic B_N wall-exclusion
+        // that already handles hydrogen's origin singularity applies here
+        // too), so there is nothing to warn about when continuum is off.
+        if (sgr.rightEdgeSingular && continuumEnabled)
             addWarning(warnings, "physics",
                        "potential is singular at the right domain edge x=" + std::to_string(rMax) +
                        "; continuum phase-shift matching (matchAsymptotic) assumes a regular "
-                       "boundary there, so continuum results should be treated with suspicion.");
+                       "boundary there, which does not hold here -- skipping continuum "
+                       "construction entirely (no phase_shifts.dat/continuum_state_NNN.dat "
+                       "written). The bound-state solve above is unaffected and still valid.");
 
-        // Continuum construction, gated on tise.continuum.enabled.
-        if (continuumEnabled)
+        // Continuum construction, gated on tise.continuum.enabled AND not
+        // singular at the right domain edge (known-solution-verification
+        // follow-up plan, Part D): a right-edge singularity requires
+        // psi_E(rMax)=0 physically, but B_N -- the "escape" function
+        // continuum construction deliberately keeps -- is exactly the one
+        // basis function that's non-zero there. The resulting "continuum
+        // state" is essentially B_N alone, not a solution of the problem
+        // (docs/tests/reports/8236239/right_edge_singularity.md section
+        // 4.3: 30x larger at the wall than anywhere in the interior).
+        // Refuse rather than write known-wrong output that a downstream
+        // plot would happily draw.
+        if (continuumEnabled && !sgr.rightEdgeSingular)
         {
             // mass=1.0 hardcoded, matching fillBandedMatrices' own
             // internal kinetic-energy term (which already hardcodes /2.0,
@@ -360,7 +394,7 @@ int main(int argc, char *argv[])
                                                       sgr.nBSplines, sgr.fillDropSet, 0.1, poleWarnOut);
             if (!poleWarnOut.str().empty())
                 addWarning(warnings, "physics", poleWarnOut.str());
-            auto ar = tise::matchAsymptotic(bs, states, er, energyGrid, /*R=*/rMax, sgr.fillDropSet);
+            auto ar = tise::matchAsymptotic(bs, states, er, energyGrid, /*R=*/rMax, order, H, S, sgr.fillDropSet);
 
             std::ofstream phaseShiftsOut(outputDir / "phase_shifts.dat");
             std::vector<std::ofstream> continuumStateFiles;

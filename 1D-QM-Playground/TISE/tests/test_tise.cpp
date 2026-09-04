@@ -2324,7 +2324,7 @@ protected:
             {"[0, " + std::to_string(a) + ")", "-" + std::to_string(V0)},
             {"[" + std::to_string(a) + ", " + std::to_string(rMax) + "]", "0.0"}
         };
-        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
+        std::tie(H, S) = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
         eigen  = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
         states = tise::buildContinuumState(order, nEn, H, S, eigen, energyGrid);
     }
@@ -2337,12 +2337,13 @@ protected:
     tise::EigenResult eigen;
     std::vector<double> energyGrid = {0.5};
     std::vector<std::vector<double>> states;
+    std::vector<double> H, S;
 };
 
 TEST_F(SquareWellPhaseShiftTest, MatchesAnalyticSquareWellFormula)
 {
     double R = 15.0; // well outside the well (a=0.5), well inside rMax=20
-    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R);
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R, order, H, S);
 
     double expected = squareWellPhaseShift(energyGrid[0], V0, a);
     EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), wrapPhaseModPi(expected), 5e-3)
@@ -2357,12 +2358,12 @@ TEST_F(SquareWellPhaseShiftTest, PhaseShiftIndependentOfMatchingRadius)
     // analytic-formula tolerance used above.
     std::vector<double> Rs = {10.0, 12.0, 15.0, 18.0};
     double deltaAtR0 = wrapPhaseModPi(
-        tise::matchAsymptotic(bs, states, eigen, energyGrid, Rs[0]).delta[0]);
+        tise::matchAsymptotic(bs, states, eigen, energyGrid, Rs[0], order, H, S).delta[0]);
 
     for (double R : Rs)
     {
         double delta = wrapPhaseModPi(
-            tise::matchAsymptotic(bs, states, eigen, energyGrid, R).delta[0]);
+            tise::matchAsymptotic(bs, states, eigen, energyGrid, R, order, H, S).delta[0]);
         EXPECT_NEAR(delta, deltaAtR0, 1e-3)
             << "phase shift not independent of matching radius R=" << R;
     }
@@ -2396,7 +2397,7 @@ protected:
             {"[" + std::to_string(a) + ", " + std::to_string(rMax) + "]", "0.0"}
         };
         int nEn = nBSplines - static_cast<int>(dropSet.size()) - 1;
-        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, dropSet);
+        std::tie(H, S) = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, dropSet);
         eigen  = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
         states = tise::buildContinuumState(order, nEn, H, S, eigen, energyGrid, nBSplines, dropSet);
     }
@@ -2410,6 +2411,7 @@ protected:
     tise::EigenResult eigen;
     std::vector<double> energyGrid = {0.5};
     std::vector<std::vector<double>> states;
+    std::vector<double> H, S;
 };
 
 // Diagnostic finding (kept as a comment, not a test, since it's expected
@@ -2442,11 +2444,11 @@ TEST_F(MatchAsymptoticDropSetTest, DeltaIsSelfConsistentAcrossMatchingRadii)
     // discriminator between "smaller basis" and "indexing bug."
     std::vector<double> Rs = {5.0, 6.0, 7.0, 8.0};
     double deltaAtR0 = wrapPhaseModPi(
-        tise::matchAsymptotic(bs, states, eigen, energyGrid, Rs[0], dropSet).delta[0]);
+        tise::matchAsymptotic(bs, states, eigen, energyGrid, Rs[0], order, H, S, dropSet).delta[0]);
     for (double R : Rs)
     {
         double delta = wrapPhaseModPi(
-            tise::matchAsymptotic(bs, states, eigen, energyGrid, R, dropSet).delta[0]);
+            tise::matchAsymptotic(bs, states, eigen, energyGrid, R, order, H, S, dropSet).delta[0]);
         EXPECT_NEAR(delta, deltaAtR0, 6e-3)
             << "phase shift not self-consistent across matching radii at R=" << R;
     }
@@ -2455,7 +2457,7 @@ TEST_F(MatchAsymptoticDropSetTest, DeltaIsSelfConsistentAcrossMatchingRadii)
 TEST_F(MatchAsymptoticDropSetTest, StillMatchesAnalyticSquareWellFormulaWithExtraInteriorCluster)
 {
     double R = 7.0; // outside the well; 5 B-spline-widths (2.5) of margin from the dropped cluster's support at x=12
-    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R, dropSet);
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R, order, H, S, dropSet);
 
     double expected = squareWellPhaseShift(energyGrid[0], V0, a);
     EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), wrapPhaseModPi(expected), 5e-3)
@@ -2489,7 +2491,7 @@ protected:
         std::map<std::string, std::string> potential = {
             {"[" + std::to_string(rMin) + ", " + std::to_string(rMax) + "]", "0"}
         };
-        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
+        std::tie(H, S) = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
         eigen  = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
         states = tise::buildContinuumState(order, nEn, H, S, eigen, energyGrid);
     }
@@ -2501,6 +2503,7 @@ protected:
     tise::EigenResult eigen;
     std::vector<double> energyGrid = {0.1};
     std::vector<std::vector<double>> states;
+    std::vector<double> H, S;
 };
 
 TEST_F(FreeParticleContinuumTest, EigenvaluesMatchInfiniteSquareWell)
@@ -2516,13 +2519,13 @@ TEST_F(FreeParticleContinuumTest, EigenvaluesMatchInfiniteSquareWell)
 
 TEST_F(FreeParticleContinuumTest, PhaseShiftMatchesZeroScattering)
 {
-    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax);
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax, order, H, S);
     EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), 0.0, 1e-6);
 }
 
 TEST_F(FreeParticleContinuumTest, WrittenWavefunctionMatchesAnalyticSine)
 {
-    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax);
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax, order, H, S);
 
     std::ostringstream phaseOut;
     std::ostringstream stateOut;
@@ -2567,7 +2570,7 @@ TEST_F(FreeParticleContinuumTest, WavefunctionIsZeroAtLeftWall)
     // Structural Dirichlet condition (physical B-spline #1 excluded from
     // the basis) -- must hold exactly, not just "happens to be small like
     // the rest of the analytic sine curve".
-    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax);
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax, order, H, S);
 
     std::ostringstream phaseOut;
     std::ostringstream stateOut;
@@ -2598,7 +2601,7 @@ TEST_F(FreeParticleContinuumTest, WavefunctionIsZeroAtLeftWall)
 TEST_F(SquareWellPhaseShiftTest, WrittenWavefunctionAgreesWithMatchAsymptoticAtR)
 {
     double R = 15.0;
-    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R);
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, R, order, H, S);
 
     std::ostringstream phaseOut;
     std::ostringstream stateOut;
@@ -2616,19 +2619,23 @@ TEST_F(SquareWellPhaseShiftTest, WrittenWavefunctionAgreesWithMatchAsymptoticAtR
 }
 
 // ---------------------------------------------------------------------------
-// matchAsymptotic's dDeltaDE -- resolving the self-flagged
-// "// TODO: will this sign be wrong" at the LAST energy-grid point's
-// backward-difference branch. Standalone reconstruction of
-// SquareWellPhaseShiftTest's exact basis/potential (not the shared fixture
-// itself, so a custom, non-default energy grid can be used here without
-// touching that fixture) -- delta(E) has a genuinely non-trivial slope for
-// this potential (unlike the free particle, where sin(2*delta)==0
-// everywhere and the finite-difference sign can't be discriminated either
-// way), so this is the right case to settle the question against an
-// independent estimate.
+// matchAsymptotic's dDeltaDE, general self-consistency check. Historical
+// note: this test originally probed a self-flagged "// TODO: will this sign
+// be wrong" in a per-grid-point-position-dependent finite-difference
+// formula (finite-differencing sin(2*delta) across the PRODUCTION energy
+// grid, dividing by 2*cos(2*delta)) -- that formula, and the position
+// dependence, are both gone (docs/tests/reports/8236239/finite_square_well.md
+// section 7 item 1: it was unusable at realistic production grid spacing,
+// not just wrong at one endpoint). dDeltaDE is now a fine-local central
+// difference around each requested energy, identical at every grid index.
+// This test now checks that mechanism's accuracy: matchAsymptotic's own
+// internal fine-step estimate (fineDE, default 1e-3) against an independent
+// manual fine central difference at a much smaller step (1e-6), built via
+// separate direct calls to buildContinuumState/matchAsymptotic rather than
+// reusing any of matchAsymptotic's own internals.
 // ---------------------------------------------------------------------------
 
-TEST(MatchAsymptoticDDeltaDESignTest, LastGridPointMatchesIndependentFineCentralDifference)
+TEST(MatchAsymptoticDDeltaDETest, FineGridEstimateMatchesIndependentFineCentralDifference)
 {
     const int nNodes = 41, order = 6, L = 0;
     const double rMin = 0.0, rMax = 20.0, V0 = 2.0, a = 0.5, R = 15.0;
@@ -2648,36 +2655,26 @@ TEST(MatchAsymptoticDDeltaDESignTest, LastGridPointMatchesIndependentFineCentral
     auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
     auto eigen = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
 
-    // Coarse 3-point grid: dDeltaDE[2] (E=0.6) exercises the code's own
-    // backward-difference branch, the one under question. dE=0.001 rather
-    // than a "production-realistic" ~0.1: this well's positive-energy
-    // pseudostate ladder is densely packed (confirmed empirically: poles at
-    // 0.012, 0.048, 0.108, 0.192, 0.301, 0.433, 0.590, 0.772, 0.978, ... --
-    // roughly 0.05-0.2 apart throughout), so ANY 0.1-scale window contains
-    // or nearly straddles one, making delta(E) genuinely non-smooth there
-    // regardless of which finite-difference formula/sign is used -- not
-    // informative for isolating a sign question specifically. A narrower
-    // window centered away from the nearest pole (0.590441, >0.008 away)
-    // keeps this test in a locally-smooth region.
-    std::vector<double> coarseGrid = {0.599, 0.6, 0.601};
-    auto coarseStates = tise::buildContinuumState(order, nEn, H, S, eigen, coarseGrid);
-    auto coarseResult = tise::matchAsymptotic(bs, coarseStates, eigen, coarseGrid, R);
+    // E=0.6, a locally-smooth window (this well's positive-energy
+    // pseudostate ladder has poles roughly 0.05-0.2 apart -- confirmed
+    // empirically at 0.012, 0.048, 0.108, ..., 0.590, 0.772, 0.978, ...;
+    // 0.6 sits comfortably (>0.008) from the nearest one at 0.590441).
+    std::vector<double> grid = {0.6};
+    auto states = tise::buildContinuumState(order, nEn, H, S, eigen, grid);
+    auto result = tise::matchAsymptotic(bs, states, eigen, grid, R, order, H, S);
 
     // Independent estimate at the SAME E=0.6, via a much finer centered
     // difference of the raw (unwrapped) delta itself over a tiny local
-    // window -- sin(2*delta)'s reformulation is an exact restatement of
-    // d(delta)/dE by the chain rule (d/dE[sin(2d)] = 2cos(2d)*dd/dE, so
-    // dividing by 2cos(2d) recovers dd/dE exactly), so comparing the raw
-    // delta finite difference directly against dDeltaDE is a fair,
-    // apples-to-apples check, not a different quantity.
+    // window -- built entirely separately from matchAsymptotic's own
+    // internal fine-step logic.
     const double h = 1e-6;
     std::vector<double> fineGrid = {0.6 - h, 0.6 + h};
     auto fineStates = tise::buildContinuumState(order, nEn, H, S, eigen, fineGrid);
-    auto fineResult = tise::matchAsymptotic(bs, fineStates, eigen, fineGrid, R);
+    auto fineResult = tise::matchAsymptotic(bs, fineStates, eigen, fineGrid, R, order, H, S);
     const double independentDDeltaDE = (fineResult.delta[1] - fineResult.delta[0]) / (2.0 * h);
 
-    EXPECT_NEAR(coarseResult.dDeltaDE[2], independentDDeltaDE, 5e-3)
-        << "code's backward-difference dDeltaDE at the last grid point: " << coarseResult.dDeltaDE[2]
+    EXPECT_NEAR(result.dDeltaDE[0], independentDDeltaDE, 5e-3)
+        << "matchAsymptotic's fine-grid dDeltaDE: " << result.dDeltaDE[0]
         << ", independent fine-centered-difference estimate: " << independentDDeltaDE;
 }
 
@@ -2711,6 +2708,31 @@ TEST(BuildStrategicGridAndDropSetTest, InteriorSingularityTriggersBSplineRemoval
     EXPECT_GT(static_cast<int>(sgr.fillDropSet.size()), 1);
     EXPECT_NE(std::find(sgr.fillDropSet.begin(), sgr.fillDropSet.end(), 1), sgr.fillDropSet.end());
     EXPECT_EQ(std::find(sgr.fillDropSet.begin(), sgr.fillDropSet.end(), sgr.nBSplines), sgr.fillDropSet.end());
+}
+
+// docs/tests/reports/8236239/interior_singularity.md: the ORIGINAL
+// bSplinesTouchingX-cluster removal above (dropping ~order B-splines
+// touching x=20 on a simple-knot grid) forces every eigenfunction to zero
+// over [19,21] -- a "soft wall" that shrinks the box, not a true interior
+// Dirichlet point. Field-free-side eigenvalues came out 41% high
+// (E1=0.017421 vs exact 0.012337). Report §5/§7 item 1's demonstrated fix:
+// give the interior singular point knot multiplicity order-1 (here 7) so
+// exactly ONE B-spline is non-zero there, and drop only that one -- mirrors
+// how domain edges already resolve to a single dropped B_1/B_N. This
+// reproduces the exact split-domain spectrum (box states on [0,20] union
+// Coulomb-function zeros on [20,40]) to ~1e-11-1e-15 with nBSplines growing
+// by 6 (41+8-2=47 -> 53) and nEnBound = 53-2-1 = 50 (was 36 under the old
+// cluster-drop).
+TEST(BuildStrategicGridAndDropSetTest, InteriorSingularityUsesKnotMultiplicityNotClusterRemoval)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,20)", "0"}, {"(20,40]", "1/(x-20)"}
+    };
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
+
+    EXPECT_EQ(sgr.nBSplines, 53);
+    EXPECT_EQ(static_cast<int>(sgr.fillDropSet.size()), 2); // {1, the single spline nonzero at x=20}
+    EXPECT_EQ(sgr.nEnBound, 50);
 }
 
 TEST(BuildStrategicGridAndDropSetTest, StepPotentialActuallyUsesAStrategicNonUniformGrid)
@@ -2799,6 +2821,26 @@ TEST(SolveTISETest, InteriorSingularityTriggersBSplineRemoval)
 
     for (auto v : sol.eigen.values)
         EXPECT_TRUE(std::isfinite(v));
+}
+
+// Physics-value regression for the same config, closing the gap
+// docs/tests/reports/8236239/interior_singularity.md identified: the old
+// bSplinesTouchingX cluster-drop passed the test above (finite eigenvalues,
+// dropSet grown) while being wrong by 41%. Exact split-domain reference
+// (report §3/§4): box states on [0,20] at n^2*pi^2/800, Coulomb-function
+// zeros F_0(1/k,20k) on [20,40]; sorted union's first three states are
+// 0.0123370055 (box), 0.0493480220 (box), 0.1005405216 (Coulomb).
+TEST(SolveTISETest, InteriorSingularityEigenvaluesMatchExactSplitDomainSpectrum)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,20)", "0"}, {"(20,40]", "1/(x-20)"}
+    };
+    auto sol = tise::solveTISE(41, 8, 0.0, 40.0, 0, potential, 0.5, 1.0, 2);
+
+    ASSERT_GE(static_cast<int>(sol.eigen.values.size()), 3);
+    EXPECT_NEAR(sol.eigen.values[0], 0.0123370055, 1e-9);
+    EXPECT_NEAR(sol.eigen.values[1], 0.0493480220, 1e-9);
+    EXPECT_NEAR(sol.eigen.values[2], 0.1005405216, 1e-8);
 }
 
 TEST(SolveTISETest, GroundStateStillMatchesAnalyticHydrogen)
