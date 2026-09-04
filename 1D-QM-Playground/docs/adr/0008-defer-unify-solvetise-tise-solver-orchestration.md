@@ -1,6 +1,8 @@
 # ADR-0008: Defer Unifying `solveTISE`/`tise_solver` Orchestration
 
-- **Status:** Accepted (deferred)
+- **Status:** Superseded by [ADR-0009](0009-unify-solvetise-tise-solver-grid-dropset-construction.md)
+  (2026-08-28, same day — the revisit trigger below fired during a
+  TISE release-readiness audit)
 - **Date:** 2026-08-28 (identified while wiring strategic node placement (A4/A4b)
   into `solveTISE`, SDD §5.2.3)
 

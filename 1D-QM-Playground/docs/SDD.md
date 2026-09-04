@@ -419,6 +419,8 @@ Consumes `config.yaml` in full ([§6.1](#61-configuration-schema)). Invokes the 
 
 #### 5.1.3 Internal Design
 
+*The pseudocode below is illustrative of the original design intent, not a literal transcription of the real `controller.py` — two deliberate deviations, each explained in that file's own comments: `run_tise_solver()` only creates `output_dir/tise` when `run.run_tise` is actually true (not unconditionally), and the solver binary's path resolves relative to `controller.py`'s own file location rather than a bare `"./build/tise_solver"` (so `controller.py` works regardless of the caller's current working directory). Neither changes the contract this pseudocode is illustrating.*
+
 ```python
 import subprocess
 import sys
@@ -950,11 +952,12 @@ Plain text is preferred initially for transparency and ease of inspection with s
 
 | Binary/Script | Flags |
 |---|---|
+| `controller.py` | `--config <path>` (default `config.yaml`) |
 | `tise_solver` | `--config <path>` `--output-dir <path>` |
 | `tdse_solver` | `--config <path>` `--tise-dir <path>` `--output-dir <path>` |
 | `analysis.py` | `--config <path>` `--tise-dir <path>` `--tdse-dir <path>` |
 
-`config.yaml` itself ([§6.1](#61-configuration-schema)) is the primary external interface — every binary and script reads it (or CLI-overridden fields of it) as its source of truth for physics and run parameters.
+`config.yaml` itself ([§6.1](#61-configuration-schema)) is the primary external interface — every binary and script reads it (or CLI-overridden fields of it) as its source of truth for physics and run parameters. `controller.py` is the top-level entry point a user actually runs (see the top-level README's "Quick start"); it resolves `tise_solver`'s/`analysis.py`'s paths and invokes them per §7.2.1/§7.2.3 below, so its own single `--config` flag is the only one most users need directly.
 
 ### 7.2 Inter-Component Interfaces
 

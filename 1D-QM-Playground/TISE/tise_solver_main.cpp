@@ -148,6 +148,27 @@ int main(int argc, char *argv[])
         std::filesystem::create_directories(args.outputDir);
         const std::filesystem::path outputDir(args.outputDir);
 
+        // physics.mass/physics.hbar guard-rail: both fields are documented
+        // in config.yaml but consumed nowhere -- fillBandedMatrices
+        // hardcodes mass=1 internally (matching computeEAcc's own
+        // mass=1.0 call and k=sqrt(2*E) throughout), so a user setting
+        // either to anything else previously got silent wrong physics with
+        // no error. Guard-rail only, not full generalization (that would
+        // touch the kinetic-energy term/k=sqrt(2E)/computeEAcc throughout)
+        // -- an honest config error instead.
+        if (config["physics"])
+        {
+            if (config["physics"]["mass"] && config["physics"]["mass"].as<tise::Real>() != 1.0)
+                throw std::runtime_error("physics.mass is fixed at 1.0 internally (fillBandedMatrices' "
+                                          "kinetic-energy term/computeEAcc/k=sqrt(2E) all hardcode it); "
+                                          "setting it to anything else is not yet supported -- remove the "
+                                          "field or set it to 1.0.");
+            if (config["physics"]["hbar"] && config["physics"]["hbar"].as<tise::Real>() != 1.0)
+                throw std::runtime_error("physics.hbar is fixed at 1.0 internally (atomic units throughout "
+                                          "this solver); setting it to anything else is not yet supported -- "
+                                          "remove the field or set it to 1.0.");
+        }
+
         // B-spline basis parameters.
         const int nNodes = config["bspline"]["n_nodes"].as<int>();
         const int order  = config["bspline"]["order"].as<int>();
@@ -157,15 +178,29 @@ int main(int argc, char *argv[])
         // Piecewise potential.
         const std::map<std::string, std::string> potential = parsePotentialConfig(config["potential"]);
 
-        // Construct the B-spline basis -- mirrors tise::solveTISE's own construction.
-        const std::vector<tise::Real> grid = tise::buildUniformRadialGrid(nNodes, rMin, rMax);
-        bspline::BSpline bs;
-        if (bs.init(nNodes, order, grid) != 0)
-            throw std::runtime_error("BSpline::init failed");
+        // One-time overlap validation (not per-evaluateFunction-call): a
+        // malformed config with two pieces covering a common x previously
+        // resolved silently via std::map's own domain-string sort order
+        // (not declaration order) with no error at all -- now throws a
+        // clear, named error instead. controller.py's own
+        // validate_potential_tiling already checks this on the Python
+        // side, but tise_solver is independently invocable (SDD's own
+        // architecture) and previously had no such guard of its own.
+        tise::validateNoOverlappingPotentialPieces(potential);
 
-        // Basis size / eigenproblem dimension -- matches solveTISE's own pattern.
-        const int nBSplines = bs.getNBSplines();
-        const int nEn       = nBSplines - 2;
+        // Construct the B-spline basis: automatically strategic per REQ-F-050
+        // if the potential has detectable Step/StitchedKink/Singular
+        // structure, with A4b interior-singular-B-spline removal applied --
+        // shared with H-BoundStates'/solveTISE's own construction (ADR-0009;
+        // this file previously built a plain uniform grid + hardcoded
+        // classic {1} drop-set only, structurally unable to reach either --
+        // see docs/planning/tise-release-readiness-plan.md Part A). A
+        // potential with no detectable structure produces the same uniform
+        // grid + {1} drop-set as before, byte-identical.
+        tise::StrategicGridResult sgr = tise::buildStrategicGridAndDropSet(nNodes, order, rMin, rMax, potential);
+        bspline::BSpline &bs = sgr.bs;
+        const int nBSplines = sgr.nBSplines;
+        const int nEn       = sgr.nEnBound;
 
         // Spatial grid density for eigenstate_NNN.dat, written unconditionally
         // below regardless of tise.continuum.enabled -- previously read by
@@ -194,33 +229,21 @@ int main(int argc, char *argv[])
             n_pts       = continuumNode["n_pts"].as<int>();
         }
 
-        // Fill banded matrices. dropSet={1}, nEn+1 columns: continuum-ready
-        // (column nEn+1 is B_N's column, needed by the continuum path
-        // below). Truncating to the leading nEn columns for the solve
-        // (next step) reproduces the classic {1,nBSplines} default drop-set
-        // exactly -- verified bit-identical during this feature's planning,
-        // not an approximation. L is fixed at 0: fillBandedMatrices no
-        // longer uses it to select the potential (only eigenvalueError's
-        // irrelevant hydrogen-analytic comparison does), and config.yaml
-        // has no L field -- centrifugal terms are baked into the potential
-        // expression itself.
-        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, /*L=*/0, potential, std::vector<int>{1});
-
-        // Solve. H, S are passed by value -- solveGeneralizedEigenproblem's
-        // internal LAPACK call overwrites its own copies, not these, so H/S
-        // remain valid below for hamiltonian.dat/overlap.dat and the
-        // continuum path.
-        tise::EigenResult er = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
-
         std::vector<WarningEntry> warnings;
 
-        // Case-3-asymptote warning: classifyAsymptote's own documented
-        // precondition is "the caller already knows this side is
-        // unbounded." Approximate that by checking whether the potential's
-        // own domain coverage actually extends far beyond the box -- for a
-        // potential capped exactly at the box edge (the common case, e.g.
-        // the real config.yaml), there is no unbounded side to classify and
-        // this is skipped entirely.
+        // Case-3-asymptote classification, BEFORE fillBandedMatrices (not
+        // after, as originally): an Irregular classification's
+        // recommendedTransitionWidth needs to reach fillBandedMatrices so
+        // it can actually taper the potential there (previously this
+        // classification only produced a warning -- detection without
+        // remediation, see docs/planning/tise-release-readiness-plan.md
+        // Part B). classifyAsymptote's own documented precondition is "the
+        // caller already knows this side is unbounded." Approximate that
+        // by checking whether the potential's own domain coverage actually
+        // extends far beyond the box -- for a potential capped exactly at
+        // the box edge (the common case, e.g. the real config.yaml), there
+        // is no unbounded side to classify and this is skipped entirely.
+        std::optional<tise::Real> case3RightR, case3RightDelta;
         {
             const tise::Real probeX = rMax + 1.0e6 * std::max(std::abs(rMax), tise::Real(1.0));
             bool coveredBeyondDomain = false;
@@ -238,10 +261,21 @@ int main(int argc, char *argv[])
                 try
                 {
                     std::ostringstream warnOut;
-                    tise::classifyAsymptote(potential, tise::SpatialDomain{rMin, rMax},
-                                             tise::DomainSide::Right, warnOut);
+                    auto classification = tise::classifyAsymptote(
+                        potential, tise::SpatialDomain{rMin, rMax}, tise::DomainSide::Right, warnOut);
                     if (!warnOut.str().empty())
                         addWarning(warnings, "physics", warnOut.str());
+                    if (classification.asymptoteCase == tise::AsymptoteCase::Irregular)
+                    {
+                        case3RightR = rMax;
+                        case3RightDelta = classification.recommendedTransitionWidth;
+                        std::ostringstream msg;
+                        msg << "potential's right-edge tail is Irregular (Case 3); tapering it "
+                               "to 0 over a transition width of " << classification.recommendedTransitionWidth
+                            << " before x=" << rMax << " rather than integrating the raw tail up "
+                               "to the wall (see evaluateWindowedPotential).";
+                        addWarning(warnings, "physics", msg.str());
+                    }
                 }
                 catch (const std::exception &)
                 {
@@ -252,6 +286,53 @@ int main(int argc, char *argv[])
             }
         }
 
+        // Fill banded matrices. sgr.fillDropSet, nEn+1 columns: continuum-ready
+        // (column nEn+1 is B_N's column, needed by the continuum path
+        // below). Truncating to the leading nEn columns for the solve
+        // (next step) reproduces sgr.fillDropSet's exclusion exactly. L is
+        // fixed at 0: fillBandedMatrices no longer uses it to select the
+        // potential (only eigenvalueError's irrelevant hydrogen-analytic
+        // comparison does), and config.yaml has no L field -- centrifugal
+        // terms are baked into the potential expression itself. case3RightR/
+        // Delta (set above, nullopt for the common case) taper the
+        // potential near the wall when Case 3 was detected.
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, /*L=*/0, potential, sgr.fillDropSet,
+                                                case3RightR, case3RightDelta);
+
+        // Solve. H, S are passed by value -- solveGeneralizedEigenproblem's
+        // internal LAPACK call overwrites its own copies, not these, so H/S
+        // remain valid below for hamiltonian.dat/overlap.dat and the
+        // continuum path.
+        tise::EigenResult er = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+
+        // classifyBoundStates (REQ-F-020): informational count of how many
+        // of the nEn computed states are below the ionization threshold
+        // E=0.0. Purely informational, not a filter -- eigenvalues.dat/
+        // eigenvectors.dat still contain every computed state unfiltered,
+        // per ADR-0007; this just finally surfaces the split that filter
+        // deliberately doesn't apply, previously invisible anywhere in this
+        // binary's output.
+        {
+            auto classification = tise::classifyBoundStates(er, /*threshold=*/0.0);
+            std::ostringstream msg;
+            msg << classification.nBound << " of " << er.dim << " computed states are "
+                   "below E=0.0 (informational bound-state count; eigenvalues.dat/"
+                   "eigenvectors.dat contain all computed states unfiltered, per ADR-0007).";
+            addWarning(warnings, "physics", msg.str());
+        }
+
+        // Distinct from the Case-3 check above: sgr.rightEdgeSingular fires
+        // when a potential piece is itself singular exactly AT x=rMax (e.g.
+        // "1/(rMax-x)"), regardless of whether anything is defined beyond
+        // the box -- previously only solveTISE (the H-BoundStates path)
+        // could detect this, via its own bare-cerr warning; this file had
+        // no access to it at all before ADR-0009's shared construction.
+        if (sgr.rightEdgeSingular)
+            addWarning(warnings, "physics",
+                       "potential is singular at the right domain edge x=" + std::to_string(rMax) +
+                       "; continuum phase-shift matching (matchAsymptotic) assumes a regular "
+                       "boundary there, so continuum results should be treated with suspicion.");
+
         // Continuum construction, gated on tise.continuum.enabled.
         if (continuumEnabled)
         {
@@ -260,7 +341,12 @@ int main(int argc, char *argv[])
             // i.e. mass=1 baked into the matrix fill itself) -- reading
             // config["physics"]["mass"] only here would suggest it's
             // configurable when the core solve ignores it entirely.
-            const tise::Real nodeSpacing = (rMax - rMin) / static_cast<tise::Real>(nNodes - 1);
+            // minInterNodeGap (not a flat (rMax-rMin)/(nNodes-1) average):
+            // sgr.grid may now be a non-uniform strategic grid, and the
+            // physically-correct nodeSpacing for a non-uniform grid is its
+            // minimum inter-node gap, not an average across it -- see
+            // minInterNodeGap's own doc comment.
+            const tise::Real nodeSpacing = tise::minInterNodeGap(sgr.grid);
             const tise::Real eAcc = tise::computeEAcc(nodeSpacing, /*mass=*/1.0);
             {
                 std::ostringstream warnOut;
@@ -271,10 +357,10 @@ int main(int argc, char *argv[])
             auto energyGrid = tise::buildEnergyGrid(E_threshold, E_max, n_energies);
             std::ostringstream poleWarnOut;
             auto states = tise::buildContinuumState(order, nEn, H, S, er, energyGrid,
-                                                      std::nullopt, std::nullopt, 0.1, poleWarnOut);
+                                                      sgr.nBSplines, sgr.fillDropSet, 0.1, poleWarnOut);
             if (!poleWarnOut.str().empty())
                 addWarning(warnings, "physics", poleWarnOut.str());
-            auto ar = tise::matchAsymptotic(bs, states, er, energyGrid, /*R=*/rMax);
+            auto ar = tise::matchAsymptotic(bs, states, er, energyGrid, /*R=*/rMax, sgr.fillDropSet);
 
             std::ofstream phaseShiftsOut(outputDir / "phase_shifts.dat");
             std::vector<std::ofstream> continuumStateFiles;
@@ -288,8 +374,25 @@ int main(int argc, char *argv[])
                 continuumStateOut.push_back(&continuumStateFiles.back());
             }
             tise::writeContinuumInfo(phaseShiftsOut, bs, ar, energyGrid, states, continuumStateOut,
-                                      n_pts, rMin, rMax, er);
+                                      n_pts, rMin, rMax, er, sgr.fillDropSet);
         }
+
+        // er.vectors are nEn(=nEnBound)-dimensional -- excluded from them is
+        // sgr.fillDropSet's physical indices PLUS B_N (nBSplines), which was
+        // truncated away separately by solveGeneralizedEigenproblem(H, S,
+        // nEnBound, order) above, not by fillDropSet itself (fillBandedMatrices
+        // was filled with nEn+1 columns precisely to keep B_N's column for
+        // the continuum path). eigenstateCoefficients/writeEigenvectors zero-pad
+        // a BOUND eigenvector (no B_N "+1" convention, unlike
+        // buildContinuumState/matchAsymptotic/writeContinuumInfo above) --
+        // they need this FULL exclusion set, or they'd expect one more kept
+        // column than er.vectors actually has and silently misattribute
+        // every coefficient from B_N's physical index onward. Mirrors
+        // solveTISE's own identical fillDropSet+nBSplines construction of
+        // SolveTISEResult.dropSet.
+        std::vector<int> fullDropSet = sgr.fillDropSet;
+        fullDropSet.push_back(sgr.nBSplines);
+        std::sort(fullDropSet.begin(), fullDropSet.end());
 
         // Core output files -- all nEn states, per ADR-0007.
         {
@@ -298,7 +401,7 @@ int main(int argc, char *argv[])
         }
         {
             std::ofstream out(outputDir / "eigenvectors.dat");
-            tise::writeEigenvectors(out, er, nBSplines, er.dim);
+            tise::writeEigenvectors(out, er, nBSplines, er.dim, fullDropSet);
         }
         // eigenstate_NNN.dat: spatial phi_n(x), one file per bound state,
         // unconditionally (same "TISE writes everything" ADR-0007 policy as
@@ -311,8 +414,34 @@ int main(int argc, char *argv[])
             std::ostringstream oss;
             oss << "eigenstate_" << std::setw(3) << std::setfill('0') << j << ".dat";
             std::ofstream out(outputDir / oss.str());
-            auto coeffs = tise::eigenstateCoefficients(er.vectors, j, nEn, nBSplines);
+            auto coeffs = tise::eigenstateCoefficients(er.vectors, j, nEn, nBSplines, fullDropSet);
             tise::writeEigenstate(out, bs, coeffs, nPtsEigenstate, rMin, rMax);
+
+            // Well-containment diagnostic (A3, SDD Sec 5.2.3/6.4): a state
+            // confined within the box should decay to numerically-zero
+            // slope at the outer wall; a nonzero psi'(rMax) means it's
+            // colliding with the wall and its energy/wavefunction may be
+            // inaccurate due to box truncation -- previously computed
+            // nowhere in this binary despite being fully implemented and
+            // tested. Restricted to states classifyBoundStates above
+            // actually calls bound (E<0.0): an unbound/continuum-like
+            // state is EXPECTED to have non-negligible amplitude/slope at
+            // the wall (it's not supposed to be exponentially localized in
+            // the first place), so applying this check there would just
+            // flag every such state unconditionally -- noise, not signal.
+            if (er.values[j - 1] < 0.0)
+            {
+                auto containment = tise::checkWellContainment(bs, coeffs, rMax);
+                if (containment.notWellContained)
+                {
+                    std::ostringstream msg;
+                    msg << "bound state " << j << " (E=" << er.values[j - 1] << ") appears to be "
+                           "colliding with the outer wall at x=" << rMax << " (psi'(rMax)="
+                        << containment.psiPrimeAtBoundary << ", exceeds tolerance) -- its "
+                           "energy/wavefunction may be inaccurate due to box truncation.";
+                    addWarning(warnings, "physics", msg.str());
+                }
+            }
         }
         {
             std::ofstream out(outputDir / "hamiltonian.dat");

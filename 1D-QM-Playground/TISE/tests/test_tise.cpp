@@ -42,6 +42,50 @@ TEST(BuildUniformRadialGridTest, TwoNodeGrid)
 }
 
 // ---------------------------------------------------------------------------
+// buildEnergyGrid -- on the critical path of every continuum-enabled run in
+// both solveTISE and tise_solver_main.cpp, previously exercised only
+// indirectly as a side effect of higher-level fixtures (SquareWellPhaseShiftTest
+// et al.), never directly.
+// ---------------------------------------------------------------------------
+
+TEST(BuildEnergyGridTest, SizeIsNE)
+{
+    auto grid = tise::buildEnergyGrid(0.0, 10.0, 5);
+    EXPECT_EQ(static_cast<int>(grid.size()), 5);
+}
+
+TEST(BuildEnergyGridTest, StartsOneStepAboveThresholdNeverAtThresholdItself)
+{
+    // i=1..N_E, never i=0 -- deliberately never exactly E_threshold, to
+    // avoid the k=0 singularity in matchAsymptotic's matching formulas
+    // (see buildEnergyGrid's own doc comment).
+    auto grid = tise::buildEnergyGrid(0.0, 10.0, 5);
+    EXPECT_NEAR(grid[0], 2.0, 1e-12);
+}
+
+TEST(BuildEnergyGridTest, EndsExactlyAtEMax)
+{
+    auto grid = tise::buildEnergyGrid(0.0, 10.0, 5);
+    EXPECT_NEAR(grid.back(), 10.0, 1e-12);
+}
+
+TEST(BuildEnergyGridTest, UniformlySpacedAcrossThresholdToMax)
+{
+    auto grid = tise::buildEnergyGrid(1.0, 6.0, 5);
+    const double expectedStep = (6.0 - 1.0) / 5.0;
+    for (int i = 1; i < static_cast<int>(grid.size()); ++i)
+        EXPECT_NEAR(grid[i] - grid[i - 1], expectedStep, 1e-12);
+}
+
+TEST(BuildEnergyGridTest, NonzeroThresholdOffsetsTheWholeGrid)
+{
+    auto gridFromZero = tise::buildEnergyGrid(0.0, 10.0, 5);
+    auto gridFromTwo  = tise::buildEnergyGrid(2.0, 12.0, 5);
+    for (int i = 0; i < 5; ++i)
+        EXPECT_NEAR(gridFromTwo[i], gridFromZero[i] + 2.0, 1e-12);
+}
+
+// ---------------------------------------------------------------------------
 // radialPotential
 // ---------------------------------------------------------------------------
 
@@ -130,6 +174,61 @@ TEST(EvaluateFunctionTest, ThrowsWhenXUncovered)
         {"[0, 5)", "x"}
     };
     EXPECT_THROW(tise::evaluateFunction(potential, 10.0), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// validateNoOverlappingPotentialPieces -- evaluateFunction's own first-
+// match-wins resolution (std::map iteration order, i.e. domain-string
+// sorted order, NOT declaration order) is only well-defined when pieces
+// don't overlap; this closes the previously-unaddressed
+// "TODO: add error checking in case input x fits in multiple pieces"
+// at tise.cpp's evaluateFunction.
+// ---------------------------------------------------------------------------
+
+TEST(ValidateNoOverlappingPotentialPiecesTest, NonOverlappingAdjacentPiecesDoNotThrow)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 5)", "0"}, {"[5, 10]", "1"}
+    };
+    EXPECT_NO_THROW(tise::validateNoOverlappingPotentialPieces(potential));
+}
+
+TEST(ValidateNoOverlappingPotentialPiecesTest, ThrowsWhenTwoPiecesShareAnInclusiveBoundary)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 5]", "0"}, {"[5, 10]", "1"} // both inclusive at x=5 -- ambiguous
+    };
+    EXPECT_THROW(tise::validateNoOverlappingPotentialPieces(potential), std::runtime_error);
+}
+
+TEST(ValidateNoOverlappingPotentialPiecesTest, ThrowsWhenOnePieceIsFullyInsideAnother)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 10]", "0"}, {"[3, 7]", "1"}
+    };
+    EXPECT_THROW(tise::validateNoOverlappingPotentialPieces(potential), std::runtime_error);
+}
+
+TEST(ValidateNoOverlappingPotentialPiecesTest, ThrowsWhenPiecesPartiallyOverlap)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 6]", "0"}, {"[4, 10]", "1"}
+    };
+    EXPECT_THROW(tise::validateNoOverlappingPotentialPieces(potential), std::runtime_error);
+}
+
+TEST(ValidateNoOverlappingPotentialPiecesTest, HandlesInfiniteBoundsWithoutOverlap)
+{
+    std::map<std::string, std::string> potential = {
+        {"(-inf, 0)", "0"}, {"[0, inf)", "1"}
+    };
+    EXPECT_NO_THROW(tise::validateNoOverlappingPotentialPieces(potential));
+}
+
+TEST(ValidateNoOverlappingPotentialPiecesTest, SinglePieceNeverThrows)
+{
+    std::map<std::string, std::string> potential = {{"[0, 100]", "0"}};
+    EXPECT_NO_THROW(tise::validateNoOverlappingPotentialPieces(potential));
 }
 
 // ---------------------------------------------------------------------------
@@ -1892,6 +1991,68 @@ TEST(FillBandedMatricesDropSetTest, OutOfRangeDropSetIndexThrows)
 }
 
 // ---------------------------------------------------------------------------
+// fillBandedMatrices -- Case-3 (irregular-asymptote) potential windowing.
+// Previously: classifyAsymptote could detect Case 3 and recommend a
+// transition width, but nothing ever applied evaluateWindowedPotential to
+// actually taper the potential near the boundary -- detection without
+// remediation. "1/x^1.5" on (0,inf), domain [0.1,50] is the same
+// proven Case-3-triggering case ClassifyAsymptoteTest.
+// Case3IrregularForPowerLawOneAndHalf already validates the classifier
+// against.
+// ---------------------------------------------------------------------------
+
+TEST(FillBandedMatricesCase3WindowTest, WindowedVersionDiffersNearBoundaryButMatchesAwayFromIt)
+{
+    const int order = 6, nNodes = 41;
+    const double rMin = 0.1, rMax = 50.0;
+    std::vector<double> grid(nNodes);
+    for (int i = 0; i < nNodes; ++i)
+        grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    const int nBSplines = bs.getNBSplines();
+    const int nEn = nBSplines - 2;
+
+    std::map<std::string, std::string> potential = {{"(0, inf)", "1/x^1.5"}};
+
+    auto [H_plain, S_plain] = tise::fillBandedMatrices(bs, nEn, order, 0, potential);
+    auto [H_win, S_win] = tise::fillBandedMatrices(bs, nEn, order, 0, potential, std::nullopt,
+                                                     /*case3RightR=*/rMax, /*case3RightDelta=*/5.0);
+
+    // S (overlap) is potential-independent -- windowing must never touch it.
+    EXPECT_EQ(S_plain, S_win);
+
+    auto diagIdx = [order](int col) { return (order - 1) + (col - 1) * order; };
+
+    // Near rMax (last column, closest to the wall): windowing changes H.
+    EXPECT_GT(std::abs(H_plain[diagIdx(nEn)] - H_win[diagIdx(nEn)]), 1e-6);
+
+    // Far from rMax (first column, closest to rMin, well inside R-delta):
+    // window()==1 there, so H must be unaffected.
+    EXPECT_NEAR(H_plain[diagIdx(1)], H_win[diagIdx(1)], 1e-9);
+}
+
+TEST(FillBandedMatricesCase3WindowTest, StillProducesFiniteEigenvalues)
+{
+    const int order = 6, nNodes = 41;
+    const double rMin = 0.1, rMax = 50.0;
+    std::vector<double> grid(nNodes);
+    for (int i = 0; i < nNodes; ++i)
+        grid[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    const int nBSplines = bs.getNBSplines();
+    const int nEn = nBSplines - 2;
+
+    std::map<std::string, std::string> potential = {{"(0, inf)", "1/x^1.5"}};
+    auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, 0, potential, std::nullopt, rMax, 5.0);
+    auto eigen = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+
+    for (auto v : eigen.values)
+        EXPECT_TRUE(std::isfinite(v));
+}
+
+// ---------------------------------------------------------------------------
 // eigenstateCoefficients -- generalized drop-set (A4b)
 // ---------------------------------------------------------------------------
 
@@ -2452,6 +2613,130 @@ TEST_F(SquareWellPhaseShiftTest, WrittenWavefunctionAgreesWithMatchAsymptoticAtR
     double k = std::sqrt(2 * energyGrid[0]);
     double expected = std::sqrt(2.0 / M_PI / k) * std::sin(k * R + ar.delta[0]);
     EXPECT_NEAR(std::abs(lastPsi), std::abs(expected), 1e-6);
+}
+
+// ---------------------------------------------------------------------------
+// matchAsymptotic's dDeltaDE -- resolving the self-flagged
+// "// TODO: will this sign be wrong" at the LAST energy-grid point's
+// backward-difference branch. Standalone reconstruction of
+// SquareWellPhaseShiftTest's exact basis/potential (not the shared fixture
+// itself, so a custom, non-default energy grid can be used here without
+// touching that fixture) -- delta(E) has a genuinely non-trivial slope for
+// this potential (unlike the free particle, where sin(2*delta)==0
+// everywhere and the finite-difference sign can't be discriminated either
+// way), so this is the right case to settle the question against an
+// independent estimate.
+// ---------------------------------------------------------------------------
+
+TEST(MatchAsymptoticDDeltaDESignTest, LastGridPointMatchesIndependentFineCentralDifference)
+{
+    const int nNodes = 41, order = 6, L = 0;
+    const double rMin = 0.0, rMax = 20.0, V0 = 2.0, a = 0.5, R = 15.0;
+
+    std::vector<double> gridPts(nNodes);
+    for (int i = 0; i < nNodes; ++i)
+        gridPts[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, gridPts), 0);
+    const int nBSplines = bs.getNBSplines();
+    const int nEn = nBSplines - 2;
+
+    std::map<std::string, std::string> potential = {
+        {"[0, " + std::to_string(a) + ")", "-" + std::to_string(V0)},
+        {"[" + std::to_string(a) + ", " + std::to_string(rMax) + "]", "0.0"}
+    };
+    auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
+    auto eigen = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+
+    // Coarse 3-point grid: dDeltaDE[2] (E=0.6) exercises the code's own
+    // backward-difference branch, the one under question. dE=0.001 rather
+    // than a "production-realistic" ~0.1: this well's positive-energy
+    // pseudostate ladder is densely packed (confirmed empirically: poles at
+    // 0.012, 0.048, 0.108, 0.192, 0.301, 0.433, 0.590, 0.772, 0.978, ... --
+    // roughly 0.05-0.2 apart throughout), so ANY 0.1-scale window contains
+    // or nearly straddles one, making delta(E) genuinely non-smooth there
+    // regardless of which finite-difference formula/sign is used -- not
+    // informative for isolating a sign question specifically. A narrower
+    // window centered away from the nearest pole (0.590441, >0.008 away)
+    // keeps this test in a locally-smooth region.
+    std::vector<double> coarseGrid = {0.599, 0.6, 0.601};
+    auto coarseStates = tise::buildContinuumState(order, nEn, H, S, eigen, coarseGrid);
+    auto coarseResult = tise::matchAsymptotic(bs, coarseStates, eigen, coarseGrid, R);
+
+    // Independent estimate at the SAME E=0.6, via a much finer centered
+    // difference of the raw (unwrapped) delta itself over a tiny local
+    // window -- sin(2*delta)'s reformulation is an exact restatement of
+    // d(delta)/dE by the chain rule (d/dE[sin(2d)] = 2cos(2d)*dd/dE, so
+    // dividing by 2cos(2d) recovers dd/dE exactly), so comparing the raw
+    // delta finite difference directly against dDeltaDE is a fair,
+    // apples-to-apples check, not a different quantity.
+    const double h = 1e-6;
+    std::vector<double> fineGrid = {0.6 - h, 0.6 + h};
+    auto fineStates = tise::buildContinuumState(order, nEn, H, S, eigen, fineGrid);
+    auto fineResult = tise::matchAsymptotic(bs, fineStates, eigen, fineGrid, R);
+    const double independentDDeltaDE = (fineResult.delta[1] - fineResult.delta[0]) / (2.0 * h);
+
+    EXPECT_NEAR(coarseResult.dDeltaDE[2], independentDDeltaDE, 5e-3)
+        << "code's backward-difference dDeltaDE at the last grid point: " << coarseResult.dDeltaDE[2]
+        << ", independent fine-centered-difference estimate: " << independentDDeltaDE;
+}
+
+// ---------------------------------------------------------------------------
+// buildStrategicGridAndDropSet — extracted from solveTISE's own grid/dropset
+// construction so tise_solver_main.cpp (previously stuck on a plain uniform
+// grid + classic {1} drop-set, unlike solveTISE) can share the exact same
+// logic instead of a second, divergent copy (ADR-0008/ADR-0009). Same
+// hydrogen/interior-singularity/step-potential fixtures as the SolveTISETest
+// suite below, at the lower level this function now factors out.
+// ---------------------------------------------------------------------------
+
+TEST(BuildStrategicGridAndDropSetTest, HydrogenSingularAtOriginIsHandledByClassicWallExclusionOnly)
+{
+    std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
+
+    EXPECT_EQ(sgr.nBSplines, 47);
+    std::vector<int> expectedDropSet = {1};
+    EXPECT_EQ(sgr.fillDropSet, expectedDropSet);
+    EXPECT_EQ(sgr.nEnBound, 45);
+}
+
+TEST(BuildStrategicGridAndDropSetTest, InteriorSingularityTriggersBSplineRemoval)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,20)", "0"}, {"(20,40]", "1/(x-20)"}
+    };
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
+
+    EXPECT_GT(static_cast<int>(sgr.fillDropSet.size()), 1);
+    EXPECT_NE(std::find(sgr.fillDropSet.begin(), sgr.fillDropSet.end(), 1), sgr.fillDropSet.end());
+    EXPECT_EQ(std::find(sgr.fillDropSet.begin(), sgr.fillDropSet.end(), sgr.nBSplines), sgr.fillDropSet.end());
+}
+
+TEST(BuildStrategicGridAndDropSetTest, StepPotentialActuallyUsesAStrategicNonUniformGrid)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,20)", "0"}, {"[20,40]", "10"}
+    };
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
+    EXPECT_GT(static_cast<int>(sgr.grid.size()), 41);
+}
+
+TEST(BuildStrategicGridAndDropSetTest, RightEdgeSingularFlagsRightEdgeSingularity)
+{
+    // Same proven-divergent expression as DetectPotentialStructureTest.
+    // SingularAtRightDomainEdge above: 1/(100-x) diverges approaching
+    // x=100 from the left.
+    std::map<std::string, std::string> potential = {{"[0, 100)", "1/(100-x)"}};
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 100.0, potential);
+    EXPECT_TRUE(sgr.rightEdgeSingular);
+}
+
+TEST(BuildStrategicGridAndDropSetTest, RightEdgeSingularFalseForLeftEdgeSingularity)
+{
+    std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
+    EXPECT_FALSE(sgr.rightEdgeSingular);
 }
 
 // ---------------------------------------------------------------------------

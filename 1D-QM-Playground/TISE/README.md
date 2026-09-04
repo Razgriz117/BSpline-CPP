@@ -1,6 +1,10 @@
-# H-BoundStates: Hydrogenic Bound States with B-Splines
+# TISE: B-Spline Time-Independent Schrödinger Equation Solver
+
+> **This file documents two separate binaries.** `tise_solver` (below) is the real, config-driven binary the project's actual pipeline (`config.yaml` → `controller.py` → `tise_solver` → `analysis.py`, see the top-level [README.md](../README.md)) uses — build and run that first if you just want to solve a potential. `H-BoundStates` (everything after it in this file) is an earlier, standalone hydrogen demo taking its potential as a raw JSON `argv` string instead of `config.yaml` — still maintained and tested, useful for quick one-off checks, but not part of the config-driven pipeline.
 
 ## Table of Contents
+- [Building and Running `tise_solver`](#building-and-running-tise_solver)
+- [H-BoundStates: Hydrogenic Bound States with B-Splines](#h-boundstates-hydrogenic-bound-states-with-b-splines)
 - [Code Structure](#code-structure)
 - [Specifying the Potential](#specifying-the-potential)
 - [Dependencies](#dependencies)
@@ -10,6 +14,28 @@
 - [Coverage](#coverage)
 - [Output Files](#output-files)
 - [Known Limitations](#known-limitations)
+
+## Building and Running `tise_solver`
+
+```bash
+# From the project root (one level above this TISE/ directory):
+cmake -S TISE -B TISE/build -DBUILD_TESTING=ON
+cmake --build TISE/build
+```
+
+This builds `H-BoundStates` unconditionally, plus `tise_solver` — but only if `yaml-cpp` is discoverable (`find_package(yaml-cpp QUIET)` in `CMakeLists.txt`; install it via e.g. `sudo apt-get install libyaml-cpp-dev` if the configure step warns `"yaml-cpp not found -- skipping tise_solver target"`). `tise_solver` additionally needs [nlohmann-json](https://github.com/nlohmann/json) (also required by `H-BoundStates`, see [Dependencies](#dependencies) below) for its `warnings.json` sidecar.
+
+Run it directly against any `config.yaml` (see the top-level README's "Quick start" and `config.yaml`'s own inline comments for the schema):
+
+```bash
+./TISE/build/tise_solver --config config.yaml --output-dir data/tise
+```
+
+This writes `eigenvalues.dat`, `eigenvectors.dat`, `eigenstate_NNN.dat` (one per bound state, unconditionally), `hamiltonian.dat`, `overlap.dat`, and `warnings.json` always; `phase_shifts.dat`/`continuum_state_NNN.dat` additionally when `tise.continuum.enabled: true`. Non-zero exit means no partial output is left behind (see `docs/SDD.md` §7.2.1). Ordinarily you'd drive this via `controller.py` rather than invoking it directly — see the top-level README.
+
+---
+
+# H-BoundStates: Hydrogenic Bound States with B-Splines
 
 This project computes bound-state eigenvalues and eigenfunctions for a 1D/radial quantum system using a **B-spline basis** and a **generalized eigenvalue problem**. The potential is supplied at runtime as a piecewise expression (see [Specifying the Potential](#specifying-the-potential)) rather than hardcoded, so the same binary solves any potential expressible as a sum of closed-form pieces — not just the hydrogen atom.
 
@@ -231,5 +257,5 @@ You can plot these eigenfunctions using your favorite tool (Python/Matplotlib, g
 
 * **Time evolution always runs.** After solving the bound-state problem, `main.cpp` unconditionally calls `tevol::runTimeEvolution(...)` — there is currently no way to request a TISE-only run. `config.yaml` already defines a `run.run_tdse` flag for exactly this purpose (see `docs/SDD.md` §6.1), but `main.cpp` does not parse `config.yaml` (it has no YAML dependency at all) and so never reads it. Wiring this up is deferred to the Controller↔TISE configuration plumbing (`docs/planning/tise-task-breakdown.md` §4 item 4).
 
-* **Continuum phase-shift matching assumes a regular right boundary.** If the supplied potential is singular at the domain's right edge (`x = rMax`), `solveTISE` still attempts continuum construction and prints a warning to stderr, but `matchAsymptotic`'s flat-asymptote matching formula is not valid there — treat any `phase_shifts.dat`/`continuum_state_NNN.dat` output from such a run with suspicion. See `docs/planning/engineer-a-plan-A4-wiring-design.md`.
+* **Continuum phase-shift matching assumes a regular right boundary.** If the supplied potential is singular at the domain's right edge (`x = rMax`), `solveTISE`/`H-BoundStates` still attempts continuum construction and prints a warning to stderr (`tise_solver` surfaces the same diagnostic through `warnings.json` instead), but `matchAsymptotic`'s flat-asymptote matching formula is not valid there — treat any `phase_shifts.dat`/`continuum_state_NNN.dat` output from such a run with suspicion. See `docs/planning/engineer-a-plan-A4-wiring-design.md`. Relatedly, the Coulomb-tail continuum-matching formula (for a potential whose tail is genuinely `1/r`-like beyond the box, as opposed to flat) is not implemented at all — see `docs/SDD.md` §5.2.3 and `docs/planning/tise-release-readiness-plan.md`.
 

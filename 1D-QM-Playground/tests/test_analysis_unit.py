@@ -47,6 +47,7 @@ from analysis import (
     load_config,
     main,
     plot_eigenstates,
+    plot_phase_shifts,
     read_continuum_states,
     read_eigenstates,
     read_eigenvalues,
@@ -676,6 +677,35 @@ class TestPlotEigenstates:
         mock_xlim.assert_called_once_with(-20.0, 20.0)
 
 
+# ─── plot_phase_shifts ──────────────────────────────────────────────────────
+#
+# visualization.phase_shifts (config.yaml:96) is documented TISE-only, NOT
+# TDSE-gated (unlike its visualization.* neighbors), defaults true in the
+# real config.yaml, and tise.continuum.enabled -> phase_shifts.dat exists
+# whenever it's meaningful to plot at all -- but analysis.py had zero
+# plotting implementation for it (Python audit, tise-release-readiness-
+# plan.md Part D): the config toggle was read nowhere, so a default-config
+# run silently produced no plot and no warning that one was requested.
+
+
+class TestPlotPhaseShifts:
+    def test_writes_one_png(self, tmp_path):
+        data = _empty_tise_data(
+            phase_shifts=[
+                PhaseShiftRow(0.1, 0.05, 1.2),
+                PhaseShiftRow(0.2, 0.09, 1.1),
+            ]
+        )
+
+        plot_phase_shifts(data, str(tmp_path))
+
+        assert (tmp_path / "phase_shifts.png").is_file()
+
+    def test_no_phase_shifts_writes_no_file(self, tmp_path):
+        plot_phase_shifts(_empty_tise_data(), str(tmp_path))
+        assert list(tmp_path.iterdir()) == []
+
+
 # ─── load_config ────────────────────────────────────────────────────────────
 
 
@@ -862,6 +892,30 @@ class TestRun:
         run(str(config_path), str(tise_dir), str(tdse_dir))
 
         assert not (tise_dir / "eigenstate_1.png").exists()
+
+    def test_visualization_phase_shifts_true_writes_phase_shifts_png(self, tmp_path):
+        config_path = _write_yaml(tmp_path / "config.yaml", {"visualization": {"phase_shifts": True}})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        _write_dat(tise_dir / "phase_shifts.dat", "# phase_shifts.dat: eps_i, delta(eps_i), d(delta)/dE", "0.1  0.05  1.2")
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        run(str(config_path), str(tise_dir), str(tdse_dir))
+
+        assert (tise_dir / "phase_shifts.png").is_file()
+
+    def test_visualization_phase_shifts_absent_writes_no_phase_shifts_png(self, tmp_path):
+        config_path = _write_yaml(tmp_path / "config.yaml", {"placeholder": True})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        _write_dat(tise_dir / "phase_shifts.dat", "# phase_shifts.dat: eps_i, delta(eps_i), d(delta)/dE", "0.1  0.05  1.2")
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        run(str(config_path), str(tise_dir), str(tdse_dir))
+
+        assert not (tise_dir / "phase_shifts.png").exists()
 
 
 # ─── main (CLI entry point) ─────────────────────────────────────────────────

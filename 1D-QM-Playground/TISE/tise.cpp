@@ -145,6 +145,53 @@ double evaluateFunction(std::map<std::string, std::string> function, double x)
     throw std::runtime_error(oss.str());
 }
 
+void validateNoOverlappingPotentialPieces(const std::map<std::string, std::string> &potential)
+{
+    std::vector<std::pair<std::string, ParsedInterval>> pieces;
+    pieces.reserve(potential.size());
+    for (const auto &[domain, fn] : potential)
+    {
+        (void)fn;
+        pieces.emplace_back(domain, parseInterval(domain));
+    }
+
+    // A large-but-finite stand-in for +/-infinity, usable as a concrete
+    // evaluateFunction-style probe x -- mirrors the same "probe far beyond
+    // an infinite bound" idea tise_solver_main.cpp's own Case-3 detection
+    // already uses.
+    auto finiteProbe = [](double bound, bool isUpper) {
+        if (std::isinf(bound))
+            return isUpper ? std::numeric_limits<double>::max() / 4.0
+                            : -std::numeric_limits<double>::max() / 4.0;
+        return bound;
+    };
+
+    for (std::size_t i = 0; i < pieces.size(); ++i)
+    {
+        for (std::size_t j = i + 1; j < pieces.size(); ++j)
+        {
+            const auto &[domainA, ivA] = pieces[i];
+            const auto &[domainB, ivB] = pieces[j];
+
+            std::vector<double> probes = {
+                finiteProbe(ivA.lower, false), finiteProbe(ivA.upper, true),
+                finiteProbe(ivB.lower, false), finiteProbe(ivB.upper, true),
+            };
+            if (std::isfinite(ivA.lower) && std::isfinite(ivA.upper))
+                probes.push_back((ivA.lower + ivA.upper) / 2.0);
+            if (std::isfinite(ivB.lower) && std::isfinite(ivB.upper))
+                probes.push_back((ivB.lower + ivB.upper) / 2.0);
+
+            for (double x : probes)
+            {
+                if (inInterval(x, domainA) && inInterval(x, domainB))
+                    throw std::runtime_error("overlapping potential piece domains: '" + domainA +
+                                              "' and '" + domainB + "' both cover x=" + std::to_string(x));
+            }
+        }
+    }
+}
+
 std::pair<std::string, std::string> parsePotentialPiece(const std::string &piece)
 {
     auto first = piece.find_first_not_of(" \t");
@@ -410,7 +457,9 @@ std::vector<Real> continuumStateToBSplineCoeffs(const std::vector<Real> &stateCo
 std::pair<std::vector<Real>, std::vector<Real>>
 fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                     std::map<std::string, std::string> potential,
-                    std::optional<std::vector<int>> dropSet)
+                    std::optional<std::vector<int>> dropSet,
+                    std::optional<Real> case3RightR,
+                    std::optional<Real> case3RightDelta)
 {
     const int nBSplines = bs.getNBSplines();
     const ColumnMap map = resolveDropSet(nBSplines, nEn, dropSet);
@@ -423,9 +472,24 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
     // Piecewise potential supplied by the caller, evaluated per-x via muparser.
     // `L` is no longer used to select the potential here; it is retained for
     // eigenvalueError()'s comparison against the analytic hydrogen spectrum.
-    bspline::D2DFun fPot = [potential](double x, const double *) {
-        return evaluateFunction(potential, x);
-    };
+    // Case-3 remediation: when the caller supplies both case3RightR/Delta
+    // (from classifyAsymptote's Irregular classification), evaluate through
+    // the windowed/tapered potential instead of the raw one.
+    bspline::D2DFun fPot;
+    if (case3RightR.has_value() && case3RightDelta.has_value())
+    {
+        const Real R = *case3RightR;
+        const Real delta = *case3RightDelta;
+        fPot = [potential, R, delta](double x, const double *) {
+            return evaluateWindowedPotential(potential, x, R, delta, DomainSide::Right);
+        };
+    }
+    else
+    {
+        fPot = [potential](double x, const double *) {
+            return evaluateFunction(potential, x);
+        };
+    }
     // Previous hardcoded radial hydrogen-like potential, kept for reference:
     // bspline::D2DFun fPot = [L](double x, const double *) {
     //     return radialPotential(x, L);
@@ -637,7 +701,21 @@ AsymptoticResult matchAsymptotic(
         if (E_idx == 0)
             dSin2DeltaDE = (std::sin(2*result.delta[E_idx+1]) - std::sin(2*result.delta[E_idx])) / dE;
         else if (E_idx == grid.size() - 1)
-            dSin2DeltaDE = (std::sin(2*result.delta[E_idx]) - std::sin(2*result.delta[E_idx-1])) / dE; // TODO: will this sign be wrong
+            // Standard backward difference (f(i)-f(i-1))/dE for f'(i) --
+            // confirmed correct (not flipped), verified against an
+            // independent fine-centered-difference estimate in a locally-
+            // smooth (pole-avoiding) energy window: see
+            // MatchAsymptoticDDeltaDESignTest.
+            // LastGridPointMatchesIndependentFineCentralDifference,
+            // TISE/tests/test_tise.cpp. A naive full-scale test using this
+            // well's own default energy grid instead disagreed by ~10%, but
+            // that was traced to this potential's densely-packed
+            // positive-energy pseudostate ladder (poles roughly 0.05-0.2
+            // apart) making delta(E) genuinely non-smooth near ANY
+            // 0.1-scale window, not a sign/formula error -- the same
+            // known ADR-0007 box-discretization-artifact effect
+            // buildContinuumState's own pole warning already flags.
+            dSin2DeltaDE = (std::sin(2*result.delta[E_idx]) - std::sin(2*result.delta[E_idx-1])) / dE;
         else
             dSin2DeltaDE = (std::sin(2*result.delta[E_idx+1]) - std::sin(2*result.delta[E_idx-1])) / (2*dE);
 
@@ -1040,11 +1118,12 @@ void writeEigenvalues(std::ostream &out, const EigenResult &er, int nStates)
             << " " << std::setw(24) << er.values[i] << "\n";
 }
 
-void writeEigenvectors(std::ostream &out, const EigenResult &er, int nBSplines, int nStates)
+void writeEigenvectors(std::ostream &out, const EigenResult &er, int nBSplines, int nStates,
+                        std::optional<std::vector<int>> dropSet)
 {
     std::vector<std::vector<Real>> cols(nStates);
     for (int j = 0; j < nStates; ++j)
-        cols[j] = eigenstateCoefficients(er.vectors, j + 1, er.dim, nBSplines);
+        cols[j] = eigenstateCoefficients(er.vectors, j + 1, er.dim, nBSplines, dropSet);
 
     out << "# eigenvectors.dat: columns are c_n coefficient vectors\n";
     out << std::scientific << std::setprecision(16);
@@ -1069,8 +1148,8 @@ void writeBandedMatrix(std::ostream &out, const std::vector<Real> &mat,
     }
 }
 
-SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
-                           Real E_threshold, Real E_max, int N_E)
+StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMin, Real rMax,
+                                                   const std::map<std::string, std::string> &potential)
 {
     // Gap 1 (docs/planning/engineer-a-plan-A4-wiring-design.md): strategic
     // grid construction, automatic (architecture-06-20.md:448 -- "determined
@@ -1123,7 +1202,7 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
 
         // matchAsymptotic's flat-asymptote assumption at R~rMax is affected
         // by a right-edge singularity regardless of whether any extra
-        // B-spline removal happens there -- always warn.
+        // B-spline removal happens there -- always flag it for the caller.
         if (atRightEdge)
             rightEdgeSingular = true;
 
@@ -1137,21 +1216,31 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
     fillDropSet.erase(std::unique(fillDropSet.begin(), fillDropSet.end()), fillDropSet.end());
     fillDropSet.erase(std::remove(fillDropSet.begin(), fillDropSet.end(), nBSplines), fillDropSet.end());
 
-    if (rightEdgeSingular)
+    const int nEnFilled = nBSplines - static_cast<int>(fillDropSet.size()); // == nEnBound + 1
+    const int nEnBound  = nEnFilled - 1;
+
+    return StrategicGridResult{grid, bs, nBSplines, fillDropSet, nEnBound, rightEdgeSingular};
+}
+
+SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
+                           Real E_threshold, Real E_max, int N_E)
+{
+    auto sgr = buildStrategicGridAndDropSet(nNodes, order, rMin, rMax, potential);
+
+    if (sgr.rightEdgeSingular)
         std::cerr << "Warning: potential is singular at the right domain edge x=" << rMax
                   << "; continuum phase-shift matching (matchAsymptotic) assumes a regular "
                   << "boundary there, so continuum results should be treated with suspicion.\n";
 
-    const int nEnFilled = nBSplines - static_cast<int>(fillDropSet.size()); // == nEnBound + 1
-    const int nEnBound  = nEnFilled - 1;
+    const int nEnFilled = sgr.nEnBound + 1;
 
-    auto [H, S] = fillBandedMatrices(bs, nEnFilled, order, L, potential, fillDropSet);
-    EigenResult er = solveGeneralizedEigenproblem(H, S, nEnBound, order);
+    auto [H, S] = fillBandedMatrices(sgr.bs, nEnFilled, order, L, potential, sgr.fillDropSet);
+    EigenResult er = solveGeneralizedEigenproblem(H, S, sgr.nEnBound, order);
 
     auto energyGrid = buildEnergyGrid(E_threshold, E_max, N_E);
     std::vector<std::vector<tise::Real>> states =
-        buildContinuumState(order, nEnBound, H, S, er, energyGrid, nBSplines, fillDropSet);
-    AsymptoticResult ar = matchAsymptotic(bs, states, er, energyGrid, rMax, fillDropSet);
+        buildContinuumState(order, sgr.nEnBound, H, S, er, energyGrid, sgr.nBSplines, sgr.fillDropSet);
+    AsymptoticResult ar = matchAsymptotic(sgr.bs, states, er, energyGrid, rMax, sgr.fillDropSet);
 
     std::ofstream phaseShiftsOut("phase_shifts.dat");
     std::vector<std::ofstream> continuumStateFiles;
@@ -1164,13 +1253,13 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
         continuumStateFiles.emplace_back(oss.str());
         continuumStateOut.push_back(&continuumStateFiles.back());
     }
-    writeContinuumInfo(phaseShiftsOut, bs, ar, energyGrid, states, continuumStateOut, 301, rMin, rMax, er, fillDropSet);
+    writeContinuumInfo(phaseShiftsOut, sgr.bs, ar, energyGrid, states, continuumStateOut, 301, rMin, rMax, er, sgr.fillDropSet);
 
-    std::vector<int> dropSet = fillDropSet;
-    dropSet.push_back(nBSplines);
+    std::vector<int> dropSet = sgr.fillDropSet;
+    dropSet.push_back(sgr.nBSplines);
     std::sort(dropSet.begin(), dropSet.end());
 
-    return SolveTISEResult{er, bs, grid, nBSplines, dropSet};
+    return SolveTISEResult{er, sgr.bs, sgr.grid, sgr.nBSplines, dropSet};
 }
 
 // === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===

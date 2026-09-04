@@ -50,6 +50,7 @@ it.
 
 from __future__ import annotations
 
+import json
 import math
 import subprocess
 import sys
@@ -60,6 +61,11 @@ import yaml
 
 from analysis import ContinuumPoint, EigenstatePoint, EigenvalueRow, PhaseShiftRow, read_tise_output
 from controller import run_tise_solver
+
+# The tests/ dir itself -- where the known-solution reference configs
+# (free_particle.yaml, finite_square_well.yaml, harmonic_oscillator.yaml,
+# hydrogen.yaml, interior_singularity.yaml) live, next to this file.
+_TESTS_DIR = Path(__file__).resolve().parent
 
 pytestmark = pytest.mark.integration
 
@@ -464,6 +470,269 @@ class TestHarmonicOscillatorBoundStates:
             n = row.index  # eigenvalues.dat is 0-indexed; HO quantum number also starts at 0
             expected = (n + 0.5) * omega
             assert row.energy == pytest.approx(expected, abs=1e-3)
+
+
+# ─── Known-solution reference configs, loaded by name from tests/*.yaml ────
+#
+# tests/{free_particle,finite_square_well,harmonic_oscillator,hydrogen,
+# interior_singularity}.yaml previously existed only as manual-inspection
+# fixtures -- never loaded by any automated test (the classes above build
+# equivalent configs inline instead). This section drives the real
+# tise_solver binary against the ACTUAL committed files (only output_dir
+# redirected into tmp_path), closing that gap and doubling as the
+# regression backstop for Part A's solveTISE/tise_solver orchestration
+# unification (docs/planning/tise-release-readiness-plan.md).
+
+
+def _load_known_solution_config(name: str, tmp_path: Path) -> Path:
+    """Load tests/<name>.yaml (the actual committed file, not an
+    inline-built equivalent), redirect run.output_dir into tmp_path, and
+    write the result to a fresh path under tmp_path -- the source file
+    itself is never opened for writing."""
+    with open(_TESTS_DIR / f"{name}.yaml") as f:
+        cfg = yaml.safe_load(f)
+    cfg["run"]["output_dir"] = str(tmp_path / "data")
+    out = tmp_path / f"{name}_loaded.yaml"
+    with open(out, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return out
+
+
+class TestKnownSolutionConfigFilesLoadAndRun:
+    """free_particle.yaml and harmonic_oscillator.yaml already have rich
+    physics assertions above (via inline-built equivalent configs) -- this
+    just confirms the actual committed FILES load and run correctly too,
+    closing the "orphaned fixture" gap without duplicating those checks."""
+
+    def test_free_particle_yaml_runs_and_produces_expected_output(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("free_particle", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.eigenvalues) > 0
+        assert len(data.continuum_states) == 5  # free_particle.yaml's n_energies
+        assert len(data.eigenstates) == len(data.eigenvalues)
+
+    def test_harmonic_oscillator_yaml_runs_and_produces_expected_output(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("harmonic_oscillator", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert data.continuum_states == []  # continuum disabled -- no true continuum
+        omega = 1.0
+        for row in data.eigenvalues[:10]:
+            expected = (row.index + 0.5) * omega
+            assert row.energy == pytest.approx(expected, abs=1e-3)
+
+
+class TestFiniteSquareWellRealSubprocess:
+    """finite_square_well.yaml had ZERO test coverage before this -- first
+    real-subprocess physics validation. V0=1.0, a=10.0 attractive well;
+    closed-form s-wave phase shift (same formula TISE/tests/test_tise.cpp's
+    SquareWellPhaseShiftTest validates matchAsymptotic against directly),
+    exercising genuinely non-trivial scattering unlike free particle's
+    flat delta=0."""
+
+    V0 = 1.0
+    A = 10.0
+
+    @staticmethod
+    def _analytic_phase_shift(E: float, V0: float, a: float) -> float:
+        k = math.sqrt(2 * E)
+        kappa = math.sqrt(2 * (E + V0))
+        return -k * a + math.atan((k / kappa) * math.tan(kappa * a))
+
+    @staticmethod
+    def _wrap_mod_pi(delta: float) -> float:
+        return delta - math.pi * round(delta / math.pi)
+
+    def test_has_genuine_bound_states(self, tise_solver_binary: Path, tmp_path: Path):
+        config = _load_known_solution_config("finite_square_well", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        bound = [row.energy for row in data.eigenvalues if row.energy < 0]
+        assert len(bound) > 0
+
+    def test_phase_shift_matches_analytic_square_well_formula(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("finite_square_well", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.phase_shifts) > 0
+        for row in data.phase_shifts:
+            expected = self._analytic_phase_shift(row.energy, self.V0, self.A)
+            got = self._wrap_mod_pi(row.delta)
+            want = self._wrap_mod_pi(expected)
+            assert got == pytest.approx(want, abs=5e-2)
+
+
+class TestHydrogenConfigFileRealSubprocess:
+    """hydrogen.yaml: same potential as the real config.yaml, but with a
+    conservative E_max (inside this basis's own reported E_acc reliability
+    ceiling, unlike the real config.yaml's E_max=10) and
+    visualization.eigenstates enabled -- a genuinely different, complementary
+    scenario from TestNoContinuumRealRoundTrip above, not a duplicate."""
+
+    def test_bound_eigenvalues_match_analytic_hydrogen(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("hydrogen", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        energies = [row.energy for row in data.eigenvalues]
+        assert energies[0] == pytest.approx(-1 / 8, abs=1e-6)
+        assert energies[1] == pytest.approx(-1 / 18, abs=1e-6)
+        assert energies[2] == pytest.approx(-1 / 32, abs=1e-6)
+
+
+class TestInteriorSingularityRealSubprocess:
+    """interior_singularity.yaml: a genuine INTERIOR Singular potential join
+    (not at a domain edge like hydrogen's), run through the real tise_solver
+    binary. Before Part A's solveTISE/tise_solver orchestration unification,
+    tise_solver_main.cpp had no A4b singular-B-spline-removal path at all
+    and would have silently produced degraded eigenvalues with
+    EXIT_SUCCESS and zero warning. Mirrors TISE/tests/test_tise.cpp's
+    SolveTISETest.InteriorSingularityTriggersBSplineRemoval at the
+    real-binary level -- this is the test that would have caught a missed
+    drop-set-threading site in tise_solver_main.cpp."""
+
+    def test_all_eigenvalues_and_eigenvectors_finite(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("interior_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.eigenvalues) > 0
+        for row in data.eigenvalues:
+            assert math.isfinite(row.energy)
+        for evec_row in data.eigenvectors:
+            for value in evec_row:
+                assert math.isfinite(value)
+
+    def test_bspline_removal_actually_shrinks_the_basis_below_classic(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # nBSplines = n_nodes+order-2 = 41+8-2 = 47. The classic dropset
+        # ({1} only) would give nEnBound = 47-1-1 = 45. If the interior
+        # singularity's A4b removal isn't actually reaching this config
+        # through the real binary (e.g. a regression reintroducing the
+        # pre-Part-A plain-uniform-grid/classic-dropset-only construction),
+        # nEnBound would silently drift back up to 45 -- this is the
+        # concrete number that would catch that regression. Verified
+        # manually during Part A's implementation: this config actually
+        # produces 36.
+        config = _load_known_solution_config("interior_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.eigenvalues) < 45
+
+
+class TestRightEdgeSingularWarningRealSubprocess:
+    """right_edge_singularity.yaml: potential singular exactly AT x=rMax
+    (1/(100-x)) -- distinct from hydrogen's LEFT-edge singularity. Before
+    Part A, tise_solver_main.cpp had no access to this diagnostic at all
+    (only solveTISE/H-BoundStates, via a bare stderr print, could detect
+    it) -- this is the first-ever real-subprocess proof it reaches
+    warnings.json through the actual production binary."""
+
+    def test_warnings_json_contains_right_edge_singular_warning(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("right_edge_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        warnings = json.loads((tise_dir / "warnings.json").read_text())
+
+        messages = [w["message"] for w in warnings]
+        assert any("singular at the right domain edge" in m for m in messages)
+
+
+class TestBoundStateDiagnosticsRealSubprocess:
+    """classifyBoundStates/checkWellContainment (Part B): previously fully
+    implemented and unit-tested but never called from tise_solver_main.cpp
+    -- production output never labeled the bound/continuum-artifact split
+    or flagged a wall-colliding bound state. The real config.yaml's
+    hydrogen potential in its R=100 box is a naturally-occurring case for
+    both: 7 of 59 states are below E=0 (per ADR-0007's own count), and its
+    3 highest-n bound states (larger radial extent) are only marginally
+    contained by R=100."""
+
+    def test_warnings_json_reports_bound_state_count(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(tmp_config), tise_dir, binary=tise_solver_binary)
+        warnings = json.loads((tise_dir / "warnings.json").read_text())
+
+        messages = [w["message"] for w in warnings]
+        assert any("7 of 59 computed states are below E=0.0" in m for m in messages)
+
+    def test_warnings_json_flags_wall_colliding_bound_states_only(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(tmp_config), tise_dir, binary=tise_solver_binary)
+        warnings = json.loads((tise_dir / "warnings.json").read_text())
+
+        messages = [w["message"] for w in warnings]
+        colliding = [m for m in messages if "colliding with the outer wall" in m]
+        # States 5, 6, 7 (E<0, larger radial extent) are only marginally
+        # contained by R=100; states 1-4 are not, and no unbound/continuum-
+        # like state (index 8+, E>=0) should ever be flagged -- that check
+        # is deliberately restricted to E<0 states (see tise_solver_main.cpp).
+        assert any("bound state 5 " in m for m in colliding)
+        assert any("bound state 6 " in m for m in colliding)
+        assert any("bound state 7 " in m for m in colliding)
+        assert not any("bound state 1 " in m for m in colliding)
+        assert not any("bound state 8 " in m for m in colliding)
+
+
+class TestCase3RemediationRealSubprocess:
+    """case3_irregular_tail.yaml: "1/x^1.5" on (0.1,inf), same
+    proven Case-3-triggering potential TISE/tests/test_tise.cpp's
+    ClassifyAsymptoteTest.Case3IrregularForPowerLawOneAndHalf and
+    FillBandedMatricesCase3WindowTest validate directly. Before Part B,
+    classifyAsymptote could DETECT this and warn, but nothing ever tapered
+    the potential -- detection without remediation."""
+
+    def test_all_eigenvalues_finite(self, tise_solver_binary: Path, tmp_path: Path):
+        config = _load_known_solution_config("case3_irregular_tail", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.eigenvalues) > 0
+        for row in data.eigenvalues:
+            assert math.isfinite(row.energy)
+
+    def test_warnings_json_reports_tapering_remediation(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("case3_irregular_tail", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        warnings = json.loads((tise_dir / "warnings.json").read_text())
+
+        messages = [w["message"] for w in warnings]
+        assert any("Irregular" in m and "tapering" in m for m in messages)
 
 
 # ─── analysis.py's OWN CLI/subprocess contract (Sec 7.2.3), invoked directly ─

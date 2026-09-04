@@ -1,15 +1,15 @@
 run:
   run_tise:     true
   run_tdse:     false
-  run_analysis: true
-  output_dir:   "./data/finite_square_well"
+  run_analysis: false
+  output_dir:   "./data/interior_singularity"
 bspline:
-  n_nodes: 51
-  order:   12
-  domain:  [0.0, 100.0]
+  n_nodes: 41
+  order:   8
+  domain:  [0.0, 40.0]
 potential:
-  - "{'domain': '[0, 10)', 'function': '-1.0'}"
-  - "{'domain': '[10, 100]', 'function': '0'}"
+  - "{'domain': '[0, 20)', 'function': '0'}"
+  - "{'domain': '(20, 40]', 'function': '1/(x-20)'}"
 tise:
   n_pts_eigenstate: 301
   error_threshold:  1.0e-10
@@ -21,4 +21,3 @@ tise:
     n_pts:       500
 visualization:
   eigenstates: true
-  phase_shifts: true

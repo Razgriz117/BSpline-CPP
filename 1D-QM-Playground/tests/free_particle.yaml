@@ -20,3 +20,4 @@ tise:
     n_pts:       500
 visualization:
   eigenstates: true
+  phase_shifts: true

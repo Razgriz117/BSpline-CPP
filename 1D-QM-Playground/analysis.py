@@ -481,6 +481,31 @@ def plot_eigenstates(tise_data: TiseData, tise_dir: str) -> None:
         plt.close()
 
 
+def plot_phase_shifts(tise_data: TiseData, tise_dir: str) -> None:
+    """Plot delta(E) and d(delta)/dE vs. E (docs/SDD.md Sec 6.1's
+    visualization.phase_shifts toggle -- TISE-only, not TDSE-gated, unlike
+    most of its visualization.* neighbors). One PNG, two stacked subplots;
+    writes nothing when tise.continuum.enabled was false for this run
+    (phase_shifts == [], same tolerate-absence convention plot_tise's own
+    continuum-state loop already follows)."""
+    if not tise_data.phase_shifts:
+        return
+
+    energies = [row.energy for row in tise_data.phase_shifts]
+    deltas = [row.delta for row in tise_data.phase_shifts]
+    ddelta_dEs = [row.ddelta_dE for row in tise_data.phase_shifts]
+
+    fig, (ax_delta, ax_ddelta) = plt.subplots(2, 1, sharex=True)
+    ax_delta.plot(energies, deltas)
+    ax_delta.set_ylabel(r"$\delta(E)$")
+    ax_ddelta.plot(energies, ddelta_dEs)
+    ax_ddelta.set_xlabel("E")
+    ax_ddelta.set_ylabel(r"$d\delta/dE$")
+    fig.suptitle("Phase shift")
+    fig.savefig(f"{tise_dir}/phase_shifts.png")
+    plt.close(fig)
+
+
 def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     """Run Analysis's Phase 3 scope (Sec 7.2.3, Sec 10.2 Phase 3).
 
@@ -499,6 +524,8 @@ def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     plot_tise(tise_output, tise_dir)
     if cfg.get("visualization", {}).get("eigenstates", False):
         plot_eigenstates(tise_output, tise_dir)
+    if cfg.get("visualization", {}).get("phase_shifts", False):
+        plot_phase_shifts(tise_output, tise_dir)
 
     if not Path(tdse_dir).is_dir():
         print(

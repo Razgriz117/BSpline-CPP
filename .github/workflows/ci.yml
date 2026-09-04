@@ -1,0 +1,52 @@
+name: CI
+
+# Release-readiness gap G6 (docs/planning/tise-release-readiness-plan.md,
+# BSpline-CPP/1D-QM-Playground/): the repo previously had zero automated
+# test gate of any kind. This runs both suites -- the C++ GoogleTest suite
+# (BSpline/Utils/TISE/TimeEvolution) and the Python pytest suite (unit +
+# real-subprocess integration, the latter building/exercising the actual
+# tise_solver binary) -- on every push and pull request.
+
+on:
+  push:
+  pull_request:
+
+defaults:
+  run:
+    working-directory: 1D-QM-Playground
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install C++ dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            liblapack-dev libblas-dev libeigen3-dev \
+            nlohmann-json3-dev libmuparser-dev \
+            libyaml-cpp-dev libgtest-dev
+
+      - name: Configure and build (with tests)
+        run: |
+          cmake -S TISE -B TISE/build -DBUILD_TESTING=ON
+          cmake --build TISE/build -j
+
+      - name: Run C++ test suite
+        run: ctest --test-dir TISE/build --output-on-failure
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Python test suite
+        # Real-subprocess integration tests reuse TISE/build/tise_solver
+        # (already built above) via the session-scoped tise_solver_binary
+        # fixture -- no rebuild needed here.
+        run: pytest tests/

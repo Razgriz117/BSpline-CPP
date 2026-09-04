@@ -50,8 +50,24 @@ bool inInterval(double x, const std::string &interval);
 
 // Given a piecewise potential (domain string -> muparser expression string in
 // `x`), find the piece whose domain contains x and evaluate it there. Throws
-// std::runtime_error if no piece's domain covers x.
+// std::runtime_error if no piece's domain covers x. If more than one piece's
+// domain covers x, the first match under this map's own (domain-string
+// sorted, NOT declaration-order) iteration is silently used -- see
+// validateNoOverlappingPotentialPieces below to guard against that
+// ambiguity ahead of time, since evaluateFunction itself is called on the
+// hot path (once per quadrature point) and does not re-check it.
 double evaluateFunction(std::map<std::string, std::string> function, double x);
+
+// One-time validation (call once per config/potential, NOT per
+// evaluateFunction call): throws std::runtime_error naming the two
+// colliding domain strings if any two pieces of `potential` cover a common
+// x. Pragmatic, sampling-based check (each piece's own two boundary values
+// plus its midpoint, probed against every other piece) rather than exact
+// interval algebra -- sufficient for the realistic case of a finite list of
+// contiguous/near-contiguous config.yaml potential pieces; does not
+// separately check for GAPS (a query that lands in the gap between pieces
+// is evaluateFunction's own, unrelated "does not cover x" error).
+void validateNoOverlappingPotentialPieces(const std::map<std::string, std::string> &potential);
 
 // Parse one config.yaml `potential` list entry -- a single-quoted Python
 // dict-literal string, e.g. "{'domain': '(0, 100]', 'function': '-1/x'}"
@@ -162,10 +178,21 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
 // `nEn` MUST equal bs.getNBSplines() minus the resolved drop-set's size, or
 // this throws std::runtime_error (see the plan doc for why this check
 // exists -- a mismatch here previously risked a silent out-of-bounds write).
+// `case3RightR`/`case3RightDelta`: Case-3 (irregular-asymptote) remediation.
+// classifyAsymptote can DETECT an irregular tail and recommend a transition
+// width, but detection alone doesn't change anything filled here -- passing
+// both (matching `case3WindowFunction`'s R/delta, DomainSide::Right) makes
+// the potential evaluate via evaluateWindowedPotential instead of plain
+// evaluateFunction, smoothly tapering it to 0 over [R-delta, R] rather than
+// integrating the raw (possibly irregular/divergent) tail right up to the
+// wall. Left-side windowing is not supported (no current caller needs it).
+// Both nullopt (the default) reproduces plain evaluateFunction, unchanged.
 std::pair<std::vector<Real>, std::vector<Real>>
 fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                     std::map<std::string, std::string> potential,
-                    std::optional<std::vector<int>> dropSet = std::nullopt);
+                    std::optional<std::vector<int>> dropSet = std::nullopt,
+                    std::optional<Real> case3RightR = std::nullopt,
+                    std::optional<Real> case3RightDelta = std::nullopt);
 
 // Given the set of BSplines, Hamiltonian, and eigenvectors, solve for:
 // < phi_n | H | B_N > and < phi_n | B_N >, for each eigenvector
@@ -344,8 +371,11 @@ std::vector<DetectedJoin> detectPotentialStructure(const std::map<std::string, s
 // derived in docs/planning/engineer-a-plan-A4.md: Step -> order-3,
 // StitchedKink -> order-4 (both clamped at 0 -- a case this codebase's
 // order values, 4 and 8, only actually reach for StitchedKink at order=4).
-// Singular/Continuous produce no knot (Singular's remediation -- B-spline
-// removal -- is A4b, out of scope here).
+// Singular/Continuous produce no knot -- Singular's remediation is B-spline
+// removal (A4b, `bSplinesTouchingX` below), a different function from this
+// one's knot-insertion job, not an unimplemented gap: A4b is implemented
+// and, since ADR-0009, wired into both solveTISE and tise_solver_main.cpp
+// via buildStrategicGridAndDropSet.
 std::vector<StrategicKnot> strategicKnotsFromJoins(const std::vector<DetectedJoin> &joins, int order);
 
 // Build a radial grid combining a uniform base (buildUniformRadialGrid) with
@@ -414,11 +444,14 @@ void writeEigenvalues(std::ostream &out, const EigenResult &er, int nStates);
 
 // Write eigenvectors.dat: nBSplines rows x nStates columns. Column j is the
 // full, zero-padded B-spline coefficient vector for eigenstate j+1
-// (1-based, per eigenstateCoefficients), using the DEFAULT dropSet
-// ({1,nBSplines}) -- the same convention er itself was diagonalized under
-// when filled via fillBandedMatrices(..., nEn+1, ..., {1}) and truncated to
-// its leading nEn columns for the solve (see docs/SDD.md §6.3).
-void writeEigenvectors(std::ostream &out, const EigenResult &er, int nBSplines, int nStates);
+// (1-based, per eigenstateCoefficients). `dropSet` MUST match whatever
+// drop-set er was actually diagonalized under (defaults to the classic
+// {1,nBSplines} convention, matching fillBandedMatrices(..., nEn+1, ...,
+// {1}) truncated to its leading nEn columns for the solve -- see
+// docs/SDD.md §6.3) -- passing a mismatched dropSet silently misattributes
+// coefficients, same contract as eigenstateCoefficients itself.
+void writeEigenvectors(std::ostream &out, const EigenResult &er, int nBSplines, int nStates,
+                        std::optional<std::vector<int>> dropSet = std::nullopt);
 
 // Write hamiltonian.dat/overlap.dat: preserves fillBandedMatrices' own
 // column-major banded layout (order rows x nEn cols, element (row,col) at
@@ -439,6 +472,37 @@ void writeBandedMatrix(std::ostream &out, const std::vector<Real> &mat,
 // (non-uniform) grid and/or a non-classic drop-set (REQ-F-050), an
 // independent reconstruction would silently diverge from what was actually
 // solved.
+// === ADR-0009: shared grid+drop-set construction (unifies solveTISE/tise_solver) ===
+// Extracted from solveTISE's own grid/dropset construction (was previously
+// inlined there only) so tise_solver_main.cpp -- which used to build a
+// plain uniform grid and hardcode the classic {1} drop-set, structurally
+// unable to reach strategic node placement (REQ-F-050) or A4b interior
+// singular-B-spline removal -- can share the exact same logic instead of a
+// second, divergent copy (the risk ADR-0008 itself named as its revisit
+// trigger: "if the two copies drift and cause a bug"). Automatically
+// strategic if the potential has detectable Step/StitchedKink/Singular
+// structure; a potential with none produces an unchanged uniform grid and
+// the classic {1} drop-set, byte-identical to the pre-ADR-0009 behavior.
+struct StrategicGridResult
+{
+    std::vector<Real> grid;    // the exact (possibly non-uniform/strategic) physical
+                                // grid passed to bs.init
+    bspline::BSpline bs;       // the exact basis constructed from `grid`
+    int nBSplines;              // == bs.getNBSplines(); duplicated for convenience
+    std::vector<int> fillDropSet; // for fillBandedMatrices -- B_N (nBSplines) is
+                                // deliberately never included (its raw H/S column is
+                                // needed by continuum construction, not dropped from
+                                // the fill; it's excluded from the DIAGONALIZATION by
+                                // the nEnFilled/nEnBound truncation below instead)
+    int nEnBound;                // == nBSplines - fillDropSet.size() - 1
+    bool rightEdgeSingular;    // true iff the potential is singular at x=rMax --
+                                // matchAsymptotic's flat-asymptote assumption there
+                                // is affected regardless of B-spline removal
+};
+
+StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMin, Real rMax,
+                                                   const std::map<std::string, std::string> &potential);
+
 struct SolveTISEResult
 {
     EigenResult eigen;         // as returned by solveGeneralizedEigenproblem
