@@ -465,17 +465,56 @@ def plot_tise(tise_data: TiseData, tise_dir: str) -> None:
         plt.close()
 
 
-def plot_eigenstates(tise_data: TiseData, tise_dir: str) -> None:
-    """Plot |phi_n(x)|^2 for each bound eigenstate (docs/SDD.md Sec 6.1's
-    visualization.eigenstates toggle) -- squared, unlike plot_tise's raw
-    psi, per that same spec entry."""
+def plot_eigenstates(tise_data: TiseData, tise_dir: str, square_bound_states: bool = False) -> None:
+    """Plot phi_n(x) for each eigenstate (docs/SDD.md Sec 6.1's
+    visualization.eigenstates toggle) -- raw by default, matching
+    plot_tise's raw psi convention so every wavefunction-style plot in a
+    run is directly comparable.
+
+    `square_bound_states`: docs/SDD.md Sec 6.1's visualization.
+    bound_states_squared toggle. When true, a state confirmed bound is
+    plotted as |phi_n(x)|^2 instead -- the conventional probability-density
+    view. Boundness:
+      - If this run has no continuum at all (tise_data.continuum_states ==
+        [], per tise.continuum.enabled: false) there is no continuum/box-
+        artifact distinction to make in the first place -- EVERY computed
+        eigenstate is treated as bound. This matters concretely: a
+        potential like the harmonic oscillator has V_min=0 and E_n=n+0.5
+        (all positive), so the E<0 threshold below would otherwise never
+        fire and silently defeat this flag for exactly the pedagogical
+        "textbook probability density" case it's meant for.
+      - Otherwise (continuum enabled), a state is bound only if its
+        eigenvalue is confirmed < 0.0 -- the same strict threshold
+        classifyBoundStates/checkWellContainment already use to separate
+        real bound states from continuum-adjacent box-discretization
+        artifacts. A state this can't confirm (no matching eigenvalues.dat
+        row -- e.g. hand-built test data, or an eigenstate/eigenvalues
+        mismatch) always stays raw; never silently squares on ambiguous
+        data. Different indices in the same call may end up using
+        different representations.
+    """
+    # eigenstate_NNN.dat's filename index is 1-based; eigenvalues.dat's own
+    # index column is 0-based (TISE/tise_solver_main.cpp:446-466 writes
+    # eigenstate_{j}.dat for j=1..nEn using er.values[j-1], while
+    # writeEigenvalues writes the 0-based i alongside it).
+    energy_by_index = {row.index: row.energy for row in tise_data.eigenvalues}
+    no_continuum = not tise_data.continuum_states
+
     for idx, eigenstate in tise_data.eigenstates:
+        if no_continuum:
+            is_bound = True
+        else:
+            energy = energy_by_index.get(idx - 1)
+            is_bound = energy is not None and energy < 0.0
+        use_squared = square_bound_states and is_bound
+
         xs = [p.x for p in eigenstate]
-        densities = [p.phi**2 for p in eigenstate]
+        ys = [p.phi**2 for p in eigenstate] if use_squared else [p.phi for p in eigenstate]
+
         plt.xlim(eigenstate[0].x, eigenstate[-1].x)
         plt.xlabel("x")
-        plt.ylabel(r"$|\phi_n(x)|^2$")
-        plt.plot(xs, densities)
+        plt.ylabel(r"$|\phi_n(x)|^2$" if use_squared else r"$\phi_n(x)$")
+        plt.plot(xs, ys)
         plt.title(fr"Eigenstate {idx}", pad=20)
         plt.savefig(f"{tise_dir}/eigenstate_{idx}.png")
         plt.close()
@@ -523,7 +562,10 @@ def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
 
     plot_tise(tise_output, tise_dir)
     if cfg.get("visualization", {}).get("eigenstates", False):
-        plot_eigenstates(tise_output, tise_dir)
+        plot_eigenstates(
+            tise_output, tise_dir,
+            square_bound_states=cfg.get("visualization", {}).get("bound_states_squared", False),
+        )
     if cfg.get("visualization", {}).get("phase_shifts", False):
         plot_phase_shifts(tise_output, tise_dir)
 

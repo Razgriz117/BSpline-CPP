@@ -778,6 +778,7 @@ classDiagram
     }
     class Visualization {
         +eigenstates: bool
+        +bound_states_squared: bool
         +phase_shifts: bool
         +time_evolution: bool
         +bound_state_populations: bool
@@ -896,7 +897,8 @@ flowchart TD
 
 | Field | Type | Description |
 |---|---|---|
-| `eigenstates` | bool | TISE: plot $\lvert\phi_n(x)\rvert^2$ |
+| `eigenstates` | bool | TISE: plot raw $\phi_n(x)$ for every computed eigenstate -- same raw convention as the (ungated) continuum-state plots, so every wavefunction-style plot in a run is directly comparable. Revised from squaring unconditionally: a config with both bound and continuum states produced two different, unreconciled representations side by side (raw $\psi$ for continuum, $\lvert\phi_n(x)\rvert^2$ for eigenstates) with no way to compare them directly. |
+| `bound_states_squared` | bool | TISE: only meaningful together with `eigenstates: true`. Plot $\lvert\phi_n(x)\rvert^2$ instead of raw $\phi_n(x)$ for states confirmed bound -- the conventional probability-density view. If `tise.continuum.enabled: false`, every computed state is treated as bound (there is no continuum/box-artifact distinction to make); otherwise only states with eigenvalue $<0$ are (matching `classifyBoundStates`'s own threshold, to exclude continuum-adjacent box-discretization artifacts). A state that can't be confirmed bound (e.g. no matching `eigenvalues.dat` row) is unaffected and stays raw. |
 | `phase_shifts` | bool | TISE: plot $\delta(E)$, $d\delta/dE$; requires continuum enabled |
 | `time_evolution` | bool | TDSE: plot/animate $\lvert\Psi(x,t)\rvert^2$ |
 | `bound_state_populations`, `asymptotic_populations`, `asymptotic_distribution`, `expectation_values` | bool | Analysis-computed equivalents |

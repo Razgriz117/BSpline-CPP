@@ -676,6 +676,154 @@ class TestPlotEigenstates:
 
         mock_xlim.assert_called_once_with(-20.0, 20.0)
 
+    # ─── square_bound_states (raw-by-default, opt-in |phi|^2 for bound states) ─
+    #
+    # eigenstate_NNN.dat's filename index is 1-based; eigenvalues.dat's own
+    # index column is 0-based (TISE/tise_solver_main.cpp:446-466 writes
+    # eigenstate_{j}.dat for j=1..nEn using er.values[j-1], while
+    # writeEigenvalues writes the 0-based i alongside it) -- so eigenstate
+    # file index 1 must be looked up against EigenvalueRow(index=0, ...).
+    #
+    # Boundness has two regimes (see plot_eigenstates' own docstring): with
+    # continuum enabled, a state is bound only if E<0 (matching
+    # classifyBoundStates' own threshold, since some states there are real
+    # bound states and others are continuum-adjacent box artifacts); with
+    # NO continuum at all, every computed state is bound unconditionally
+    # (there's no artifact to distinguish from) -- this matters concretely
+    # for a potential like the harmonic oscillator, whose E_n=n+0.5 are ALL
+    # positive, where an E<0 threshold would otherwise silently defeat this
+    # flag entirely (caught by actually running harmonic_oscillator.yaml
+    # and finding eigenstate_1.png's ylabel still said raw phi). Tests
+    # below that mean to exercise the E<0 threshold specifically therefore
+    # supply a non-empty `continuum_states` to signal "continuum enabled".
+
+    _DUMMY_CONTINUUM_STATE = [(1, [ContinuumPoint(0.0, 0.0)])]
+
+    def test_default_plots_raw_phi_even_for_a_bound_state(self, tmp_path):
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, -1.0)],
+            eigenstates=[(1, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, -0.5), EigenstatePoint(2.0, 0.0)])],
+        )
+
+        with patch("analysis.plt.plot") as mock_plot:
+            plot_eigenstates(data, str(tmp_path))
+
+        mock_plot.assert_called_once_with([0.0, 1.0, 2.0], [0.0, -0.5, 0.0])
+
+    def test_square_bound_states_true_squares_a_bound_state_with_continuum_enabled(self, tmp_path):
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, -1.0)],
+            eigenstates=[(1, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, -0.5), EigenstatePoint(2.0, 0.0)])],
+            continuum_states=self._DUMMY_CONTINUUM_STATE,
+        )
+
+        with patch("analysis.plt.plot") as mock_plot:
+            plot_eigenstates(data, str(tmp_path), square_bound_states=True)
+
+        mock_plot.assert_called_once_with([0.0, 1.0, 2.0], [0.0, 0.25, 0.0])
+
+    def test_square_bound_states_true_leaves_an_unbound_state_raw_with_continuum_enabled(self, tmp_path):
+        # E=0.5 >= 0.0 -- not bound (strict '<' threshold, matching
+        # classifyBoundStates/checkWellContainment's own convention).
+        # Continuum enabled: this is the regime where E<0 actually
+        # discriminates real bound states from box-discretization
+        # artifacts, so it must be exercised here.
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, 0.5)],
+            eigenstates=[(1, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, -0.5), EigenstatePoint(2.0, 0.0)])],
+            continuum_states=self._DUMMY_CONTINUUM_STATE,
+        )
+
+        with patch("analysis.plt.plot") as mock_plot:
+            plot_eigenstates(data, str(tmp_path), square_bound_states=True)
+
+        mock_plot.assert_called_once_with([0.0, 1.0, 2.0], [0.0, -0.5, 0.0])
+
+    def test_square_bound_states_true_with_no_matching_eigenvalue_row_stays_raw_with_continuum_enabled(
+        self, tmp_path
+    ):
+        # No eigenvalues supplied at all -- can't confirm boundness, so
+        # never silently square on ambiguous data. Continuum enabled, so
+        # the "no continuum -> always bound" override doesn't apply here.
+        data = _empty_tise_data(
+            eigenstates=[(1, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, -0.5), EigenstatePoint(2.0, 0.0)])],
+            continuum_states=self._DUMMY_CONTINUUM_STATE,
+        )
+
+        with patch("analysis.plt.plot") as mock_plot:
+            plot_eigenstates(data, str(tmp_path), square_bound_states=True)
+
+        mock_plot.assert_called_once_with([0.0, 1.0, 2.0], [0.0, -0.5, 0.0])
+
+    def test_square_bound_states_true_mixes_representations_within_one_call_continuum_enabled(self, tmp_path):
+        # Index 1 (bound, E=-1.0) squared; index 2 (unbound, E=1.0) raw --
+        # both in the same plot_eigenstates call, continuum enabled.
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, -1.0), EigenvalueRow(1, 1.0)],
+            eigenstates=[
+                (1, [EigenstatePoint(0.0, 2.0)]),
+                (2, [EigenstatePoint(0.0, -3.0)]),
+            ],
+            continuum_states=self._DUMMY_CONTINUUM_STATE,
+        )
+
+        with patch("analysis.plt.plot") as mock_plot:
+            plot_eigenstates(data, str(tmp_path), square_bound_states=True)
+
+        assert mock_plot.call_args_list[0].args == ([0.0], [4.0])
+        assert mock_plot.call_args_list[1].args == ([0.0], [-3.0])
+
+    def test_square_bound_states_true_sets_squared_ylabel_only_for_bound_state_continuum_enabled(self, tmp_path):
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, -1.0), EigenvalueRow(1, 1.0)],
+            eigenstates=[
+                (1, [EigenstatePoint(0.0, 2.0)]),
+                (2, [EigenstatePoint(0.0, -3.0)]),
+            ],
+            continuum_states=self._DUMMY_CONTINUUM_STATE,
+        )
+
+        with patch("analysis.plt.ylabel") as mock_ylabel:
+            plot_eigenstates(data, str(tmp_path), square_bound_states=True)
+
+        assert mock_ylabel.call_args_list[0].args == (r"$|\phi_n(x)|^2$",)
+        assert mock_ylabel.call_args_list[1].args == (r"$\phi_n(x)$",)
+
+    def test_square_bound_states_true_with_no_continuum_squares_every_state_regardless_of_energy_sign(
+        self, tmp_path
+    ):
+        # The harmonic-oscillator case: V_min=0, E_n=n+0.5 (all positive),
+        # continuum disabled -- every computed state is nonetheless a
+        # legitimate, fully bound eigenstate; there's no continuum/artifact
+        # distinction to make at all when continuum was never computed.
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, 0.5), EigenvalueRow(1, 1.5)],
+            eigenstates=[
+                (1, [EigenstatePoint(0.0, 2.0)]),
+                (2, [EigenstatePoint(0.0, -3.0)]),
+            ],
+            continuum_states=[],
+        )
+
+        with patch("analysis.plt.plot") as mock_plot:
+            plot_eigenstates(data, str(tmp_path), square_bound_states=True)
+
+        assert mock_plot.call_args_list[0].args == ([0.0], [4.0])
+        assert mock_plot.call_args_list[1].args == ([0.0], [9.0])
+
+    def test_square_bound_states_true_with_no_continuum_and_no_eigenvalues_still_squares(self, tmp_path):
+        # No continuum alone is sufficient -- an eigenvalues.dat match
+        # isn't required to justify squaring in this regime.
+        data = _empty_tise_data(
+            eigenstates=[(1, [EigenstatePoint(0.0, 2.0)])],
+            continuum_states=[],
+        )
+
+        with patch("analysis.plt.plot") as mock_plot:
+            plot_eigenstates(data, str(tmp_path), square_bound_states=True)
+
+        mock_plot.assert_called_once_with([0.0], [4.0])
+
 
 # ─── plot_phase_shifts ──────────────────────────────────────────────────────
 #
@@ -892,6 +1040,56 @@ class TestRun:
         run(str(config_path), str(tise_dir), str(tdse_dir))
 
         assert not (tise_dir / "eigenstate_1.png").exists()
+
+    def test_visualization_bound_states_squared_true_threads_flag_into_plot_eigenstates(self, tmp_path):
+        # Wiring test (mirrors TestMain's own "mock the callee, check call
+        # args" style) -- plot_eigenstates' own representation-correctness
+        # logic is covered directly by TestPlotEigenstates above.
+        config_path = _write_yaml(
+            tmp_path / "config.yaml",
+            {"visualization": {"eigenstates": True, "bound_states_squared": True}},
+        )
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        _write_dat(tise_dir / "eigenstate_001.dat", "# eigenstate_001.dat: x, phi", "0.0  0.0", "1.0  0.5")
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        with patch("analysis.plot_eigenstates") as mock_plot_eigenstates:
+            run(str(config_path), str(tise_dir), str(tdse_dir))
+
+        assert mock_plot_eigenstates.call_args.kwargs == {"square_bound_states": True}
+
+    def test_visualization_bound_states_squared_absent_defaults_to_false(self, tmp_path):
+        config_path = _write_yaml(tmp_path / "config.yaml", {"visualization": {"eigenstates": True}})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        _write_dat(tise_dir / "eigenstate_001.dat", "# eigenstate_001.dat: x, phi", "0.0  0.0", "1.0  0.5")
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        with patch("analysis.plot_eigenstates") as mock_plot_eigenstates:
+            run(str(config_path), str(tise_dir), str(tdse_dir))
+
+        assert mock_plot_eigenstates.call_args.kwargs == {"square_bound_states": False}
+
+    def test_visualization_bound_states_squared_true_without_eigenstates_is_a_no_op(self, tmp_path):
+        # bound_states_squared only matters when eigenstates plotting
+        # actually happens -- it doesn't independently trigger plotting.
+        config_path = _write_yaml(
+            tmp_path / "config.yaml",
+            {"visualization": {"eigenstates": False, "bound_states_squared": True}},
+        )
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        _write_dat(tise_dir / "eigenstate_001.dat", "# eigenstate_001.dat: x, phi", "0.0  0.0", "1.0  0.5")
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        with patch("analysis.plot_eigenstates") as mock_plot_eigenstates:
+            run(str(config_path), str(tise_dir), str(tdse_dir))
+
+        mock_plot_eigenstates.assert_not_called()
 
     def test_visualization_phase_shifts_true_writes_phase_shifts_png(self, tmp_path):
         config_path = _write_yaml(tmp_path / "config.yaml", {"visualization": {"phase_shifts": True}})

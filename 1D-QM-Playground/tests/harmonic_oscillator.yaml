@@ -16,3 +16,4 @@ tise:
     enabled: false
 visualization:
   eigenstates: true
+  bound_states_squared: true
