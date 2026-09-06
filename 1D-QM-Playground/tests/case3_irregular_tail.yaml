@@ -1,0 +1,16 @@
+run:
+  run_tise:     true
+  run_tdse:     false
+  run_analysis: false
+  output_dir:   "./data/case3_irregular_tail"
+bspline:
+  n_nodes: 41
+  order:   6
+  domain:  [0.1, 50.0]
+potential:
+  - "{'domain': '(0.1, inf)', 'function': '1/x^1.5'}"
+tise:
+  n_pts_eigenstate: 301
+  error_threshold:  1.0e-10
+  continuum:
+    enabled: false

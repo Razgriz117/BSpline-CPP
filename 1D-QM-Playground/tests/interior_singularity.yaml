@@ -1,0 +1,23 @@
+run:
+  run_tise:     true
+  run_tdse:     false
+  run_analysis: false
+  output_dir:   "./data/interior_singularity"
+bspline:
+  n_nodes: 41
+  order:   8
+  domain:  [0.0, 40.0]
+potential:
+  - "{'domain': '[0, 20)', 'function': '0'}"
+  - "{'domain': '(20, 40]', 'function': '1/(x-20)'}"
+tise:
+  n_pts_eigenstate: 301
+  error_threshold:  1.0e-10
+  continuum:
+    enabled:     true
+    E_threshold: 0.0
+    E_max:       0.5
+    n_energies:  5
+    n_pts:       500
+visualization:
+  eigenstates: true

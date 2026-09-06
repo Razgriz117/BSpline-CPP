@@ -5,3 +5,4 @@ EigennState_*
 __pycache__/
 *.pyc
 .coverage
+.worktrees/

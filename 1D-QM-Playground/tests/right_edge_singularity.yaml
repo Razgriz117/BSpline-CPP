@@ -1,0 +1,20 @@
+run:
+  run_tise:     true
+  run_tdse:     false
+  run_analysis: false
+  output_dir:   "./data/right_edge_singularity"
+bspline:
+  n_nodes: 41
+  order:   8
+  domain:  [0.0, 100.0]
+potential:
+  - "{'domain': '[0, 100)', 'function': '1/(100-x)'}"
+tise:
+  n_pts_eigenstate: 301
+  error_threshold:  1.0e-10
+  continuum:
+    enabled:     true
+    E_threshold: 0.0
+    E_max:       0.5
+    n_energies:  3
+    n_pts:       200

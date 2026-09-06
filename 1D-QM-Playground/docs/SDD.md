@@ -137,11 +137,13 @@ This table covers acronyms used to navigate *this document's own structure*. Dom
 
 **External references:**
 
-- H. Bachau, E. Cormier, P. Decleva, J. E. Hansen, F. Martín, "Applications of B-splines in atomic and molecular physics," *Rep. Prog. Phys.* **64**, 1815–1942 (2001) — `H_Bachau_2001_Rep._Prog._Phys._64_1815.pdf`. Primary numerical-method reference.
+*As of 2026-09-06, the PHY5606/Bachau PDFs below are checked into `docs/references/` (previously cited by filename only, with no file present — see ADR-0012's resolution) — `AJP_Example.pdf` remains external.*
+
+- H. Bachau, E. Cormier, P. Decleva, J. E. Hansen, F. Martín, "Applications of B-splines in atomic and molecular physics," *Rep. Prog. Phys.* **64**, 1815–1942 (2001) — `docs/references/H_Bachau_2001_Rep._Prog._Phys._64_1815.pdf`. Primary numerical-method reference.
 - C. de Boor, *A Practical Guide to Splines*, Springer (1978).
-- L. Argenti, PHY5606 course notes (Fall 2025/2023) — `PHY5606_F25_Bsplines_v2.pdf`, `PHY5606_F25_Projects.pdf`.
-- `PHY5606_F25_ContinuumEigenstates.pdf` — the authoritative worked algorithm for continuum/generalized-eigenstate construction via the confined eigenbasis; source for [§5.2.3](#523-internal-design)'s continuum-state formulas.
-- `AJP_Example.pdf` — example of the target publication format/quality bar ([§2.2](#22-goals-and-objectives)).
+- L. Argenti, PHY5606 course notes (Fall 2025/2023) — `docs/references/PHY5606_F25_Bsplines_v2.pdf`, `docs/references/PHY5606_F25_Projects.pdf`.
+- `docs/references/PHY5606_F25_ContinuumEigenstates.pdf` — the authoritative worked algorithm for continuum/generalized-eigenstate construction via the confined eigenbasis; source for [§5.2.3](#523-internal-design)'s continuum-state formulas.
+- `AJP_Example.pdf` — example of the target publication format/quality bar ([§2.2](#22-goals-and-objectives)); not yet added to the repo.
 - Candidate/adopted libraries (`docs/planning/resources.md`): [FunctionParser](http://warp.povusers.org/FunctionParser/), [NFParam](https://github.com/nativeformat/NFParam) (expression parsing candidates, [§11.1](#111-build-system-and-dependencies)), [Boost.Math interpolation](https://www.boost.org/doc/libs/1_77_0/libs/math/doc/html/interpolation.html), [nlohmann/json](https://github.com/nlohmann/json), [yaml-cpp](https://github.com/jbeder/yaml-cpp).
 
 ### 1.6 Document Conventions
@@ -419,6 +421,8 @@ Consumes `config.yaml` in full ([§6.1](#61-configuration-schema)). Invokes the 
 
 #### 5.1.3 Internal Design
 
+*The pseudocode below is illustrative of the original design intent, not a literal transcription of the real `controller.py` — two deliberate deviations, each explained in that file's own comments: `run_tise_solver()` only creates `output_dir/tise` when `run.run_tise` is actually true (not unconditionally), and the solver binary's path resolves relative to `controller.py`'s own file location rather than a bare `"./build/tise_solver"` (so `controller.py` works regardless of the caller's current working directory). Neither changes the contract this pseudocode is illustrating.*
+
 ```python
 import subprocess
 import sys
@@ -557,7 +561,7 @@ $$\frac{d\delta}{dE} = \frac{1}{2\cos(2\delta)}\frac{d\sin(2\delta)}{dE}$$
 
 Each $\psi_{\varepsilon_i}(x)$ is tabulated on a uniform grid $x_i = \dfrac{R}{N_x-1}(i-1)$ (`tise.continuum.n_pts`, [§6.1](#61-configuration-schema)) and written to `continuum_state_NNN.dat` ([§6.3](#63-persistent-storage-format)), alongside $\varepsilon_i$, $\delta(\varepsilon_i)$, $d\delta/dE$ in `phase_shifts.dat`. REQ-F-040's `[E_threshold, E_max]` range is a later generalization of the PDF's simpler single-`E_max` grid, not a discrepancy.
 
-This is the general recipe for Case 2's *flat*-asymptote sub-branch. The *Coulomb*-tail sub-branch (matching to Coulomb functions instead of $\sin(kx+\delta)$) is required by REQ-F-030 but not yet worked out at this level of detail by any source document — implementers should derive the analogous formulas (following Bachau, `docs/planning/bsplines.md`) before relying on the flat-case formulas above for a Coulomb tail.
+This is the general recipe for Case 2's *flat*-asymptote sub-branch. The *Coulomb*-tail sub-branch (matching to Coulomb functions instead of $\sin(kx+\delta)$) is required by REQ-F-030 but not yet worked out at this level of detail by any source document — implementers should derive the analogous formulas (following Bachau, `docs/planning/bsplines.md`) before relying on the flat-case formulas above for a Coulomb tail. This gap is formalized as [ADR-0010](adr/0010-defer-coulomb-tail-continuum-matching.md); see `docs/planning/coulomb-tail-continuum-matching.md` for the derivation sketch.
 
 **Figure 10 — B-Spline Construction via de Boor Recursion.** *(Source: `docs/planning/bsplines.md`, "Recursion Tree for $B_i^3$"; reused verbatim.)*
 
@@ -586,7 +590,9 @@ flowchart BT
 
 Each node is a weighted blend of the two nodes below it. At any evaluation point $x$, only $k$ B-splines are nonzero simultaneously (the project currently uses $k=12$). Knot density follows REQ-F-050 (uniform + strategic nodes); WKB-proportional density is deferred (ADR-0002). FEDVR — a related basis obtained by pushing all interior knot multiplicities to $k-1$ — is deferred as a future alternative (ADR-0001) rather than implemented alongside B-splines now.
 
-**Current implementation baseline.** The B-spline basis is already implemented in `TISE/BSpline.hpp`/`.cpp` as a `bspline::BSpline` class (`init`, `eval`, `integral`, banded-storage internals) — a C++ port of Argenti's Fortran `ModuleBSpline`. `TISE/tise.hpp`/`.cpp` currently exposes free functions in the `tise::` namespace (`fillBandedMatrices`, `solveGeneralizedEigenproblem` returning an `EigenResult{values, vectors, dim, ldz}`, and a top-level `solveTISE(...)`) built around a **hydrogenic-only** potential (`radialPotential(x, L) = L(L+1)/(2x^2) - 1/x`). Reaching REQ-F-010's general 1D scope requires replacing this hard-coded potential with the config-driven piecewise potential parser of [§6.1](#61-configuration-schema) — this is the core of TISE Solver implementation work in [§10](#10-implementation-roadmap-and-phasing) Phase 4.
+**Current implementation baseline.** The B-spline basis is already implemented in `TISE/BSpline.hpp`/`.cpp` as a `bspline::BSpline` class (`init`, `eval`, `integral`, banded-storage internals) — a C++ port of Argenti's Fortran `ModuleBSpline`. `TISE/tise.hpp`/`.cpp` exposes free functions in the `tise::` namespace (`fillBandedMatrices`, `solveGeneralizedEigenproblem` returning an `EigenResult{values, vectors, dim, ldz}`) built around the config-driven piecewise potential parser of [§6.1](#61-configuration-schema), not a hardcoded hydrogenic potential — `radialPotential(x, L)` still exists but is used only by the separate `H-BoundStates` hydrogen demo/regression path (`TISE/main.cpp`) for its analytic-accuracy comparison, not by the matrix fill itself.
+
+The top-level `solveTISE(...)` returns a `SolveTISEResult{eigen, bs, grid, nBSplines, dropSet}` (not a bare `EigenResult`), and automatically applies REQ-F-050's strategic node placement: it runs `detectPotentialStructure`/`strategicKnotsFromJoins`/`buildStrategicRadialGrid` unconditionally (no config flag — architecture-06-20.md's stakeholder decision states this is determined automatically from the potential, not user-set), and removes B-splines touching a detected **interior** singular point via `bSplinesTouchingX`. Domain-*edge* singularities (e.g. a Coulomb tail coinciding with the box wall) are deliberately left to the existing single-B-spline wall exclusion rather than the full `bSplinesTouchingX` cluster — removing the whole boundary-clamped cluster there was found, empirically, to be a real regression (not just reduced accuracy) rather than the intended regularity enforcement, since the domain wall already provides it. See `docs/planning/engineer-a-plan-A4-wiring-design.md` for the full derivation and `H-BoundStates`' baseline-impact trace.
 
 #### 5.2.4 Error Handling
 
@@ -736,6 +742,7 @@ classDiagram
         +E_max: float
         +n_energies: int
         +n_pts: int
+        +l: int
     }
     class TDSE {
         +dt: float
@@ -774,6 +781,7 @@ classDiagram
     }
     class Visualization {
         +eigenstates: bool
+        +bound_states_squared: bool
         +phase_shifts: bool
         +time_evolution: bool
         +bound_state_populations: bool
@@ -851,7 +859,7 @@ flowchart TD
 | Field | Type | Description |
 |---|---|---|
 | `n_pts_eigenstate` | int | Spatial grid points for eigenstate wavefunction output |
-| `error_threshold` | float | Eigenvalue accuracy cutoff for reporting |
+| `error_threshold` | float | Eigenvalue accuracy cutoff for reporting. **Not currently consumed by `tise_solver`** (see ADR-0007) — meaningful only to the separate, hydrogen-specific `H-BoundStates` demo executable, which compares computed eigenvalues against the analytic hydrogen spectrum. |
 
 **`tise.continuum`** (REQ-F-040)
 
@@ -862,6 +870,7 @@ flowchart TD
 | `E_max` | float | Upper bound of the continuum spectrum range |
 | `n_energies` | int | Number of energy grid points in `[E_threshold, E_max]` |
 | `n_pts` | int | Spatial grid points per continuum state output |
+| `l` | int | Angular momentum for Coulomb-tail continuum matching (ADR-0013, supersedes ADR-0010). Only consulted when the potential's right-edge asymptote classifies as Coulomb (a genuine, unbounded $-Z/x$ tail); ignored for a flat asymptote. Cannot be inferred from the tail-shape fit — a centrifugal term $\ell(\ell+1)/2x^2$ decays faster than the $1/x$ Coulomb term and is asymptotically invisible to it — so it must match whatever centrifugal term is baked into the potential expression string. Defaults to 0 (s-wave) if omitted, **silently** — a config with a nonzero centrifugal term but no matching `l` is matched against the wrong Coulomb functions with no diagnostic. |
 
 **`tdse`** — propagates $H(t) = H_0 + H_\text{int}(t)$; propagator method (Magnus, Crank-Nicolson, RK4, …) is an implementation detail, not exposed in the schema.
 
@@ -892,7 +901,8 @@ flowchart TD
 
 | Field | Type | Description |
 |---|---|---|
-| `eigenstates` | bool | TISE: plot $\lvert\phi_n(x)\rvert^2$ |
+| `eigenstates` | bool | TISE: plot raw $\phi_n(x)$ for every computed eigenstate -- same raw convention as the (ungated) continuum-state plots, so every wavefunction-style plot in a run is directly comparable. Revised from squaring unconditionally: a config with both bound and continuum states produced two different, unreconciled representations side by side (raw $\psi$ for continuum, $\lvert\phi_n(x)\rvert^2$ for eigenstates) with no way to compare them directly. |
+| `bound_states_squared` | bool | TISE: only meaningful together with `eigenstates: true`. Plot $\lvert\phi_n(x)\rvert^2$ instead of raw $\phi_n(x)$ for states confirmed bound -- the conventional probability-density view. If `tise.continuum.enabled: false`, every computed state is treated as bound (there is no continuum/box-artifact distinction to make); otherwise only states with eigenvalue $<0$ are (matching `classifyBoundStates`'s own threshold, to exclude continuum-adjacent box-discretization artifacts). A state that can't be confirmed bound (e.g. no matching `eigenvalues.dat` row) is unaffected and stays raw. |
 | `phase_shifts` | bool | TISE: plot $\delta(E)$, $d\delta/dE$; requires continuum enabled |
 | `time_evolution` | bool | TDSE: plot/animate $\lvert\Psi(x,t)\rvert^2$ |
 | `bound_state_populations`, `asymptotic_populations`, `asymptotic_distribution`, `expectation_values` | bool | Analysis-computed equivalents |
@@ -917,8 +927,9 @@ Continuum-state construction ([§5.2.3](#523-internal-design)) additionally requ
 |---|---|---|
 | `data/tise/eigenvalues.dat` | Plain text (2-col) | Index, $E_n$ |
 | `data/tise/eigenvectors.dat` | Plain text (matrix) | Columns are $\mathbf{c}_n$ coefficient vectors |
-| `data/tise/hamiltonian.dat` | Plain text or binary | $\mathbf{H}$ matrix (banded) |
-| `data/tise/overlap.dat` | Plain text or binary | $\mathbf{S}$ matrix (banded) |
+| `data/tise/eigenstate_NNN.dat` | Plain text (2-col) | $x$, $\phi_n(x)$ per bound state; one file per state (`tise.n_pts_eigenstate` points each), written unconditionally like `eigenvalues.dat`/`eigenvectors.dat` above -- not gated by `tise.continuum.enabled`. Consumed by Analysis only when `visualization.eigenstates: true` ([§6.1](#61-configuration-schema)). |
+| `data/tise/hamiltonian.dat` | Plain text (banded, `order` rows × `nEn` cols) | $\mathbf{H}$ matrix, LAPACK symmetric-banded storage |
+| `data/tise/overlap.dat` | Plain text (banded, `order` rows × `nEn` cols) | $\mathbf{S}$ matrix, LAPACK symmetric-banded storage |
 | `data/tise/phase_shifts.dat` | Plain text (3-col) | $\varepsilon_i$, $\delta(\varepsilon_i)$, $d\delta/dE$ |
 | `data/tise/continuum_state_NNN.dat` | Plain text (2-col) | $x$, $\psi_{\varepsilon_i}(x)$ per energy |
 | `data/tise/warnings.json` | JSON array | Array of `{"category": "physics"\|"operational", "message": "..."}` objects; always present after successful run |
@@ -928,6 +939,8 @@ Continuum-state construction ([§5.2.3](#523-internal-design)) additionally requ
 Plain text is preferred initially for transparency and ease of inspection with standard tools. Migration to HDF5 (via the HDF5 C++ API and `h5py` in Python) can be done later if file sizes or I/O speed become a bottleneck — the interface between programs ([§7.2](#72-inter-component-interfaces)) does not change, only the file format.
 
 *Continuum output uses the spatial grid $x_i = R/(N_x-1)(i-1)$ and the stable phase-shift-derivative formula, both defined in [§5.2.3](#523-internal-design) — not direct differentiation of $\delta(E)$.*
+
+**Banded storage convention** (resolves the format ambiguity above): `hamiltonian.dat`/`overlap.dat` store the same column-major LAPACK symmetric-banded layout `fillBandedMatrices` (`TISE/tise.cpp`) uses internally — element $(row, col)$ (1-based, $row \in [1, \text{order}]$, $col \in [1, n_{En}]$) is at flat index $(row-1)+(col-1)\cdot\text{order}$, written as plain text row-major. `eigenvectors.dat` is the *full*, zero-padded $n_\text{BSplines}$-row B-spline coefficient representation (`tise::eigenstateCoefficients`'s output per state), not the raw $n_{En}\times n_{En}$ reduced-basis LAPACK block — directly usable via `bspline::BSpline::eval` without external knowledge of which boundary B-splines were dropped. `eigenvalues.dat`/`eigenvectors.dat` include all computed states, with no bound-state filtering applied by `tise_solver` — see ADR-0007.
 
 ### 6.4 Data Validation Rules
 
@@ -945,11 +958,12 @@ Plain text is preferred initially for transparency and ease of inspection with s
 
 | Binary/Script | Flags |
 |---|---|
+| `controller.py` | `--config <path>` (default `config.yaml`) |
 | `tise_solver` | `--config <path>` `--output-dir <path>` |
 | `tdse_solver` | `--config <path>` `--tise-dir <path>` `--output-dir <path>` |
 | `analysis.py` | `--config <path>` `--tise-dir <path>` `--tdse-dir <path>` |
 
-`config.yaml` itself ([§6.1](#61-configuration-schema)) is the primary external interface — every binary and script reads it (or CLI-overridden fields of it) as its source of truth for physics and run parameters.
+`config.yaml` itself ([§6.1](#61-configuration-schema)) is the primary external interface — every binary and script reads it (or CLI-overridden fields of it) as its source of truth for physics and run parameters. `controller.py` is the top-level entry point a user actually runs (see the top-level README's "Quick start"); it resolves `tise_solver`'s/`analysis.py`'s paths and invokes them per §7.2.1/§7.2.3 below, so its own single `--config` flag is the only one most users need directly.
 
 ### 7.2 Inter-Component Interfaces
 
@@ -967,7 +981,7 @@ Each subsection below is a complete, standalone contract per [§2.4](#24-assumpt
 #### 7.2.2 TISE Solver to Analysis
 
 - **Direction:** Analysis reads TISE Solver output directly (no subprocess relationship between these two — both are invoked independently by the Controller).
-- **Inputs to Analysis:** `data/tise/eigenvalues.dat`, `eigenvectors.dat`, `hamiltonian.dat`, `overlap.dat`, `phase_shifts.dat`, `continuum_state_NNN.dat` ([§6.3](#63-persistent-storage-format)).
+- **Inputs to Analysis:** `data/tise/eigenvalues.dat`, `eigenvectors.dat`, `hamiltonian.dat`, `overlap.dat`, `phase_shifts.dat`, `continuum_state_NNN.dat`, `eigenstate_NNN.dat` ([§6.3](#63-persistent-storage-format)).
 - **Contract:** Analysis must tolerate `tise.continuum.enabled: false` (no continuum files present) per [§5.4.4](#544-error-handling).
 - **Related:** REQ-F-060 (asymptotic_distribution requires continuum output).
 
@@ -1106,7 +1120,7 @@ REQ-NF-010 (≥80% unit + integration coverage) is a **per-phase gate**, not an 
   target_link_libraries(tise_solver PRIVATE yaml-cpp)
   ```
 
-- An expression parser for `potential.function`/`tdse.field.expression` ([§6.1](#61-configuration-schema), [§6.4](#64-data-validation-rules)) — candidates from `docs/planning/resources.md` are [FunctionParser](http://warp.povusers.org/FunctionParser/) and [NFParam](https://github.com/nativeformat/NFParam); not yet chosen definitively.
+- An expression parser for `potential.function`/`tdse.field.expression` ([§6.1](#61-configuration-schema), [§6.4](#64-data-validation-rules)) — **adopted: [muparser](https://beltoforion.de/en/muparser/)**, wired via `pkg_check_modules(MUPARSER REQUIRED IMPORTED_TARGET muparser)` in `TISE/CMakeLists.txt` and used by `tise::evaluateFunction` (`TISE/tise.cpp`). The candidates originally shortlisted from `docs/planning/resources.md`, [FunctionParser](http://warp.povusers.org/FunctionParser/) and [NFParam](https://github.com/nativeformat/NFParam), were superseded by this choice.
 - On the Python side: `PyYAML` or `ruamel.yaml` for the Controller; a plotting library (matplotlib, implied by existing `plot.py`/`heatmap.py`) for Analysis.
 - Also listed in `resources.md` as available if needed: [Boost.Math interpolation](https://www.boost.org/doc/libs/1_77_0/libs/math/doc/html/interpolation.html), [nlohmann/json](https://github.com/nlohmann/json).
 
@@ -1318,7 +1332,7 @@ The domain geometry should be a user input, since it determines which boundary c
 
 **Complex absorbing potential (CAP).** A practical alternative to outgoing-wave BCs: add an imaginary absorbing potential $-iW(r)$ near the outer wall that damps outgoing flux before it reaches the boundary, preventing artificial reflections. The Dirichlet wall is then physically harmless, and no complex scaling is needed. CAPs introduce free parameters (onset position and strength) that must be tuned, but they are compatible with the existing real-valued B-spline infrastructure and are the more tractable near-term option for ionization studies.
 
-**Recommendation:** Expose the domain geometry (half-line, full line, finite box) as a user input, since it determines which BCs are physical. For the initial implementation, Dirichlet walls at both ends are recommended for all domain types. For the radial (half-line) case, $l$ should be a user input since it enters the Hamiltonian. CAP support at the outer boundary is the recommended next addition for continuum and ionization calculations, since it does not require changes to the real-valued eigensolver. Outgoing-wave BCs and ECS are deferred to a later stage.
+**Recommendation:** Expose the domain geometry (half-line, full line, finite box) as a user input, since it determines which BCs are physical. For the initial implementation, Dirichlet walls at both ends are recommended for all domain types. For the radial (half-line) case, $l$ should be a user input since it enters the Hamiltonian. CAP support at the outer boundary is the recommended next addition for continuum and ionization calculations, since it does not require changes to the real-valued eigensolver. Outgoing-wave BCs and ECS are deferred to a later stage. See [ADR-0011](adr/0011-defer-cap-outgoing-wave-ecs-boundary-conditions.md) for the formalized deferral and `docs/planning/complex-boundary-conditions.md` for the comparative overview.
 
 **Stakeholder feedback (2026-07-03).**
 
@@ -1365,9 +1379,9 @@ and matches continuum solutions to a shifted sine, as in the flat-asymptote bran
 - **Unbounded right, Coulomb tail** ($V \sim 1/x$): Case 2 applies — bound states from diagonalization, continuum states normalized against Coulomb functions.
 - **Unbounded right, fast decay** (e.g., $V \sim e^{-x^2}$): Case 3 applies — asymptote treated as flat, continuum matched to a shifted sine, user cautioned about the approximation.
 
-**Status: resolved (domain geometry + Dirichlet + Case 1–3 asymptote logic).** Formalized as REQ-F-030. The Complex Absorbing Potential (CAP), outgoing-wave (Siegert) boundary condition, and exterior complex scaling (ECS) options discussed above under "Initial analysis" were not revisited in the 2026-07-03 stakeholder feedback and remain genuinely unresolved — no decision has been made to adopt this capability, and unlike FEDVR, WKB collocation, the multi-particle extension, or the visualization schema (ADR-0001 through ADR-0004), no decision has been made to defer it either. The next time this is discussed with the stakeholder, it should be promoted to either a new REQ (if adopted) or a new ADR (if a conscious decision to defer is made).
+**Status: resolved (domain geometry + Dirichlet + Case 1–3 asymptote logic).** Formalized as REQ-F-030. The Complex Absorbing Potential (CAP), outgoing-wave (Siegert) boundary condition, and exterior complex scaling (ECS) options discussed above under "Initial analysis" were not revisited in the 2026-07-03 stakeholder feedback and remain genuinely unresolved — no decision has been made to adopt this capability, and unlike FEDVR, WKB collocation, the multi-particle extension, or the visualization schema (ADR-0001 through ADR-0004), no decision has been made to defer it either. The next time this is discussed with the stakeholder, it should be promoted to either a new REQ (if adopted) or a new ADR (if a conscious decision to defer is made). **Update:** this promotion has now happened — see [ADR-0011](adr/0011-defer-cap-outgoing-wave-ecs-boundary-conditions.md), which formalizes CAP/outgoing-wave/ECS as a conscious deferral.
 
-Related: REQ-F-030 (resolved); CAP / outgoing-wave BCs / ECS (still open — no REQ or ADR yet).
+Related: REQ-F-030 (resolved); CAP / outgoing-wave BCs / ECS — deferred, see [ADR-0011](adr/0011-defer-cap-outgoing-wave-ecs-boundary-conditions.md).
 
 ---
 

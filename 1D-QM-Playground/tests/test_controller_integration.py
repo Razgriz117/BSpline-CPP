@@ -53,20 +53,39 @@ class TestRunTiseSolverRealSubprocess:
     def test_success_writes_expected_files_and_no_continuum_output(
         self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
     ):
+        # config.yaml's own default has had tise.continuum.enabled: true
+        # since commit 99b7683 -- force it off here so this test still
+        # exercises the no-continuum-output contract it's named for.
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["tise"]["continuum"]["enabled"] = False
+        no_continuum_config = tmp_path / "config_no_continuum.yaml"
+        with open(no_continuum_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
         tise_dir = tmp_path / "data" / "tise"
 
-        run_tise_solver(str(tmp_config), tise_dir, binary=tise_solver_binary)
+        run_tise_solver(str(no_continuum_config), tise_dir, binary=tise_solver_binary)
 
         for name in ("eigenvalues.dat", "eigenvectors.dat", "hamiltonian.dat", "overlap.dat", "warnings.json"):
             assert (tise_dir / name).is_file(), f"expected output file missing: {name}"
 
-        # The real config.yaml has tise.continuum.enabled: false -- the
-        # continuum-only outputs must NOT be written.
+        # continuum disabled above -- the continuum-only outputs must NOT be written.
         assert not (tise_dir / "phase_shifts.dat").exists()
         assert list(tise_dir.glob("continuum_state_*.dat")) == []
 
+        # warnings.json is no longer unconditionally empty here: Part B
+        # (docs/planning/tise-release-readiness-plan.md) wired
+        # classifyBoundStates/checkWellContainment to run regardless of
+        # tise.continuum.enabled -- the real hydrogen config's own 7 bound
+        # states (3 of them only marginally contained by R=100) always
+        # produce these two diagnostics now. What this test still confirms:
+        # no CONTINUUM-specific warning (E_acc, pole-proximity) leaks in
+        # when continuum is genuinely disabled.
         warnings = json.loads((tise_dir / "warnings.json").read_text())
-        assert warnings == []
+        messages = [w["message"] for w in warnings]
+        assert any("computed states are below E=0.0" in m for m in messages)
+        assert not any("E_acc" in m or "discretization artifact" in m for m in messages)
 
     def test_failure_raises_solver_stage_error_and_leaves_no_partial_files(
         self, tise_solver_binary: Path, tmp_path: Path
@@ -121,6 +140,59 @@ class TestRunTiseSolverRealSubprocess:
         # the 5 core files unconditionally, before ever validating
         # n_energies, so this assertion would have failed (tise_dir held 5
         # files, not 0) against the pre-fix binary.
+        assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
+    def test_overlapping_potential_pieces_raises_and_leaves_no_partial_files(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """validateNoOverlappingPotentialPieces (Part C,
+        docs/planning/tise-release-readiness-plan.md): two pieces both
+        covering x=50 (both inclusive at that shared boundary) previously
+        resolved silently via std::map's own domain-string sort order, with
+        no error at all -- now raises before any output is written,
+        matching the same "non-zero exit == no partial output" contract the
+        n_energies test above guards."""
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["potential"] = [
+            "{'domain': '[0, 50]', 'function': '0'}",
+            "{'domain': '[50, 100]', 'function': '1'}",
+        ]
+        bad_config = tmp_path / "config_overlapping_potential.yaml"
+        with open(bad_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_tise_solver(str(bad_config), tise_dir, binary=tise_solver_binary)
+
+        assert "TISE solver" in str(excinfo.value)
+        assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
+    def test_non_unity_mass_raises_and_leaves_no_partial_files(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """physics.mass/physics.hbar guard-rail (Part C): both fields are
+        documented in config.yaml but were never consumed anywhere --
+        fillBandedMatrices hardcodes mass=1 internally, so a user setting
+        physics.mass to anything else got silent wrong physics with no
+        error. Guard-rail only (not full mass/hbar generalization, which
+        would touch k=sqrt(2E)/computeEAcc/the kinetic-energy term
+        throughout): an honest config error instead."""
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["physics"]["mass"] = 2.0
+        bad_config = tmp_path / "config_non_unity_mass.yaml"
+        with open(bad_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_tise_solver(str(bad_config), tise_dir, binary=tise_solver_binary)
+
+        assert "TISE solver" in str(excinfo.value)
         assert not tise_dir.exists() or not any(tise_dir.iterdir())
 
 
@@ -224,6 +296,33 @@ class TestRunAnalysisStageRealSubprocess:
         tise_dir = tmp_path / "data" / "tise"
         assert (tise_dir / "eigenvalues.dat").is_file()
 
+        # The one artifact this whole pipeline exists to produce -- plots --
+        # was never actually asserted on before (only eigenvalues.dat's
+        # existence was checked): the real config.yaml has both
+        # tise.continuum.enabled and visualization.eigenstates on by
+        # default, so a real run_analysis: true pass through this exact
+        # config must produce both continuum and eigenstate PNGs, not just
+        # write eigenvalues.dat and silently skip plotting.
+        continuum_png = tise_dir / "continuum_1.png"
+        eigenstate_png = tise_dir / "eigenstate_1.png"
+        assert continuum_png.is_file() and continuum_png.stat().st_size > 0
+        assert eigenstate_png.is_file() and eigenstate_png.stat().st_size > 0
+
+    def test_run_analysis_false_produces_no_analysis_output(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # Explicit, dedicated real-subprocess counterpart to the test above:
+        # run.run_analysis: false (the real config.yaml's own default,
+        # tmp_config leaves it untouched) must produce zero Analysis-stage
+        # output -- no PNGs of any kind -- not just "the test happens to
+        # never check for them" as the pre-existing TestRunEndToEnd.
+        # test_run_end_to_end_success below does incidentally.
+        run(str(tmp_config))
+
+        tise_dir = tmp_path / "data" / "tise"
+        assert (tise_dir / "eigenvalues.dat").is_file()  # TISE stage still ran
+        assert list(tise_dir.glob("*.png")) == []
+
 
 # ─── Optional: full controller.run() orchestration, end to end ─────────────
 
@@ -241,14 +340,34 @@ class TestRunEndToEnd:
     """
 
     def test_run_end_to_end_success(self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path, capsys):
-        run(str(tmp_config))
+        # config.yaml's own default has had tise.continuum.enabled: true
+        # since commit 99b7683, which (with its E_max=10 default) now
+        # legitimately produces continuum-specific physics warnings (E_max
+        # exceeds the basis's own accuracy ceiling) -- force continuum off
+        # here so this test isolates the non-continuum-specific diagnostics
+        # (Part B's classifyBoundStates/checkWellContainment, which now run
+        # regardless of continuum -- see TestRunTiseSolverRealSubprocess.
+        # test_success_writes_expected_files_and_no_continuum_output above)
+        # rather than conflating them with continuum-only warnings.
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["tise"]["continuum"]["enabled"] = False
+        no_continuum_config = tmp_path / "config_no_continuum.yaml"
+        with open(no_continuum_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        run(str(no_continuum_config))
 
         tise_dir = tmp_path / "data" / "tise"
         assert (tise_dir / "eigenvalues.dat").is_file()
         warnings = json.loads((tise_dir / "warnings.json").read_text())
-        assert warnings == []
+        messages = [w["message"] for w in warnings]
+        assert any("computed states are below E=0.0" in m for m in messages)
+        assert not any("E_acc" in m or "discretization artifact" in m for m in messages)
 
-        # read_warnings/print_warnings ran for real too: an empty warnings
-        # list means nothing gets printed to stderr.
+        # read_warnings/print_warnings ran for real too: a non-empty
+        # warnings list means each entry gets printed to stderr, one line
+        # per entry, "[category] message".
         captured = capsys.readouterr()
-        assert captured.err == ""
+        assert "[physics]" in captured.err
+        assert "computed states are below E=0.0" in captured.err
