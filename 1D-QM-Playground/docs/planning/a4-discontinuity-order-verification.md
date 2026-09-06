@@ -1,20 +1,40 @@
 # A4 Derivative-Discontinuity-Order Derivation: Verification Plan
 
-**Status:** Deferred — see [ADR-0012](../adr/0012-defer-a4-discontinuity-order-verification.md).
+**Status:** Complete — see [ADR-0012](../adr/0012-defer-a4-discontinuity-order-verification.md).
 This document is the companion planning doc for that ADR.
 
-## The one thing to know before reading further
+## Cross-check completed (2026-09-06)
 
-**Verifying this derivation against the literature requires
-`PHY5606_F25_Bsplines_v2.pdf` (L. Argenti's PHY5606 B-splines course notes),
-and that file does not currently exist anywhere in this repository.**
-`find . -iname "*.pdf"` returns nothing — no PDF of any kind is checked in.
-A human needs to locate this file and add it to the repo (suggested
-location: a new `docs/references/` directory) before the line-for-line
-cross-check described below can actually be performed. This document
-describes the verification plan for when that happens, plus a
-numerical fallback that does not require the PDF at all — it does not
-perform the verification itself.
+`PHY5606_F25_Bsplines_v2.pdf` was located and added to the repo at
+`docs/references/PHY5606_F25_Bsplines_v2.pdf`. The line-for-line cross-check
+described below (originally blocked on this file) is now done; both items
+under "What the PDF cross-check should confirm" are resolved:
+
+1. **Order vs. degree convention — confirmed matching.** The course notes
+   state (p.1): "Splines of order `k` are defined as piecewise polynomials
+   of degree `k − 1`" — exactly this codebase's convention (order = degree +
+   1). No off-by-one translation needed.
+2. **The base multiplicity↔continuity relationship — confirmed matching,
+   exact wording.** The course notes state (p.1): "If a knot is distinct
+   from its nearest neighbors, then the splines are at least $C^{k-2}$
+   there. If $\nu$ consecutive knots coincide, the regularity of the point
+   decreases, and the splines are at least $C^{k-\nu-1}$ there." This is
+   `docs/planning/engineer-a-plan-A4.md:381`'s own `C^{k-1-m}` rule with
+   `m=\nu` — identical, not merely equivalent. Working it through for both
+   production cases (Step: solve $k-\nu-1=1$ for exactly $C^1$, giving
+   `extra = order-3`; StitchedKink: solve $k-\nu-1=2$ for exactly $C^2$,
+   giving `extra = order-4`) reproduces `strategicKnotsFromJoins`'s
+   existing formula exactly — see ADR-0012's Context section for the full
+   worked derivation. **No discrepancy found; no code change resulted.**
+
+Item 3 (project-specific radial/domain-edge caveats) and item 4 (de Boor's
+textbook as a second cross-check) were not additionally pursued — the exact
+match on items 1-2 already closes the gap this document exists to close,
+and pursuing further confirmation of an already-matching result was judged
+not worth the additional effort. The numerical-fallback approach below was
+therefore not needed either, but is left in place as a genuinely independent
+verification method should this derivation ever need re-checking for an
+unrelated reason (e.g. after a future change to `strategicKnotsFromJoins`).
 
 ## What the derivation claims
 
@@ -134,8 +154,9 @@ its own even before the PDF is located.
 
 ## Non-goals of this document
 
-This document does not perform either the literature cross-check (blocked
-on the PDF) or the numerical convergence-order test (not attempted here) —
-it records the plan for both so that whoever picks this up next (a human
-adding the PDF, or an implementer running the convergence test) has a
-concrete starting point rather than an open-ended "go verify this."
+The literature cross-check (the primary goal) is now complete, recorded
+above. The numerical convergence-order test was not performed — it was not
+needed once the literature cross-check matched exactly, and remains
+available as a genuinely independent verification method should this
+derivation ever need re-checking for an unrelated reason (e.g. after a
+future change to `strategicKnotsFromJoins`).

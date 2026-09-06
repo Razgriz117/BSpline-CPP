@@ -158,9 +158,9 @@ enum class AsymptoteCase
     Irregular          // Case 3: unknown/irregular tail
 };
 
-// Case-2 sub-branch. Only Flat's continuum-matching formula is implemented
-// (Engineer B's B3); Coulomb is classified but its matching formula is not
-// yet derived by any source document (flagged as a follow-up).
+// Case-2 sub-branch. Coulomb-tail continuum matching (ADR-0009, supersedes
+// ADR-0010) uses this to identify the Sommerfeld-parameter-bearing tail;
+// Flat's continuum-matching formula predates it (Engineer B's B3).
 enum class AsymptoteSubType
 {
     NotApplicable,
@@ -174,6 +174,13 @@ struct AsymptoteClassification
     AsymptoteSubType subType;
     Real             fittedAsymptoticValue;      // V_inf; NaN if HardWall
     Real             powerLawExponent;           // fitted p; NaN if HardWall or Flat
+    Real             fittedPowerLawCoefficient;  // C in V ~ V_inf + C/x^p, evaluated at the
+                                                  // last sample; NaN if HardWall or Flat.
+                                                  // For a Coulomb tail this is -Z (the
+                                                  // potential's own charge/coupling
+                                                  // constant, sign-inclusive), used to form
+                                                  // the Sommerfeld parameter eta=-Z/k for
+                                                  // Coulomb-tail continuum matching.
     Real             recommendedTransitionWidth; // Delta for the Case-3 window; NaN unless Irregular
     bool             warningEmitted;
 };
@@ -340,10 +347,82 @@ std::vector<std::vector<Real>> buildContinuumState(
 // docs/tests/reports/8236239/finite_square_well.md section 7 item 1 for why
 // the previous sin(2*delta)/cos(2*delta) construction across the production
 // grid was replaced.
+// === Coulomb-tail continuum matching (ADR-0009, supersedes ADR-0010) ===
+//
+// The regular/irregular Coulomb wave functions F_l(eta,rho), G_l(eta,rho)
+// are the correct exterior solutions for a potential with a genuine
+// Coulomb tail (V ~ C/x as x->infinity), replacing the flat-asymptote
+// case's sin(kx+delta)/cos(kx+delta). No special-function library is
+// linked into this build (TISE/CMakeLists.txt: LAPACK/BLAS/muparser/
+// nlohmann-json/yaml-cpp/GTest only), so these are evaluated by a
+// hand-rolled method (see docs/planning/coulomb-tail-continuum-matching.md
+// for the full validation record): starting from a WKB-corrected
+// asymptotic approximation at a point `farMultiplier` times farther out
+// than the requested rho, then integrating the exact Coulomb ODE
+// u'' + (1 - 2*eta/rho - l(l+1)/rho^2)*u = 0 inward via Numerov's method
+// (the standard technique for exactly this "no first-derivative term"
+// ODE form) with step `stepSize`. A first implementation used 4th-order
+// Runge-Kutta instead -- functionally correct at a small, fixed step, but
+// its accumulated phase error over the long oscillatory integration path
+// needed by the real energy range (up to E=10, requiring rho into the
+// hundreds and farMultiplier~100) forced an impractically fine stepSize
+// (~0.01), causing multi-minute runtimes; simply coarsening RK4's step
+// made things *worse* at larger farMultiplier (more accumulated phase
+// drift over the longer path), not better. Numerov's method resolves
+// this: for the same step count it has far better phase behavior for
+// oscillatory second-order ODEs, letting farMultiplier=50/stepSize=0.1
+// replace RK4's farMultiplier=100/stepSize=0.01 at ~1/17th the
+// integration steps. Validated end-to-end (recovering a known synthetic
+// phase shift through the full matching formula, not just raw F/G
+// accuracy) to ~6e-3 rad worst-case across l=0..2 and E in [0.05, 10]
+// (the full range this project's configs use) -- a large improvement
+// over the flat formula's ~0.02-1 rad error on the same cases
+// (docs/tests/reports/9d0f04b/hydrogen.md), but not a
+// special-function-library-grade arbitrary-precision result; farMultiplier
+// and stepSize trade accuracy for speed if a different point on that curve
+// is ever needed.
+
+// Coulomb phase shift sigma_l(eta) = arg Gamma(l+1+i*eta), via the standard
+// recurrence sigma_l = sigma_0 + sum_{k=1}^{l} atan(eta/k) -- avoids needing
+// a general complex log-gamma implementation for arbitrary l: only l=0's
+// sigma_0 = arg Gamma(1+i*eta) needs an actual complex Gamma evaluation
+// (via a Lanczos approximation, tise.cpp), validated to ~1e-15 against
+// mpmath.gamma across the eta range this project's known-solution configs
+// exercise.
+Real coulombPhaseShift(int l, Real eta);
+
+// F, Fprime, G, Gprime: the regular/irregular Coulomb wave functions and
+// their derivatives with respect to rho (the dimensionless argument --
+// NOT with respect to the physical coordinate x = rho/k) at (eta, rho).
+struct CoulombWaveResult
+{
+    Real F, Fprime, G, Gprime;
+};
+
+// farMultiplier/stepSize: see the module-level comment above.
+CoulombWaveResult evaluateCoulombFunctions(int l, Real eta, Real rho,
+                                            Real farMultiplier = 50.0,
+                                            Real stepSize = 0.1);
+
+// `coulombLC`: when present, {l, C} selects Coulomb-tail matching
+// (value+derivative match at R against
+// A_E[cos(delta)*F_l(eta,kR) + sin(delta)*G_l(eta,kR)] instead of
+// A_E*sin(kR+delta)) -- see the module comment above. `C` is the
+// energy-INDEPENDENT coefficient in V ~ C/x (AsymptoteClassification's own
+// `fittedPowerLawCoefficient`, e.g. -1.0 for hydrogen's V=-1/x) -- NOT eta
+// itself, since eta=C/k depends on the energy E via k=sqrt(2E), which
+// varies across `grid`; eta is computed fresh per energy internally, not
+// fixed once for the whole call (getting this backwards -- passing a
+// single pre-computed eta for every energy in the grid -- was caught and
+// fixed during implementation, before it shipped: it would have silently
+// used the wrong eta at every energy except whichever one it happened to
+// be computed from). Default (nullopt) preserves the original
+// flat-asymptote-only behavior exactly.
 AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, const EigenResult &eigen, std::vector<Real> grid, Real R,
                                   int order, const std::vector<Real> &Hmat, const std::vector<Real> &Smat,
                                   std::optional<std::vector<int>> dropSet = std::nullopt,
-                                  Real fineDE = 1e-3);
+                                  Real fineDE = 1e-3,
+                                  std::optional<std::pair<int, Real>> coulombLC = std::nullopt);
 
 // Writes phase_shifts.dat-style output (epsilon_i, delta, dDeltaDE) to `out`,
 // and one continuum_state_NNN.dat-style block (x, psi_E(x)) per energy to

@@ -219,7 +219,7 @@ int main(int argc, char *argv[])
         // (see validateNEnergies' comment: a non-zero exit must leave no
         // partial output on disk).
         tise::Real E_threshold = 0.0, E_max = 0.0;
-        int n_energies = 0, n_pts = 0;
+        int n_energies = 0, n_pts = 0, continuumL = 0;
         if (continuumEnabled)
         {
             const YAML::Node continuumNode = config["tise"]["continuum"];
@@ -227,6 +227,20 @@ int main(int argc, char *argv[])
             E_threshold = continuumNode["E_threshold"].as<tise::Real>();
             E_max       = continuumNode["E_max"].as<tise::Real>();
             n_pts       = continuumNode["n_pts"].as<int>();
+            // Angular momentum for Coulomb-tail continuum matching (ADR-0009,
+            // supersedes ADR-0010). Defaults to 0 (s-wave) -- required
+            // because a centrifugal term l(l+1)/2x^2, if present, is baked
+            // directly into the potential expression string (this codebase
+            // has no other angular-momentum concept: fillBandedMatrices'
+            // own L parameter is fixed at 0 and unused for potential
+            // selection) and decays faster than the 1/x Coulomb term, so it
+            // is asymptotically invisible to classifyAsymptote's tail fit
+            // and cannot be inferred automatically -- a config with an
+            // actual centrifugal term (e.g. hydrogen.yaml's l=1) MUST set
+            // this explicitly for Coulomb-tail matching to use the correct
+            // Coulomb wave functions. Only consulted when the right-edge
+            // asymptote is actually classified Coulomb, below.
+            continuumL = continuumNode["l"] ? continuumNode["l"].as<int>() : 0;
         }
 
         std::vector<WarningEntry> warnings;
@@ -244,6 +258,20 @@ int main(int argc, char *argv[])
         // the box edge (the common case, e.g. the real config.yaml), there
         // is no unbounded side to classify and this is skipped entirely.
         std::optional<tise::Real> case3RightR, case3RightDelta;
+        // Hoisted out of the block below (release-readiness follow-up
+        // plan Part B) so the R-validity check further down -- after the
+        // continuum energy grid is actually built -- can reuse this
+        // classification instead of re-running classifyAsymptote's own
+        // sampling loop a second time.
+        std::optional<tise::AsymptoteClassification> rightAsymptote;
+        // {l, eta} for matchAsymptotic's Coulomb branch (Coulomb-tail
+        // continuum matching, ADR-0009 supersedes ADR-0010) -- set below
+        // only when the right-edge asymptote is actually classified
+        // Coulomb AND continuum is enabled (eta depends on k=sqrt(2E), so
+        // it cannot be fixed until an energy is known -- computed per-call
+        // at the matchAsymptotic call site instead; this only carries the
+        // energy-independent Z/l needed to compute eta there).
+        std::optional<tise::Real> coulombZ;
         {
             // Not a shared/parameterized library function -- there is only
             // this one caller, so these stay plain local constants rather
@@ -282,6 +310,7 @@ int main(int argc, char *argv[])
                         potential, tise::SpatialDomain{rMin, rMax}, tise::DomainSide::Right, warnOut);
                     if (!warnOut.str().empty())
                         addWarning(warnings, "physics", warnOut.str());
+                    rightAsymptote = classification;
                     if (classification.asymptoteCase == tise::AsymptoteCase::Irregular)
                     {
                         std::ostringstream msg;
@@ -308,6 +337,26 @@ int main(int argc, char *argv[])
                             msg << "; continuum is disabled, so the raw (untapered) potential is "
                                    "integrated to the wall -- the bound-state spectrum is unaffected.";
                         }
+                        addWarning(warnings, "physics", msg.str());
+                    }
+                    else if (classification.subType == tise::AsymptoteSubType::Coulomb && continuumEnabled)
+                    {
+                        // Coulomb-tail continuum matching (ADR-0009,
+                        // supersedes ADR-0010): only meaningful with
+                        // continuum enabled (matchAsymptotic's Coulomb
+                        // branch is a continuum-matching formula; the
+                        // bound-state solve itself doesn't care whether the
+                        // tail is Flat or Coulomb). fittedPowerLawCoefficient
+                        // is the energy-independent C in V~C/x -- eta=C/k
+                        // is computed per-energy inside matchAsymptotic
+                        // itself, not here (see coulombZ's own declaration
+                        // comment above for why).
+                        coulombZ = classification.fittedPowerLawCoefficient;
+                        std::ostringstream msg;
+                        msg << "potential's right-edge tail is Coulomb (V ~ " << classification.fittedPowerLawCoefficient
+                            << "/x); continuum phase shifts are matched against Coulomb wave functions "
+                               "F_l/G_l (l=" << continuumL << ", from tise.continuum.l) instead of "
+                               "sin/cos -- see docs/planning/coulomb-tail-continuum-matching.md.";
                         addWarning(warnings, "physics", msg.str());
                     }
                 }
@@ -406,12 +455,72 @@ int main(int argc, char *argv[])
             }
 
             auto energyGrid = tise::buildEnergyGrid(E_threshold, E_max, n_energies);
+
+            // R-validity check (release-readiness follow-up plan Part B):
+            // matchAsymptotic's flat-asymptote formula assumes V(rMax) is
+            // negligible compared to the energies being probed -- nothing
+            // previously checked this. classifyAsymptote only samples the
+            // tail's functional SHAPE far past rMax (geometrically
+            // outward), never whether V has already become small AT rMax
+            // specifically; a potential can be correctly classified Flat
+            // while V(rMax) is still numerically significant if the box
+            // simply isn't big enough for the requested energy range.
+            // Scoped to the Flat sub-case only: a Coulomb tail's V(rMax)
+            // is expected to still be numerically non-negligible (that's
+            // what makes it Coulomb, not Flat) -- this check is not the
+            // right diagnostic for that case, which needs its own
+            // Coulomb-aware matching (see ADR-0010) rather than a bigger
+            // box. Checked against the SMALLEST requested energy
+            // (energyGrid.front()), not E_max: for a fixed |V(rMax)|, the
+            // relative distortion |V(rMax)|/E is worst at the smallest E,
+            // not the largest -- confirmed against
+            // docs/tests/reports/9d0f04b/hydrogen.md's own finding (V(100)
+            // = -0.01 against E=0.1, a 10% ratio, already produced
+            // 0.02-0.07 rad of phase-shift error).
+            if (rightAsymptote && rightAsymptote->asymptoteCase == tise::AsymptoteCase::AnalyticAsymptote &&
+                rightAsymptote->subType == tise::AsymptoteSubType::Flat && !energyGrid.empty())
+            {
+                constexpr tise::Real kMaxNegligibleFraction = 0.01; // 1%;
+                    // hydrogen.md's 10% ratio already produced several
+                    // percent of phase-shift error, so 1% is a
+                    // conservative "worth telling the user" cutoff, not a
+                    // hard correctness boundary.
+                try
+                {
+                    // evaluateFunction throws if no piece's domain covers
+                    // x=rMax exactly (e.g. a half-open "[0, rMax)" piece) --
+                    // treated the same as classifyAsymptote's own "not
+                    // applicable" case below: no diagnostic available, not
+                    // a solver failure.
+                    const tise::Real vAtRMax = tise::evaluateFunction(potential, rMax);
+                    const tise::Real smallestE = energyGrid.front();
+                    if (smallestE > 0.0 && std::abs(vAtRMax) > kMaxNegligibleFraction * smallestE)
+                    {
+                        std::ostringstream msg;
+                        msg << "potential at the right domain edge x=" << rMax << " is V(rMax)=" << vAtRMax
+                            << ", not negligible compared to the smallest requested continuum energy E="
+                            << smallestE << " (ratio " << std::abs(vAtRMax) / smallestE << " exceeds "
+                            << kMaxNegligibleFraction << "); matchAsymptotic's flat-asymptote matching "
+                               "assumes V(rMax) is approximately zero, so the resulting phase shifts may "
+                               "be inaccurate -- consider enlarging bspline.domain.";
+                        addWarning(warnings, "physics", msg.str());
+                    }
+                }
+                catch (const std::exception &)
+                {
+                }
+            }
+
             std::ostringstream poleWarnOut;
             auto states = tise::buildContinuumState(order, nEn, H, S, er, energyGrid,
                                                       sgr.nBSplines, sgr.fillDropSet, 0.1, poleWarnOut);
             if (!poleWarnOut.str().empty())
                 addWarning(warnings, "physics", poleWarnOut.str());
-            auto ar = tise::matchAsymptotic(bs, states, er, energyGrid, /*R=*/rMax, order, H, S, sgr.fillDropSet);
+            std::optional<std::pair<int, tise::Real>> coulombLC;
+            if (coulombZ)
+                coulombLC = std::make_pair(continuumL, *coulombZ);
+            auto ar = tise::matchAsymptotic(bs, states, er, energyGrid, /*R=*/rMax, order, H, S, sgr.fillDropSet,
+                                             /*fineDE=*/1e-3, coulombLC);
 
             std::ofstream phaseShiftsOut(outputDir / "phase_shifts.dat");
             std::vector<std::ofstream> continuumStateFiles;

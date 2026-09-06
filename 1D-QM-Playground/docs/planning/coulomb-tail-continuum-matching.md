@@ -1,8 +1,11 @@
 # Coulomb-Tail Continuum Matching (Figure 7 Case 2, Non-Flat Sub-Branch)
 
-**Status:** Deferred — see [ADR-0010](../adr/0010-defer-coulomb-tail-continuum-matching.md).
-This document is the companion planning doc for that ADR: it exists to save a
-future implementer the re-derivation, not to propose doing the work now.
+**Status:** Implemented — see [ADR-0013](../adr/0013-coulomb-tail-continuum-matching.md)
+(supersedes [ADR-0010](../adr/0010-defer-coulomb-tail-continuum-matching.md)).
+This document's derivation sketch and integration plan were followed closely
+during implementation; it is kept as the derivation reference (the "why"
+behind `tise::evaluateCoulombFunctions`/`matchAsymptotic`'s Coulomb branch),
+not as an open item.
 
 ## Problem statement
 

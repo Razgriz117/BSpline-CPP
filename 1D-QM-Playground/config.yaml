@@ -28,15 +28,18 @@ bspline:
 #              No variable references to other config fields are supported;
 #              all constants (including centrifugal terms) must be baked in.
 #
-# Example (hydrogen-like, L=1 effective potential):
-#   - "{'domain': '(0, 100]', 'function': '-1/x + 1/x^2'}"
+# Example (hydrogen-like, L=1 effective potential -- domain declared
+# UNBOUNDED, '(0, inf)' not '(0, 100]': the true Coulomb tail extends past
+# the box; declaring it as such is what lets classifyAsymptote recognize
+# and Coulomb-match it -- see tise.continuum.l below):
+#   - "{'domain': '(0, inf)', 'function': '-1/x + 1/x^2'}"
 #
 # Example (particle in a box with a barrier at x in [5, 6]):
 #   - "{'domain': '[0, 5)',  'function': '0'}"
 #   - "{'domain': '[5, 6]',  'function': '10'}"
 #   - "{'domain': '(6, 10]', 'function': '0'}"
 potential:
-  - "{'domain': '(0, 100]', 'function': '-1/x + 1/x^2'}"
+  - "{'domain': '(0, inf)', 'function': '-1/x + 1/x^2'}"
 
 # ─── TISE solver ──────────────────────────────────────────────────────────────
 tise:
@@ -49,6 +52,14 @@ tise:
     E_max:       10.0         # upper bound of continuum spectrum range
     n_energies:  100          # number of energy points in [E_threshold, E_max]
     n_pts:       500          # spatial grid points per continuum state output
+    l:           1            # angular momentum for Coulomb-tail continuum matching
+                               # (ADR-0009 supersedes ADR-0010) -- must match the
+                               # centrifugal term l(l+1)/2x^2 baked into `function`
+                               # above (1*2/2=1, matching the "+1/x^2" term); cannot
+                               # be inferred automatically since a centrifugal term
+                               # decays faster than the 1/x Coulomb term and is
+                               # asymptotically invisible to the tail-shape fit.
+                               # Defaults to 0 (s-wave) if omitted.
 
 # ─── TDSE solver ──────────────────────────────────────────────────────────────
 tdse:

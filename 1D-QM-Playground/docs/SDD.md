@@ -137,11 +137,13 @@ This table covers acronyms used to navigate *this document's own structure*. Dom
 
 **External references:**
 
-- H. Bachau, E. Cormier, P. Decleva, J. E. Hansen, F. Martín, "Applications of B-splines in atomic and molecular physics," *Rep. Prog. Phys.* **64**, 1815–1942 (2001) — `H_Bachau_2001_Rep._Prog._Phys._64_1815.pdf`. Primary numerical-method reference.
+*As of 2026-09-06, the PHY5606/Bachau PDFs below are checked into `docs/references/` (previously cited by filename only, with no file present — see ADR-0012's resolution) — `AJP_Example.pdf` remains external.*
+
+- H. Bachau, E. Cormier, P. Decleva, J. E. Hansen, F. Martín, "Applications of B-splines in atomic and molecular physics," *Rep. Prog. Phys.* **64**, 1815–1942 (2001) — `docs/references/H_Bachau_2001_Rep._Prog._Phys._64_1815.pdf`. Primary numerical-method reference.
 - C. de Boor, *A Practical Guide to Splines*, Springer (1978).
-- L. Argenti, PHY5606 course notes (Fall 2025/2023) — `PHY5606_F25_Bsplines_v2.pdf`, `PHY5606_F25_Projects.pdf`.
-- `PHY5606_F25_ContinuumEigenstates.pdf` — the authoritative worked algorithm for continuum/generalized-eigenstate construction via the confined eigenbasis; source for [§5.2.3](#523-internal-design)'s continuum-state formulas.
-- `AJP_Example.pdf` — example of the target publication format/quality bar ([§2.2](#22-goals-and-objectives)).
+- L. Argenti, PHY5606 course notes (Fall 2025/2023) — `docs/references/PHY5606_F25_Bsplines_v2.pdf`, `docs/references/PHY5606_F25_Projects.pdf`.
+- `docs/references/PHY5606_F25_ContinuumEigenstates.pdf` — the authoritative worked algorithm for continuum/generalized-eigenstate construction via the confined eigenbasis; source for [§5.2.3](#523-internal-design)'s continuum-state formulas.
+- `AJP_Example.pdf` — example of the target publication format/quality bar ([§2.2](#22-goals-and-objectives)); not yet added to the repo.
 - Candidate/adopted libraries (`docs/planning/resources.md`): [FunctionParser](http://warp.povusers.org/FunctionParser/), [NFParam](https://github.com/nativeformat/NFParam) (expression parsing candidates, [§11.1](#111-build-system-and-dependencies)), [Boost.Math interpolation](https://www.boost.org/doc/libs/1_77_0/libs/math/doc/html/interpolation.html), [nlohmann/json](https://github.com/nlohmann/json), [yaml-cpp](https://github.com/jbeder/yaml-cpp).
 
 ### 1.6 Document Conventions
@@ -740,6 +742,7 @@ classDiagram
         +E_max: float
         +n_energies: int
         +n_pts: int
+        +l: int
     }
     class TDSE {
         +dt: float
@@ -867,6 +870,7 @@ flowchart TD
 | `E_max` | float | Upper bound of the continuum spectrum range |
 | `n_energies` | int | Number of energy grid points in `[E_threshold, E_max]` |
 | `n_pts` | int | Spatial grid points per continuum state output |
+| `l` | int | Angular momentum for Coulomb-tail continuum matching (ADR-0013, supersedes ADR-0010). Only consulted when the potential's right-edge asymptote classifies as Coulomb (a genuine, unbounded $-Z/x$ tail); ignored for a flat asymptote. Cannot be inferred from the tail-shape fit — a centrifugal term $\ell(\ell+1)/2x^2$ decays faster than the $1/x$ Coulomb term and is asymptotically invisible to it — so it must match whatever centrifugal term is baked into the potential expression string. Defaults to 0 (s-wave) if omitted, **silently** — a config with a nonzero centrifugal term but no matching `l` is matched against the wrong Coulomb functions with no diagnostic. |
 
 **`tdse`** — propagates $H(t) = H_0 + H_\text{int}(t)$; propagator method (Magnus, Crank-Nicolson, RK4, …) is an implementation detail, not exposed in the schema.
 

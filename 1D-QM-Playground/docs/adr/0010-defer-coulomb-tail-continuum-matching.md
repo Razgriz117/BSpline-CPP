@@ -1,9 +1,10 @@
 # ADR-0010: Defer Coulomb-Tail Continuum Matching (Figure 7 Case 2, Non-Flat Sub-Branch)
 
-- **Status:** Accepted (deferred)
+- **Status:** Superseded by [ADR-0013](0013-coulomb-tail-continuum-matching.md)
 - **Date:** 2026-09-04 (formalized during a post-implementation cleanup pass;
   the gap itself was identified earlier, during the original TISE
-  implementation phase — see Source)
+  implementation phase — see Source); superseded 2026-09-06 once Coulomb-tail
+  matching was actually implemented (ADR-0013).
 
 ## Context
 

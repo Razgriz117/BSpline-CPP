@@ -497,6 +497,10 @@ TEST(ClassifyAsymptoteTest, Case2CoulombForInverseR)
     EXPECT_EQ(result.asymptoteCase, tise::AsymptoteCase::AnalyticAsymptote);
     EXPECT_EQ(result.subType, tise::AsymptoteSubType::Coulomb);
     EXPECT_NEAR(result.powerLawExponent, 1.0, 1e-2);
+    // V=-1/x exactly -- fittedPowerLawCoefficient (C in V ~ C/x^p) should
+    // recover C=-1 to high precision (Coulomb-tail continuum matching,
+    // ADR-0009/supersedes ADR-0010: eta=C/k, so this is directly -Z).
+    EXPECT_NEAR(result.fittedPowerLawCoefficient, -1.0, 1e-4);
 }
 
 TEST(ClassifyAsymptoteTest, Case3IrregularForPowerLawOneAndHalf)
@@ -558,6 +562,69 @@ TEST(ClassifyAsymptoteTest, ThrowsOnNumSamplesBelowThree)
     EXPECT_THROW(
         tise::classifyAsymptote(potential, domain, tise::DomainSide::Right, warn, /*numSamples=*/2),
         std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// coulombPhaseShift / evaluateCoulombFunctions (Coulomb-tail continuum
+// matching, ADR-0009 supersedes ADR-0010). Reference values computed via
+// mpmath.gamma/coulombf/coulombg at 30 digits of precision -- see
+// docs/planning/coulomb-tail-continuum-matching.md for the full derivation
+// and validation record this implementation follows.
+// ---------------------------------------------------------------------------
+
+TEST(CoulombPhaseShiftTest, MatchesMpmathForPositiveEta)
+{
+    EXPECT_NEAR(tise::coulombPhaseShift(0, 1.0), -0.301640320468, 1e-9);
+}
+
+TEST(CoulombPhaseShiftTest, MatchesMpmathForNegativeEtaAndNonzeroL)
+{
+    // sigma_1(eta) = sigma_0(eta) + atan(eta/1) -- the recurrence itself
+    // (not just sigma_0's Lanczos-Gamma evaluation) is exercised here.
+    EXPECT_NEAR(tise::coulombPhaseShift(1, -2.236067977), -1.461464809416, 1e-9);
+}
+
+TEST(CoulombPhaseShiftTest, ZeroEtaGivesZeroPhaseAtL0)
+{
+    // Gamma(1) = 1 is real and positive -- arg = 0 exactly, no Coulomb
+    // charge means no Coulomb phase shift.
+    EXPECT_NEAR(tise::coulombPhaseShift(0, 0.0), 0.0, 1e-12);
+}
+
+TEST(EvaluateCoulombFunctionsTest, MatchesMpmathForHydrogenLikeParameters)
+{
+    // l=1, eta=-Z/k with Z=1, E=0.1 (hydrogen.yaml's own l=1, E=0.1 case),
+    // rho=k*R with R=100 -- the exact real-world parameters this feature
+    // exists for. Tolerances reflect the validated accuracy envelope
+    // (docs/planning/coulomb-tail-continuum-matching.md): a hand-rolled,
+    // WKB-start/Numerov-shooting evaluator, not a special-function-library-
+    // grade arbitrary-precision result.
+    const double E = 0.1, Z = 1.0;
+    const double k = std::sqrt(2 * E);
+    const double eta = -Z / k;
+    const double rho = k * 100.0;
+
+    auto cw = tise::evaluateCoulombFunctions(1, eta, rho);
+    EXPECT_NEAR(cw.F, 0.9764322220, 5e-4);
+    EXPECT_NEAR(cw.G, 0.0220322426, 5e-2); // near a node of G here -- see note below
+    EXPECT_NEAR(cw.Fprime, 0.0235833422, 5e-2); // near a node of F' here
+    EXPECT_NEAR(cw.Gprime, -1.0236044894, 3e-3);
+}
+
+TEST(EvaluateCoulombFunctionsTest, WronskianIsApproximatelyOneInMagnitude)
+{
+    // F*G' - G*F' = +-1 for correctly normalized Coulomb functions,
+    // independent of eta/rho/l -- matchAsymptotic's own Coulomb branch
+    // computes this directly (never assumes its sign or exact value), but
+    // it should still come out close to +-1 in practice; a value far from
+    // that would indicate a broken evaluator, not just accumulated
+    // integration error.
+    const double k = std::sqrt(2 * 0.3);
+    const double eta = -1.0 / k;
+    const double rho = k * 100.0;
+    auto cw = tise::evaluateCoulombFunctions(0, eta, rho);
+    const double W = cw.F * cw.Gprime - cw.G * cw.Fprime;
+    EXPECT_NEAR(std::abs(W), 1.0, 1e-2);
 }
 
 // ---------------------------------------------------------------------------
@@ -2768,6 +2835,72 @@ TEST(MatchAsymptoticDDeltaDETest, FineGridEstimateMatchesIndependentFineCentralD
     EXPECT_NEAR(result.dDeltaDE[0], independentDDeltaDE, 5e-3)
         << "matchAsymptotic's fine-grid dDeltaDE: " << result.dDeltaDE[0]
         << ", independent fine-centered-difference estimate: " << independentDDeltaDE;
+}
+
+// ---------------------------------------------------------------------------
+// matchAsymptotic's Coulomb branch (coulombLC) -- end-to-end, through a
+// real B-spline/eigenbasis solve, not synthetic F/G values. A PURE Coulomb
+// potential (no additional short-range term) has, by definition, zero
+// Coulomb-tail phase shift -- delta(E) measures the DEVIATION from pure
+// Coulomb scattering, and there is none here. This is the "cheap sanity
+// check" docs/planning/coulomb-tail-continuum-matching.md's own validation
+// section proposed before any implementation existed.
+// ---------------------------------------------------------------------------
+
+class PureCoulombContinuumTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> gridPts(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            gridPts[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, gridPts), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        // Same left-edge-singularity treatment as hydrogen elsewhere in
+        // this file (classic {1}-only drop-set; the origin singularity is
+        // regularized by the domain edge itself, not A4b interior removal).
+        std::map<std::string, std::string> potential = {{"(0, " + std::to_string(rMax) + "]", "-1/x"}};
+        std::tie(H, S) = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1});
+        eigen  = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+        states = tise::buildContinuumState(order, nEn, H, S, eigen, energyGrid);
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 81, order = 12, L = 0;
+    double rMin = 0.0, rMax = 100.0;
+    int nBSplines = 0, nEn = 0;
+    tise::EigenResult eigen;
+    std::vector<double> energyGrid = {0.1, 0.3, 0.5};
+    std::vector<std::vector<double>> states;
+    std::vector<double> H, S;
+};
+
+TEST_F(PureCoulombContinuumTest, PhaseShiftIsApproximatelyZero)
+{
+    // C (V=-1/x -- fittedPowerLawCoefficient would give C=-1, i.e. Z=1) is
+    // energy-independent -- matchAsymptotic computes eta=C/k fresh per
+    // energy internally, so the whole energyGrid can go through in one
+    // call (this is itself a regression check for that: a bug where
+    // eta was computed once outside the per-energy loop, using whichever
+    // energy happened to be in scope at the time, was caught and fixed
+    // during implementation -- if it recurred, every energy but one in
+    // this multi-point grid would fail).
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax, order, H, S,
+                                     /*dropSet=*/std::nullopt, /*fineDE=*/1e-3,
+                                     std::make_pair(L, -1.0));
+    for (std::size_t i = 0; i < energyGrid.size(); ++i)
+    {
+        // Reduce mod pi before comparing to 0 -- the atan2-based delta can
+        // legitimately land at a value like +-pi that is physically
+        // equivalent to 0 for a scattering phase shift.
+        double wrapped = std::fmod(ar.delta[i] + M_PI / 2, M_PI);
+        if (wrapped < 0) wrapped += M_PI;
+        wrapped -= M_PI / 2;
+        EXPECT_NEAR(wrapped, 0.0, 5e-3) << "E=" << energyGrid[i] << " raw delta=" << ar.delta[i];
+    }
 }
 
 // ---------------------------------------------------------------------------

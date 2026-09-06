@@ -8,7 +8,7 @@ bspline:
   order:   12
   domain:  [0.0, 100.0]
 potential:
-  - "{'domain': '(0, 100]', 'function': '-1/x + 1/x^2'}"
+  - "{'domain': '(0, inf)', 'function': '-1/x + 1/x^2'}"
 tise:
   n_pts_eigenstate: 301
   error_threshold:  1.0e-10
@@ -18,5 +18,6 @@ tise:
     E_max:       0.5
     n_energies:  5
     n_pts:       500
+    l:           1
 visualization:
   eigenstates: true

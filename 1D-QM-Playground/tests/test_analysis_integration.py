@@ -631,28 +631,38 @@ class TestHydrogenConfigFileRealSubprocess:
         assert energies[1] == pytest.approx(-1 / 18, abs=1e-6)
         assert energies[2] == pytest.approx(-1 / 32, abs=1e-6)
 
-    def test_phase_shift_mod_pi_matches_report_reference(
+    def test_phase_shift_is_approximately_zero_for_pure_coulomb_tail(
         self, tise_solver_binary: Path, tmp_path: Path
     ):
-        # Reference: docs/tests/reports/8236239/hydrogen.md section 4 table,
-        # "delta mod pi (solver)" column -- independently cross-checked
-        # there against the same atan(k*psi/psi')-kR formula applied to the
-        # exact Coulomb function F_1. Compared mod pi here since the
-        # solver's own delta is a continuously-unwrapped trajectory (H3)
-        # and can differ from the report's mod-pi-reduced table by an
-        # integer multiple of pi.
+        # hydrogen.yaml's potential (-1/x + 1/x^2, l=1) is an EXACT pure
+        # radial Coulomb equation -- the 1/x^2 term is exactly the l=1
+        # centrifugal term l(l+1)/2=1, not an extra short-range correction.
+        # A phase shift measures the DEVIATION from pure Coulomb
+        # scattering; there is none here, so delta should be ~0 (mod pi).
+        # This closes the Coulomb-tail-continuum-matching gap (ADR-0009
+        # supersedes ADR-0010): the potential's domain is now declared
+        # unbounded ('(0, inf)', not '(0, 100]') so classifyAsymptote
+        # actually recognizes the Coulomb tail, and tise.continuum.l: 1 is
+        # set so the matching uses the correct Coulomb wave functions.
+        # Before this fix, the flat-asymptote formula gave delta of order
+        # 1 rad here (docs/tests/reports/8236239/hydrogen.md) -- wrong by
+        # the entire physical phase, not a small approximation error.
         config = _load_known_solution_config("hydrogen", tmp_path)
         tise_dir = tmp_path / "data" / "tise"
         run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
         data = read_tise_output(tise_dir)
 
-        expected_mod_pi = {0.1: 0.807586, 0.2: -1.036321, 0.3: 1.150641,
-                            0.4: 0.553418, 0.5: 0.120704}
-        assert len(data.phase_shifts) == len(expected_mod_pi)
+        assert len(data.phase_shifts) == 5
         for row in data.phase_shifts:
-            want = expected_mod_pi[round(row.energy, 1)]
+            want = 0.0
             got = row.delta - math.pi * round((row.delta - want) / math.pi)
-            assert got == pytest.approx(want, abs=1e-4)
+            # abs=3e-3: comfortably above the largest observed residual
+            # (~8e-4 at E=0.1) and consistent with the Coulomb-matching
+            # implementation's own validated worst-case accuracy
+            # (~2.5e-3 rad, docs/planning/coulomb-tail-continuum-matching.md)
+            # -- box-truncation/numerical residual, not exactly zero, but
+            # many orders of magnitude tighter than the pre-fix ~1 rad error.
+            assert got == pytest.approx(want, abs=3e-3)
 
     def test_ddelta_dE_no_longer_diverges(self, tise_solver_binary: Path, tmp_path: Path):
         # Regression pin for H2 (docs/planning/tise-known-solution-followup-
@@ -908,6 +918,83 @@ class TestCase3RemediationRealSubprocess:
 
         messages = [w["message"] for w in warnings]
         assert any("Irregular" in m and "tapering" in m for m in messages)
+
+
+def _write_flat_tail_config(tmp_config: Path, tmp_path: Path, tail_value: float) -> Path:
+    """A well on [0,5) plus a CONSTANT (hence trivially Flat-classified --
+    zero successive differences, no power-law-fit tolerance to reason
+    about) tail of `tail_value` on [5, inf), box domain [0,20]. Continuum
+    enabled with E_max=0.1/n_energies=2, so the smallest requested energy
+    is 0.05 -- deliberately chosen so tail_value=0.05 gives ratio 1.0 (Part
+    B's R-validity check should fire) and tail_value=0.0001 gives ratio
+    0.002 (should not). The tail must extend to infinity, not stop exactly
+    at rMax=20, or tise_solver_main.cpp's own "is there really an unbounded
+    side to classify" probe skips classification entirely."""
+    with open(tmp_config) as f:
+        cfg = yaml.safe_load(f)
+    cfg["bspline"]["n_nodes"] = 41
+    cfg["bspline"]["order"] = 8
+    cfg["bspline"]["domain"] = [0.0, 20.0]
+    cfg["potential"] = [
+        "{'domain': '[0, 5)', 'function': '-1.0'}",
+        f"{{'domain': '[5, inf)', 'function': '{tail_value}'}}",
+    ]
+    cfg["tise"]["continuum"] = {
+        "enabled": True, "E_threshold": 0.0, "E_max": 0.1, "n_energies": 2, "n_pts": 50,
+    }
+    out = tmp_path / f"config_flat_tail_{tail_value}.yaml"
+    with open(out, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return out
+
+
+class TestRValidityWarningRealSubprocess:
+    """Part B of the Coulomb-tail/boundary-validation follow-up plan:
+    classifyAsymptote only checks the tail's functional SHAPE far past
+    rMax (geometrically outward), never whether V has already become
+    small AT rMax specifically relative to the requested continuum
+    energies -- previously nothing warned a user whose box was too small
+    for their energy range. Scoped to the Flat sub-case only (a Coulomb
+    tail's V(rMax) is expected to still be non-negligible; that's a
+    separate, not-yet-implemented concern -- see ADR-0010)."""
+
+    def test_warnings_json_flags_non_negligible_v_at_rmax(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _write_flat_tail_config(tmp_config, tmp_path, tail_value=0.05)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        warnings = json.loads((tise_dir / "warnings.json").read_text())
+
+        messages = [w["message"] for w in warnings]
+        assert any("not negligible" in m and "V(rMax)" in m for m in messages)
+
+    def test_warnings_json_does_not_flag_a_negligible_v_at_rmax(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _write_flat_tail_config(tmp_config, tmp_path, tail_value=0.0001)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        warnings = json.loads((tise_dir / "warnings.json").read_text())
+
+        messages = [w["message"] for w in warnings]
+        assert not any("not negligible" in m and "V(rMax)" in m for m in messages)
+
+    def test_hydrogen_yaml_coulomb_tail_is_not_flagged_by_this_check(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # hydrogen.yaml's tail is Coulomb (V(100)=-0.01, genuinely
+        # non-negligible against E=0.1 -- see docs/tests/reports/9d0f04b/
+        # hydrogen.md), but this check is deliberately scoped to Flat only;
+        # a Coulomb tail needs Coulomb-aware matching (ADR-0010), not a
+        # bigger box, so it must not trigger this particular warning.
+        config = _load_known_solution_config("hydrogen", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        warnings = json.loads((tise_dir / "warnings.json").read_text())
+
+        messages = [w["message"] for w in warnings]
+        assert not any("not negligible" in m and "V(rMax)" in m for m in messages)
 
 
 # ─── analysis.py's OWN CLI/subprocess contract (Sec 7.2.3), invoked directly ─

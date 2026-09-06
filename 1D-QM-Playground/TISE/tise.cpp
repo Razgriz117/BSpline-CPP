@@ -3,8 +3,10 @@
 #define _USE_MATH_DEFINES
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
+#include <complex>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -399,6 +401,7 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
         result.subType = AsymptoteSubType::NotApplicable;
         result.fittedAsymptoticValue = nan;
         result.powerLawExponent = nan;
+        result.fittedPowerLawCoefficient = nan;
         result.recommendedTransitionWidth = nan;
         return result;
     }
@@ -409,9 +412,20 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
         result.subType = AsymptoteSubType::Flat;
         result.fittedAsymptoticValue = fit.fittedLimit;
         result.powerLawExponent = nan;
+        result.fittedPowerLawCoefficient = nan;
         result.recommendedTransitionWidth = nan;
         return result;
     }
+
+    // Coefficient C in V ~ fittedLimit + C/x^p, read off the last (farthest,
+    // least noisy relative to the fitted tail) sample: V[last] = fittedLimit
+    // + C/|x_last|^p => C = (V[last]-fittedLimit)*|x_last|^p. abs() on
+    // x_last: the physical tail falloff is naturally expressed in distance
+    // from the origin, not signed coordinate (matters for DomainSide::Left,
+    // where samples run negative).
+    const Real xLast = reference + sign * scale * std::pow(ratio, numSamples - 1);
+    const Real fittedCoefficient = (V[numSamples - 1] - fit.fittedLimit) *
+                                    std::pow(std::abs(xLast), fit.powerLawExponent);
 
     // A true Coulomb tail (V ~ C/r) is a power law with exponent exactly 1;
     // coulombExponentTol is how far the fitted exponent may drift from 1
@@ -423,6 +437,7 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
         result.subType = AsymptoteSubType::Coulomb;
         result.fittedAsymptoticValue = fit.fittedLimit;
         result.powerLawExponent = fit.powerLawExponent;
+        result.fittedPowerLawCoefficient = fittedCoefficient;
         result.recommendedTransitionWidth = nan;
         return result;
     }
@@ -431,6 +446,7 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
     result.subType = AsymptoteSubType::NotApplicable;
     result.fittedAsymptoticValue = fit.fittedLimit;
     result.powerLawExponent = fit.powerLawExponent;
+    result.fittedPowerLawCoefficient = fittedCoefficient;
     // Neither flat nor Coulomb -- the tail shape is unrecognized. Recommend
     // tapering it to zero (via case3WindowFunction) over a transition width
     // that scales with the box size (transitionWidthFraction of the total
@@ -731,6 +747,150 @@ std::vector<std::vector<Real>> buildContinuumState(
 
 }
 
+// === Coulomb-tail continuum matching (ADR-0009, supersedes ADR-0010) ===
+// See the module-level comment on matchAsymptotic's declaration (tise.hpp)
+// and docs/planning/coulomb-tail-continuum-matching.md for the full
+// derivation and validation record.
+
+namespace
+{
+
+// Lanczos approximation for the complex Gamma function, g=7/n=9 coefficient
+// set (a standard, widely-published choice -- e.g. the one used by Numerical
+// Recipes' own complex-Gamma routine). Only the ARGUMENT of Gamma(1+i*eta)
+// is actually needed (coulombPhaseShift below), but implementing the full
+// complex Gamma is no harder than a real-argument-only special case and is
+// easier to validate directly against a reference (mpmath.gamma). Validated
+// during implementation: arg(lanczosGamma(1+i*eta)) matches mpmath's
+// arg(gamma(1+i*eta)) to ~1e-15 across eta in [-5, 5].
+std::complex<Real> lanczosGamma(std::complex<Real> z)
+{
+    static constexpr int kG = 7;
+    static constexpr Real kCoeffs[kG + 2] = {
+        0.99999999999980993,   676.5203681218851,     -1259.1392167224028,
+        771.32342877765313,    -176.61502916214059,   12.507343278686905,
+        -0.13857109526572012,  9.9843695780195716e-6, 1.5056327351493116e-7,
+    };
+
+    if (z.real() < 0.5)
+        // Reflection formula: extends the approximation (valid for
+        // Re(z)>=0.5) to the rest of the complex plane. Only Re(z)=1
+        // (from coulombPhaseShift's Gamma(1+i*eta)) is actually exercised
+        // today, so this branch is untested dead code in practice, but
+        // it's cheap and standard to include for a self-contained,
+        // correct-for-any-z implementation.
+        return kPi / (std::sin(kPi * z) * lanczosGamma(Real(1.0) - z));
+
+    z -= Real(1.0);
+    std::complex<Real> x(kCoeffs[0], 0.0);
+    for (int i = 1; i < kG + 2; ++i)
+        x += kCoeffs[i] / (z + Real(i));
+    std::complex<Real> t = z + Real(kG) + Real(0.5);
+    return std::sqrt(2.0 * kPi) * std::pow(t, z + Real(0.5)) * std::exp(-t) * x;
+}
+
+} // namespace
+
+Real coulombPhaseShift(int l, Real eta)
+{
+    Real sigma = std::arg(lanczosGamma(std::complex<Real>(1.0, eta)));
+    for (int k = 1; k <= l; ++k)
+        sigma += std::atan(eta / k);
+    return sigma;
+}
+
+CoulombWaveResult evaluateCoulombFunctions(int l, Real eta, Real rho,
+                                            Real farMultiplier, Real stepSize)
+{
+    // Local "index of refraction" for the Coulomb radial equation
+    // u'' + k(rho)^2 u = 0, k(rho)^2 = 1 - 2*eta/rho - l(l+1)/rho^2.
+    auto localK = [&](Real r) {
+        return std::sqrt(1.0 - 2.0 * eta / r - l * (l + 1) / (r * r));
+    };
+    // Central-difference derivative of localK -- cheap, and only ever
+    // evaluated once per F/G pair (at rhoStart), not per integration step.
+    auto localKPrime = [&](Real r) {
+        constexpr Real h = 1e-4;
+        return (localK(r + h) - localK(r - h)) / (2.0 * h);
+    };
+
+    const Real sigmaL = coulombPhaseShift(l, eta);
+    const Real rhoStart = rho * farMultiplier;
+
+    // WKB-corrected starting values at rhoStart, for a solution of the form
+    // u(r) ~ sin(theta(r))/sqrt(k(r)) [regular-like, F] or
+    // u(r) ~ cos(theta(r))/sqrt(k(r)) [irregular-like, G], theta(r) = the
+    // standard Coulomb phase r - eta*ln(2r) - l*pi/2 + sigma_l(eta).
+    // Amplitude AND its derivative both carry a 1/sqrt(k(r)) WKB
+    // correction; using the leading-order (amplitude=1) form here was
+    // empirically found, during implementation, to converge far too
+    // slowly in farMultiplier to be practical -- see
+    // docs/planning/coulomb-tail-continuum-matching.md.
+    auto wkbStart = [&](Real r) {
+        const Real theta = r - eta * std::log(2.0 * r) - l * kPi / 2.0 + sigmaL;
+        const Real k = localK(r);
+        const Real kp = localKPrime(r);
+        const Real amp = 1.0 / std::sqrt(k);
+        const Real sinT = std::sin(theta), cosT = std::cos(theta);
+        const Real F0 = amp * sinT;
+        const Real G0 = amp * cosT;
+        const Real Fp0 = std::sqrt(k) * cosT - (kp / (2.0 * std::pow(k, 1.5))) * sinT;
+        const Real Gp0 = -std::sqrt(k) * sinT - (kp / (2.0 * std::pow(k, 1.5))) * cosT;
+        return std::array<Real, 4>{F0, Fp0, G0, Gp0};
+    };
+
+    // Exact Coulomb ODE, integrated inward (rhoStart > rho) via Numerov's
+    // method: u'' = -coeff(r)*u, coeff(r) = 1 - 2*eta/r - l(l+1)/r^2 -- the
+    // standard technique for a second-order ODE with no first-derivative
+    // term (see the module-level comment on this function's declaration in
+    // tise.hpp for why this replaced an initial 4th-order Runge-Kutta
+    // attempt). Numerov's update needs two seed values (u at the two
+    // farthest grid points, not value+derivative at one point), so the
+    // second seed is obtained from a 3rd-order Taylor step off wkbStart's
+    // value+derivative, using the ODE itself for the needed u''/u'''.
+    auto coeffAt = [&](Real r) { return 1.0 - 2.0 * eta / r - l * (l + 1) / (r * r); };
+    auto numerov = [&](Real u0, Real up0) {
+        const Real diff = rhoStart - rho;
+        const int nsteps = std::max(1, static_cast<int>(std::ceil(diff / stepSize)));
+        const Real h = diff / nsteps; // exact fit: rhoStart - nsteps*h == rho
+        const Real c0 = coeffAt(rhoStart);
+        const Real u2 = -c0 * u0; // u'' = -coeff*u
+        constexpr Real kEps = 1e-5;
+        const Real cPrime = (coeffAt(rhoStart + kEps) - coeffAt(rhoStart - kEps)) / (2.0 * kEps);
+        const Real u3 = -(cPrime * u0 + c0 * up0); // u''' = -(coeff'*u + coeff*u')
+        Real rCurr = rhoStart - h;
+        Real uPrev = u0; // at rhoStart (one point farther out than rCurr)
+        Real uCurr = u0 - h * up0 + 0.5 * h * h * u2 - (h * h * h / 6.0) * u3; // Taylor step to rCurr
+        Real fPrev = c0;
+        Real fCurr = coeffAt(rCurr);
+        for (int i = 0; i < nsteps - 1; ++i)
+        {
+            const Real rNext = rCurr - h;
+            const Real fNext = coeffAt(rNext);
+            const Real uNext = (2.0 * (1.0 - 5.0 * h * h * fCurr / 12.0) * uCurr -
+                                 (1.0 + h * h * fPrev / 12.0) * uPrev) /
+                                (1.0 + h * h * fNext / 12.0);
+            uPrev = uCurr;
+            uCurr = uNext;
+            fPrev = fCurr;
+            fCurr = fNext;
+            rCurr = rNext;
+        }
+        // uCurr is now at rho (the target); uPrev is one step farther out, at
+        // rho+h. Extract the derivative at rho from the Taylor expansion
+        // uPrev = uCurr + h*u'(rho) + h^2/2*u''(rho), with u''(rho)=-fCurr*uCurr:
+        //   u'(rho) = (uPrev - uCurr)/h + (h/2)*fCurr*uCurr
+        const Real uPrimeCurr = (uPrev - uCurr) / h + 0.5 * h * fCurr * uCurr;
+        return std::array<Real, 2>{uCurr, uPrimeCurr};
+    };
+
+    const auto start = wkbStart(rhoStart);
+    const auto Fresult = numerov(start[0], start[1]);
+    const auto Gresult = numerov(start[2], start[3]);
+
+    return CoulombWaveResult{Fresult[0], Fresult[1], Gresult[0], Gresult[1]};
+}
+
 AsymptoticResult matchAsymptotic(
     const bspline::BSpline &bs,
     std::vector<std::vector<Real>> states,
@@ -738,7 +898,8 @@ AsymptoticResult matchAsymptotic(
     std::vector<Real> grid, Real R,
     int order, const std::vector<Real> &Hmat, const std::vector<Real> &Smat,
     std::optional<std::vector<int>> dropSet,
-    Real fineDE
+    Real fineDE,
+    std::optional<std::pair<int, Real>> coulombLC
 )
 {
     AsymptoticResult result;
@@ -766,6 +927,38 @@ AsymptoticResult matchAsymptotic(
     // grid, which the fine steps fall outside of).
     auto [coeffs1, coeffs2] = precomputeBoundaryCoupling(order, nEn, Hmat, Smat, eigen, nBSplines, dropSet);
 
+    // Value+derivative match at R against A_E*sin(kR+delta) (flat) or
+    // A_E[cos(delta)*F_l(eta,kR)+sin(delta)*G_l(eta,kR)] (Coulomb, when
+    // coulombLC is set) -- see the module-level comment above
+    // matchAsymptotic's declaration in tise.hpp. Both branches solve for
+    // the SAME quantities (A_E, delta) via the value/derivative match;
+    // the Coulomb branch's Wronskian-based solve reduces to the flat
+    // branch's atan/sqrt formulas exactly at eta=0 (F_0(0,rho)=sin(rho),
+    // G_0(0,rho)=cos(rho)), confirmed during implementation.
+    //
+    // eta = C/k is recomputed fresh from k EVERY call (not hoisted/fixed
+    // once outside this lambda) -- eta genuinely depends on the energy via
+    // k=sqrt(2E), which varies across the energy grid this lambda is
+    // called once per point of.
+    auto amplitudeAndDelta = [&](Real psi_R, Real psiPrime_R, Real k) -> std::pair<Real, Real> {
+        if (!coulombLC)
+        {
+            const Real A_E = std::sqrt((2.0 / M_PI) / (k * psi_R * psi_R + psiPrime_R * psiPrime_R / k));
+            const Real delta = std::atan(k * psi_R / psiPrime_R) - k * R;
+            return {A_E, delta};
+        }
+        const auto [l, C] = *coulombLC;
+        const Real eta = C / k;
+        const CoulombWaveResult cw = evaluateCoulombFunctions(l, eta, k * R);
+        const Real psiPrimeOverK = psiPrime_R / k;
+        const Real W = cw.F * cw.Gprime - cw.G * cw.Fprime; // ~1 by construction; computed, not assumed
+        const Real alpha = (psi_R * cw.Gprime - psiPrimeOverK * cw.G) / W; // A_E*cos(delta)
+        const Real beta = (psiPrimeOverK * cw.F - psi_R * cw.Fprime) / W; // A_E*sin(delta)
+        const Real A_E = std::sqrt((2.0 / (M_PI * k)) / (alpha * alpha + beta * beta));
+        const Real delta = std::atan2(beta, alpha);
+        return {A_E, delta};
+    };
+
     // for each E, first find \bar psi_E(R) and \bar psi'_E(R), then calculate A_E, delta
     for (int E_idx = 0; E_idx < grid.size(); ++E_idx)
     {
@@ -781,18 +974,7 @@ AsymptoticResult matchAsymptotic(
 
         Real k = sqrt(2 * grid[E_idx]);
 
-        result.A_E[E_idx] = sqrt(
-            (2 / M_PI) /
-            (
-                k * pow(psi_R, 2) +
-                pow(psiPrime_R, 2) / k
-            )
-        );
-
-        result.delta[E_idx] = std::atan(
-            (k * psi_R) /
-            (psiPrime_R)
-        ) - (k * R);
+        std::tie(result.A_E[E_idx], result.delta[E_idx]) = amplitudeAndDelta(psi_R, psiPrime_R, k);
     }
 
     // === H2/H3 fix (docs/tests/reports/8236239/finite_square_well.md,
@@ -815,7 +997,7 @@ AsymptoticResult matchAsymptotic(
         Real psi_R = bs.eval(R, fc.data(), fc.size(), 0);
         Real psiPrime_R = bs.eval(R, fc.data(), fc.size(), 1);
         Real k = std::sqrt(2 * E);
-        return std::atan((k * psi_R) / psiPrime_R) - (k * R);
+        return amplitudeAndDelta(psi_R, psiPrime_R, k).second;
     };
 
     for (std::size_t E_idx = 0; E_idx < grid.size(); ++E_idx)
