@@ -1,10 +1,9 @@
-# Test report: `tests/free_particle.yaml` — iteration 2
+# Test report: `tests/free_particle.yaml` — iteration 3
 
 **Verified against:** the particle in a box (infinite square well), exact closed form.
-**Branch / commit:** `TISE-Generalization` @ `8236239` ("TISE release-readiness pass").
-**Previous iteration:** `9d0f04b` — see `../9d0f04b/` for the same test; the solver output for this YAML is **byte-identical** between the two commits (the strategic-grid path is a no-op for a potential with no interior joins), so every number below is unchanged.
-**Date:** 2026-09-04.
-**Verdict:** **PASS (unchanged).** Bound energies, eigenfunctions, normalisation, continuum states, and phase shifts agree with the exact solution to machine precision for every state the basis can resolve. The one new artefact, `phase_shifts.png`, plots the unwrapped $-kR$-dominated $\delta$ and is uninformative as drawn.
+**Branch / commit:** `TISE-Generalization` @ `f4e8359`. **Previous:** `8236239`, `9d0f04b` (same test in `../8236239/`, `../9d0f04b/`). Eigenvalues, eigenstates and continuum states are byte-identical across all three commits; only `phase_shifts.dat` changed at this commit (see §6).
+**Date:** 2026-09-11.
+**Verdict:** **PASS.** Bound energies, eigenfunctions, normalisation, continuum states, and phase shifts agree with the exact solution to machine precision for every state the basis can resolve. The phase-shift file now stores δ ≈ 0 directly (no $-kR$ offset) and `phase_shifts.png` is a flat line at zero, as it should be. The new fine-step $d\delta/dE$ is $\le 1.2\times10^{-2}$ against an exact 0 — larger than before, for a reason explained in §6 that is not a defect.
 
 Companion files: `verify_known_solutions.py` (the script that produced every reference number and figure cited below); figures in `figures/`.
 
@@ -111,12 +110,13 @@ The solver also emitted "pole proximity" warnings for $E = 0.1, 0.2, 0.3, 0.5$ (
 
 **Overall: PASS.** This test exercises the kinetic-energy matrix, the overlap matrix, the generalised eigensolver, the eigenstate reconstruction, the continuum construction and the asymptotic matching, and every one of them behaves exactly as the closed-form solution demands.
 
-## 6. What changed at 8236239 for this test
+## 6. What changed at f4e8359 for this test
 
-* **Output data:** `eigenvalues.dat`, all `eigenstate_NNN.dat`, `continuum_state_NNN.dat` and `phase_shifts.dat` are byte-identical to 9d0f04b. `buildStrategicGridAndDropSet` finds no interior join in `[0,100] → 0` and returns the same uniform grid and `{1}` drop-set.
-* **New diagnostics:** `warnings.json` now carries "0 of 59 computed states are below E=0.0" (`classifyBoundStates`), which is correct. No well-containment warnings, correct (no bound states to check).
-* **New plot:** `visualization.phase_shifts: true` was added to this YAML and `analysis.py` now writes `phase_shifts.png` (`figures/output_phase_shifts_fp_fsw.png`, left). The upper panel shows the raw $\delta$ from −44 to −101, i.e. the $-kR$ line; the fact that it is exactly $-14\pi, -20\pi, \dots$ (the physics) is invisible. The lower panel shows $d\delta/dE \sim 10^{-4}$, which for the free particle is correctly "zero" but only because the exact answer is constant.
-* **Round-1 recommendations status:** (1) wrap $\delta$ — not done, now visible in the plot; (2) cap plotted states — not done (59 PNGs); (3) tighten $E_{\rm acc}$ — not done (`minInterNodeGap` is now used, which is the right input, but the formula and the missing $V_{\min}$ are unchanged); (4) denser continuum grid — not done; (5) automated check — partially: the YAML is now loaded by an e2e test and PNG existence is asserted, but no energy is compared to $n^2\pi^2/2L^2$.
+* **Eigenvalues, eigenstates, continuum states:** byte-identical to both previous commits.
+* **`phase_shifts.dat` — δ column:** now stored continuously unwrapped with the first point normalised into $(-\pi/2,\pi/2]$. The five values are $4.8\times10^{-10},\ -6.6\times10^{-8},\ 1.7\times10^{-6},\ -2.4\times10^{-5},\ -1.1\times10^{-5}$ — i.e. the same "δ mod π" numbers as before, but now what is written is what a reader wants: zero to the basis accuracy, no $-14\pi$ offsets. `phase_shifts.png` accordingly shows a flat line at 0 instead of a $-kR$ ramp.
+* **`phase_shifts.dat` — dδ/dE column:** now a fine-step central difference (`fineDE` $=10^{-3}$): $5\times10^{-7},\ -1.3\times10^{-5},\ 3.7\times10^{-4},\ 2.4\times10^{-3},\ 1.2\times10^{-2}$ against an exact value of 0. These are *larger* than the old column's $10^{-6}$–$10^{-4}$, and that is expected: the new estimator is $[\delta(E+h)-\delta(E-h)]/2h$, so the basis error in δ ($\sim10^{-5}$ at $E=0.5$) is amplified by $1/2h = 500$. The old column looked better on this test only because it was differencing a constant; on every non-trivial potential it was noise (see the finite-well and hydrogen reports, where the new column is right to $10^{-5}$). A per-energy self-consistency check the code could do: compare the fine-step derivative against the coarse production-grid slope and report when they disagree by more than the expected $O(\Delta E^2)$.
+* **Plots:** `eigenstate_N.png` now draws the raw $\phi_n(x)$ (sign arbitrary) rather than $|\phi_n|^2$; the $2/L$ bump-height check from iteration 1 becomes a $\pm\sqrt{2/L} = \pm0.1414$ amplitude check.
+* **Round-1/2 recommendations status:** wrap δ — **done**; dδ/dE — **done** (with the amplification caveat above); cap plotted states, tighten $E_{\rm acc}$, denser continuum grid — not done; e2e assertion of $n^2\pi^2/2L^2$ — not done for this YAML (the finite-well, hydrogen, singularity and Case-3 tests gained numeric assertions at `0bf17be`; the free particle and oscillator did not).
 
 ## 7. Recommendations
 
