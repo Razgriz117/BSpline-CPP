@@ -43,6 +43,8 @@ python3 controller.py --config tests/free_particle.yaml
 
 produces `./data/free_particle/tise/continuum_*.png` etc. — see each file's own settings for what it's checking (e.g. `finite_square_well.yaml`'s genuinely energy-dependent phase shift vs. `free_particle.yaml`'s flat `delta=0`). These same configs are also exercised by the automated suite in `tests/test_analysis_integration.py`.
 
+For a full step-by-step walkthrough of writing your own input file — choosing `bspline`/`potential`/`continuum` settings for your own physics problem, common mistakes, and what the output means — see [`docs/guides/input-file-authoring-guide.md`](docs/guides/input-file-authoring-guide.md).
+
 ---
 
 ## Directory Structure
@@ -75,6 +77,6 @@ For C++ build instructions and dependencies (including the standalone `H-BoundSt
 
 ## Scope and Roadmap
 
-Implemented: general 1D piecewise potentials (not just hydrogenic), bound-state eigenvalues/eigenvectors, continuum eigenstates (phase shifts + scattering wavefunctions) with strategic B-spline node placement for potentials with internal structure, and a Python analysis/plotting layer — all driven by `config.yaml` through `controller.py`.
+Implemented: general 1D piecewise potentials (not just hydrogenic), bound-state eigenvalues/eigenvectors, continuum eigenstates (phase shifts + scattering wavefunctions) with strategic B-spline node placement for potentials with internal structure, continuum matching against both flat/free-particle and Coulomb-tail asymptotes (`tise.continuum.l`, [ADR-0013](docs/adr/0013-coulomb-tail-continuum-matching.md)), and a Python analysis/plotting layer — all driven by `config.yaml` through `controller.py`.
 
-Not yet implemented: TDSE propagation under external time-dependent fields (`run.run_tdse` is explicitly rejected by `controller.py` today) and the Coulomb-tail continuum-matching formula for potentials with a genuine `1/r`-type tail beyond the box (the implemented continuum matching assumes a flat/free-particle-like asymptote; see `docs/SDD.md` §5.2.3 and `docs/adr/`).
+Not yet implemented: TDSE propagation under external time-dependent fields (`run.run_tdse` is explicitly rejected by `controller.py` today). See `docs/adr/` for narrower, still-deferred limitations (e.g. delta-potential node placement, user-supplied node-placement formulas, CAP/outgoing-wave boundary conditions).

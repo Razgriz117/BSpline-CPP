@@ -1,6 +1,7 @@
 build*
 data/
-EigennState_*
+EigenState_*
+1D-QM-Playground/TISE/*.dat
 .vscode/
 __pycache__/
 *.pyc

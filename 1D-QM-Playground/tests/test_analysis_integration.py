@@ -695,7 +695,10 @@ class TestInteriorSingularityRealSubprocess:
     Fixed via knot multiplicity + single-B-spline drop, exactly mirroring
     domain-edge treatment; the exact reference spectrum below is the split-
     domain union of box states on [0,20] and repulsive-Coulomb states on
-    [20,40] (report section 3)."""
+    [20,40] (report section 3). Continuum construction is now refused
+    entirely for this config too (previously it still ran and wrote
+    phase_shifts.dat/continuum_state_NNN.dat with values the report itself
+    called physically meaningless for a split domain)."""
 
     def test_all_eigenvalues_and_eigenvectors_finite(
         self, tise_solver_binary: Path, tmp_path: Path
@@ -742,6 +745,36 @@ class TestInteriorSingularityRealSubprocess:
         assert energies[0] == pytest.approx(0.0123370055, abs=1e-9)  # box n=1
         assert energies[1] == pytest.approx(0.0493480220, abs=1e-9)  # box n=2
         assert energies[2] == pytest.approx(0.1005405216, abs=1e-8)  # Coulomb root 1
+
+    def test_warnings_json_contains_interior_singular_split_warning(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # docs/tests/reports/f4e8359/interior_singularity.md: phase_shifts.dat
+        # was still being written for this split domain even though the
+        # values "describe nothing physical" -- continuum construction is now
+        # refused here too, same treatment as right_edge_singularity.yaml.
+        config = _load_known_solution_config("interior_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        warnings = json.loads((tise_dir / "warnings.json").read_text())
+
+        messages = [w["message"] for w in warnings]
+        assert any("singular join strictly inside the domain" in m for m in messages)
+
+    def test_no_continuum_output_files_are_written(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("interior_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert not (tise_dir / "phase_shifts.dat").exists()
+        assert not list(tise_dir.glob("continuum_state_*.dat"))
+        assert data.phase_shifts == []
+        assert data.continuum_states == []
 
 
 class TestRightEdgeSingularWarningRealSubprocess:

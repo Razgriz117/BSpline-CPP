@@ -227,7 +227,7 @@ int main(int argc, char *argv[])
             E_threshold = continuumNode["E_threshold"].as<tise::Real>();
             E_max       = continuumNode["E_max"].as<tise::Real>();
             n_pts       = continuumNode["n_pts"].as<int>();
-            // Angular momentum for Coulomb-tail continuum matching (ADR-0009,
+            // Angular momentum for Coulomb-tail continuum matching (ADR-0013,
             // supersedes ADR-0010). Defaults to 0 (s-wave) -- required
             // because a centrifugal term l(l+1)/2x^2, if present, is baked
             // directly into the potential expression string (this codebase
@@ -265,7 +265,7 @@ int main(int argc, char *argv[])
         // sampling loop a second time.
         std::optional<tise::AsymptoteClassification> rightAsymptote;
         // {l, eta} for matchAsymptotic's Coulomb branch (Coulomb-tail
-        // continuum matching, ADR-0009 supersedes ADR-0010) -- set below
+        // continuum matching, ADR-0013 supersedes ADR-0010) -- set below
         // only when the right-edge asymptote is actually classified
         // Coulomb AND continuum is enabled (eta depends on k=sqrt(2E), so
         // it cannot be fixed until an energy is known -- computed per-call
@@ -341,7 +341,7 @@ int main(int argc, char *argv[])
                     }
                     else if (classification.subType == tise::AsymptoteSubType::Coulomb && continuumEnabled)
                     {
-                        // Coulomb-tail continuum matching (ADR-0009,
+                        // Coulomb-tail continuum matching (ADR-0013,
                         // supersedes ADR-0010): only meaningful with
                         // continuum enabled (matchAsymptotic's Coulomb
                         // branch is a continuum-matching formula; the
@@ -423,18 +423,41 @@ int main(int argc, char *argv[])
                        "construction entirely (no phase_shifts.dat/continuum_state_NNN.dat "
                        "written). The bound-state solve above is unaffected and still valid.");
 
-        // Continuum construction, gated on tise.continuum.enabled AND not
-        // singular at the right domain edge (known-solution-verification
-        // follow-up plan, Part D): a right-edge singularity requires
-        // psi_E(rMax)=0 physically, but B_N -- the "escape" function
-        // continuum construction deliberately keeps -- is exactly the one
-        // basis function that's non-zero there. The resulting "continuum
-        // state" is essentially B_N alone, not a solution of the problem
-        // (docs/tests/reports/8236239/right_edge_singularity.md section
-        // 4.3: 30x larger at the wall than anywhere in the interior).
-        // Refuse rather than write known-wrong output that a downstream
-        // plot would happily draw.
-        if (continuumEnabled && !sgr.rightEdgeSingular)
+        // Same reasoning as the rightEdgeSingular warning above, for the
+        // other way a domain can fail to be a single regular region: a
+        // genuine INTERIOR Singular join (e.g. a box union a
+        // repulsive-Coulomb well split at the join) leaves two physically
+        // decoupled sub-regions. Matching at rMax against such a domain
+        // (docs/tests/reports/f4e8359/interior_singularity.md: phase shifts
+        // "describe nothing physical" -- flat-asymptote matching applied to
+        // a state built from two decoupled boxes) is refused below, same as
+        // rightEdgeSingular.
+        if (sgr.interiorSingularSplit && continuumEnabled)
+            addWarning(warnings, "physics",
+                       "potential has a singular join strictly inside the domain (not at an "
+                       "edge), splitting it into two physically decoupled regions; continuum "
+                       "phase-shift matching (matchAsymptotic) has no meaning for such a split "
+                       "domain -- skipping continuum construction entirely (no phase_shifts.dat/"
+                       "continuum_state_NNN.dat written). The bound-state solve above is "
+                       "unaffected and still valid.");
+
+        // Continuum construction, gated on tise.continuum.enabled AND
+        // neither of the two ways the domain can fail to be a single
+        // regular region (known-solution-verification follow-up plan, Part
+        // D, extended to interior splits): a right-edge singularity
+        // requires psi_E(rMax)=0 physically, but B_N -- the "escape"
+        // function continuum construction deliberately keeps -- is exactly
+        // the one basis function that's non-zero there. The resulting
+        // "continuum state" is essentially B_N alone, not a solution of the
+        // problem (docs/tests/reports/8236239/right_edge_singularity.md
+        // section 4.3: 30x larger at the wall than anywhere in the
+        // interior). An interior singular split has the analogous problem
+        // one level up: rMax's own sub-region may be perfectly regular, but
+        // the "continuum state" still isn't a solution of the ORIGINAL
+        // two-region problem the config actually describes. Refuse rather
+        // than write known-wrong output that a downstream plot would
+        // happily draw.
+        if (continuumEnabled && !sgr.rightEdgeSingular && !sgr.interiorSingularSplit)
         {
             // mass=1.0 hardcoded, matching fillBandedMatrices' own
             // internal kinetic-energy term (which already hardcodes /2.0,
@@ -468,8 +491,8 @@ int main(int argc, char *argv[])
             // Scoped to the Flat sub-case only: a Coulomb tail's V(rMax)
             // is expected to still be numerically non-negligible (that's
             // what makes it Coulomb, not Flat) -- this check is not the
-            // right diagnostic for that case, which needs its own
-            // Coulomb-aware matching (see ADR-0010) rather than a bigger
+            // right diagnostic for that case, which has its own
+            // Coulomb-aware matching (see ADR-0013) rather than a bigger
             // box. Checked against the SMALLEST requested energy
             // (energyGrid.front()), not E_max: for a fixed |V(rMax)|, the
             // relative distortion |V(rMax)|/E is worst at the smallest E,
@@ -513,7 +536,8 @@ int main(int argc, char *argv[])
 
             std::ostringstream poleWarnOut;
             auto states = tise::buildContinuumState(order, nEn, H, S, er, energyGrid,
-                                                      sgr.nBSplines, sgr.fillDropSet, 0.1, poleWarnOut);
+                                                      sgr.nBSplines, sgr.fillDropSet,
+                                                      /*poleTolFraction=*/0.1, poleWarnOut);
             if (!poleWarnOut.str().empty())
                 addWarning(warnings, "physics", poleWarnOut.str());
             std::optional<std::pair<int, tise::Real>> coulombLC;

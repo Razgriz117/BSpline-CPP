@@ -499,7 +499,7 @@ TEST(ClassifyAsymptoteTest, Case2CoulombForInverseR)
     EXPECT_NEAR(result.powerLawExponent, 1.0, 1e-2);
     // V=-1/x exactly -- fittedPowerLawCoefficient (C in V ~ C/x^p) should
     // recover C=-1 to high precision (Coulomb-tail continuum matching,
-    // ADR-0009/supersedes ADR-0010: eta=C/k, so this is directly -Z).
+    // ADR-0013/supersedes ADR-0010: eta=C/k, so this is directly -Z).
     EXPECT_NEAR(result.fittedPowerLawCoefficient, -1.0, 1e-4);
 }
 
@@ -566,7 +566,7 @@ TEST(ClassifyAsymptoteTest, ThrowsOnNumSamplesBelowThree)
 
 // ---------------------------------------------------------------------------
 // coulombPhaseShift / evaluateCoulombFunctions (Coulomb-tail continuum
-// matching, ADR-0009 supersedes ADR-0010). Reference values computed via
+// matching, ADR-0013 supersedes ADR-0010). Reference values computed via
 // mpmath.gamma/coulombf/coulombg at 30 digits of precision -- see
 // docs/planning/coulomb-tail-continuum-matching.md for the full derivation
 // and validation record this implementation follows.
@@ -1300,6 +1300,42 @@ TEST(DetectPotentialStructureTest, StitchedKinkAtCornerJoin)
     EXPECT_EQ(joins[0].type, tise::JoinType::StitchedKink);
 }
 
+// Coverage note: StitchedKinkAtCornerJoin above is the ONLY StitchedKink
+// example anywhere in this file prior to this test -- a "tent" (V rises then
+// falls). This is a second, distinct shape: a V-SHAPED well (V falls then
+// rises), value continuous at the vertex (both sides give 0 at x=5) but
+// slope jumps from -2 to +2. Exercises the same JoinType::StitchedKink
+// classification against a genuinely different potential, following the
+// precedent engineer-a-plan-A4.md already set for Singular (interior vs.
+// edge variants) when a single-shape gap was found there.
+TEST(DetectPotentialStructureTest, StitchedKinkAtVShapedWellVertex)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,5)", "2*(5-x)"}, {"[5,10]", "2*(x-5)"}
+    };
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 1u);
+    EXPECT_DOUBLE_EQ(joins[0].x, 5.0);
+    EXPECT_EQ(joins[0].type, tise::JoinType::StitchedKink);
+}
+
+// Coverage note: ContinuousJoinNotFlagged below reuses the identical formula
+// on both sides (x*x/x*x) -- a trivial case where value/slope matching is
+// definitionally exact. This uses two DIFFERENT functional forms (a
+// parabola meeting its own tangent line at x=5: value 25, slope 10 on both
+// sides) so the "no remediation needed" path is exercised against a case
+// where matching isn't a tautology.
+TEST(DetectPotentialStructureTest, ContinuousJoinBetweenDifferentFunctionalForms)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,5)", "x^2"}, {"[5,10]", "10*x-25"}
+    };
+    auto joins = tise::detectPotentialStructure(potential);
+    ASSERT_EQ(joins.size(), 1u);
+    EXPECT_DOUBLE_EQ(joins[0].x, 5.0);
+    EXPECT_EQ(joins[0].type, tise::JoinType::Continuous);
+}
+
 TEST(DetectPotentialStructureTest, SingularAtCoulombOrigin)
 {
     std::map<std::string, std::string> potential = {
@@ -1506,6 +1542,48 @@ TEST(StrategicNodePlacementAccuracyTest, ImprovesOverUniformGridForBoxBarrier)
     auto strategicGrid = tise::buildStrategicRadialGrid(nCoarse, rMin, rMax, knots);
     // Per buildStrategicRadialGrid's contract: pass the returned grid's OWN
     // size, not nCoarse -- see Gap 1 above.
+    double eCoarseStrategic = groundStateEnergy(strategicGrid, static_cast<int>(strategicGrid.size()));
+
+    double errUniform = std::abs(eCoarseUniform - eFine);
+    double errStrategic = std::abs(eCoarseStrategic - eFine);
+    EXPECT_LT(errStrategic, errUniform);
+}
+
+// Coverage note: the "Done when" criterion above was scoped only to a Step
+// example (the box barrier). StitchedKink had no accuracy-improvement
+// demonstration at all -- this closes that gap with a V-shaped well
+// (V(x)=2|x-10|, a StitchedKink join at x=10), same method as above.
+TEST(StrategicNodePlacementAccuracyTest, ImprovesOverUniformGridForVShapedWell)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,10)", "2*(10-x)"}, {"[10,20]", "2*(x-10)"}
+    };
+    const int order = 8;
+    const int L = 0;
+    const double rMin = 0.0, rMax = 20.0;
+
+    auto groundStateEnergy = [&](const std::vector<double> &grid, int nNodesForInit) {
+        bspline::BSpline bs;
+        int info = bs.init(nNodesForInit, order, grid);
+        EXPECT_EQ(info, 0);
+        int nEn = bs.getNBSplines() - 2;
+        auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, L, potential);
+        auto result = tise::solveGeneralizedEigenproblem(std::move(H), std::move(S), nEn, order);
+        return result.values[0];
+    };
+
+    const int nFine = 201;
+    double eFine = groundStateEnergy(tise::buildUniformRadialGrid(nFine, rMin, rMax), nFine);
+
+    // Coarse uniform: 21 nodes on [0,20] -> spacing 1.0; x=10 already falls
+    // exactly on the grid, same "same node count, degeneracy only" reading
+    // as the box-barrier test above.
+    const int nCoarse = 21;
+    double eCoarseUniform = groundStateEnergy(tise::buildUniformRadialGrid(nCoarse, rMin, rMax), nCoarse);
+
+    auto joins = tise::detectPotentialStructure(potential);
+    auto knots = tise::strategicKnotsFromJoins(joins, order);
+    auto strategicGrid = tise::buildStrategicRadialGrid(nCoarse, rMin, rMax, knots);
     double eCoarseStrategic = groundStateEnergy(strategicGrid, static_cast<int>(strategicGrid.size()));
 
     double errUniform = std::abs(eCoarseUniform - eFine);
@@ -2623,6 +2701,47 @@ TEST_F(MatchAsymptoticDropSetTest, StillMatchesAnalyticSquareWellFormulaWithExtr
         << "computed delta=" << ar.delta[0] << " expected=" << expected;
 }
 
+// Coverage note: coulombFarMultiplier/coulombStepSize were added to
+// matchAsymptotic's own signature (previously evaluateCoulombFunctions
+// always received its compiled-in 50.0/0.1 defaults with no way to reach
+// them from matchAsymptotic or above) specifically so they're testable at a
+// non-default value, not just at the one operating point every other test
+// (including EvaluateCoulombFunctionsTest above) exercises. This fixture's
+// potential isn't physically Coulomb, but matchAsymptotic's Coulomb-branch
+// FORMULA doesn't care -- coulombLC only selects which matching formula
+// (flat vs. Coulomb) is applied to whatever psi(R)/psi'(R) the basis
+// actually produces, so this legitimately isolates the parameter-forwarding
+// plumbing from the physics.
+TEST_F(MatchAsymptoticDropSetTest, CoulombFarMultiplierAndStepSizeAreForwardedToEvaluateCoulombFunctions)
+{
+    double R = 7.0;
+    std::optional<std::pair<int, tise::Real>> coulombLC = std::make_pair(0, -1.0);
+
+    auto arDefaultImplicit = tise::matchAsymptotic(bs, states, eigen, energyGrid, R, order, H, S, dropSet,
+                                                     /*fineDE=*/1e-3, coulombLC);
+    auto arDefaultExplicit = tise::matchAsymptotic(bs, states, eigen, energyGrid, R, order, H, S, dropSet,
+                                                     /*fineDE=*/1e-3, coulombLC,
+                                                     /*coulombFarMultiplier=*/50.0, /*coulombStepSize=*/0.1);
+    // Omitting the two new trailing parameters must reproduce their stated
+    // defaults exactly -- not just "close," since both calls request the
+    // identical operating point.
+    EXPECT_EQ(arDefaultImplicit.delta[0], arDefaultExplicit.delta[0]);
+
+    auto arNonDefault = tise::matchAsymptotic(bs, states, eigen, energyGrid, R, order, H, S, dropSet,
+                                                /*fineDE=*/1e-3, coulombLC,
+                                                /*coulombFarMultiplier=*/20.0, /*coulombStepSize=*/0.25);
+    // A materially different farMultiplier/stepSize must actually reach
+    // evaluateCoulombFunctions and change its result -- if these were
+    // silently dropped (e.g. a forwarding bug), this would equal
+    // arDefaultExplicit.delta[0] exactly instead of merely being close.
+    EXPECT_NE(arNonDefault.delta[0], arDefaultExplicit.delta[0]);
+    // Still a physically sane phase shift, not a garbage value from a
+    // badly under-resolved integration -- coulombStepSize=0.25 is coarser
+    // than the 0.1 default but well within evaluateCoulombFunctions'
+    // documented accuracy envelope for this rho.
+    EXPECT_NEAR(wrapPhaseModPi(arNonDefault.delta[0]), wrapPhaseModPi(arDefaultExplicit.delta[0]), 0.05);
+}
+
 // ---------------------------------------------------------------------------
 // writeContinuumInfo — regression test for the coefficient-basis bug: the
 // function must transform buildContinuumState's eigenstate-basis
@@ -2969,6 +3088,20 @@ TEST(BuildStrategicGridAndDropSetTest, StepPotentialActuallyUsesAStrategicNonUni
     EXPECT_GT(static_cast<int>(sgr.grid.size()), 41);
 }
 
+// Coverage note: unlike Step (covered end-to-end above and by the accuracy
+// test below) and Singular (interior+edge, covered end-to-end elsewhere in
+// this suite), StitchedKink previously had no buildStrategicGridAndDropSet-
+// level coverage at all -- only DetectPotentialStructureTest.
+// StitchedKinkAtCornerJoin exercised classification in isolation.
+TEST(BuildStrategicGridAndDropSetTest, StitchedKinkPotentialActuallyUsesAStrategicNonUniformGrid)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,20)", "2*(20-x)"}, {"[20,40]", "2*(x-20)"}
+    };
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
+    EXPECT_GT(static_cast<int>(sgr.grid.size()), 41);
+}
+
 TEST(BuildStrategicGridAndDropSetTest, RightEdgeSingularFlagsRightEdgeSingularity)
 {
     // Same proven-divergent expression as DetectPotentialStructureTest.
@@ -2984,6 +3117,39 @@ TEST(BuildStrategicGridAndDropSetTest, RightEdgeSingularFalseForLeftEdgeSingular
     std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
     auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
     EXPECT_FALSE(sgr.rightEdgeSingular);
+}
+
+// docs/tests/reports/f4e8359/interior_singularity.md: continuum/phase-shift
+// output is still written for this split-domain case even though it
+// "describes nothing physical" (flat-asymptote matching applied to a state
+// built from two decoupled boxes). interiorSingularSplit lets
+// tise_solver_main.cpp refuse continuum construction here, mirroring the
+// existing rightEdgeSingular gate.
+TEST(BuildStrategicGridAndDropSetTest, InteriorSingularityFlagsInteriorSingularSplit)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0,20)", "0"}, {"(20,40]", "1/(x-20)"}
+    };
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
+    EXPECT_TRUE(sgr.interiorSingularSplit);
+}
+
+TEST(BuildStrategicGridAndDropSetTest, InteriorSingularSplitFalseForEdgeSingularity)
+{
+    // Hydrogen's origin singularity coincides with the domain edge -- not
+    // an interior split, so this must stay false (already regularized by
+    // the classic wall exclusion, per HydrogenSingularAtOriginIsHandled...
+    // above).
+    std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
+    EXPECT_FALSE(sgr.interiorSingularSplit);
+}
+
+TEST(BuildStrategicGridAndDropSetTest, InteriorSingularSplitFalseForOrdinaryPotential)
+{
+    std::map<std::string, std::string> potential = {{"[0,40]", "0.5*x^2"}};
+    auto sgr = tise::buildStrategicGridAndDropSet(41, 8, 0.0, 40.0, potential);
+    EXPECT_FALSE(sgr.interiorSingularSplit);
 }
 
 // ---------------------------------------------------------------------------

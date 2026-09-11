@@ -22,15 +22,20 @@ phases):
     inputs.
   - No binary-format support for hamiltonian.dat/overlap.dat -- Sec 6.3
     leaves "plain text or binary" undecided; only plain text exists today.
-  - No plotting.
   - No computation of any REQ-F-060 quantity (bound-state populations,
     expectation values, spectral distributions, etc.) -- those require
-    TDSE output (Sec 7.2.5) too and are Phase 8's job.
-  - No output artifact of any kind: no plot files, no derived-data files,
-    no data/analysis/ directory, no placeholder stdout payload. run()
-    computes and writes nothing -- deliberately deferred per ADR-0005
-    (docs/adr/0005-defer-analysis-output-artifact-format.md), not an
-    oversight.
+    TDSE output (Sec 7.2.5) too and are Phase 8's job. No output artifact
+    for these TDSE-dependent quantities exists yet; that half of
+    ADR-0005's original question remains open.
+
+TISE-side plotting (plot_tise/plot_eigenstates/plot_phase_shifts, called
+from run() below) IS implemented -- it requires only TISE output, not TDSE,
+so it was never actually blocked by the reasoning above. Plots are written
+directly into --tise-dir (no separate data/analysis/ directory, no
+--output-dir flag of Analysis's own). See ADR-0016
+(docs/adr/0016-analysis-plot-artifact-format.md), which supersedes
+ADR-0005 for this TISE-side output; ADR-0005 itself is retained for its
+still-open TDSE-dependent question.
 """
 
 from __future__ import annotations
@@ -79,12 +84,13 @@ class ConfigError(AnalysisError):
     Deliberately narrower than controller.ConfigValidationError: this
     module's load_config() performs none of controller.py's solver-specific
     schema checks (potential-piece tiling, bspline.domain, run.run_tise/
-    output_dir) -- Phase 3 doesn't read or act on the `analysis`/
-    `visualization` blocks' contents yet (their REQ-F-060 quantities all
-    require TDSE output, unavailable until Phase 8 -- see this module's
-    top docstring). That's a separate point from ADR-0005
+    output_dir) -- Phase 3 reads `visualization.eigenstates`/
+    `bound_states_squared`/`phase_shifts` (ADR-0016) but still doesn't read
+    or act on the `analysis` block's contents at all (its REQ-F-060
+    quantities all require TDSE output, unavailable until Phase 8 -- see
+    this module's top docstring). That's a separate point from ADR-0005
     (docs/adr/0005-defer-analysis-output-artifact-format.md), which defers
-    only Phase 3's own output-artifact format/location, not input
+    only the TDSE-dependent output-artifact format/location, not input
     validation.
     """
 
@@ -552,7 +558,10 @@ def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     `tise_dir` (raises TiseOutputError if missing/malformed -- Sec 7.2.2's
     required files are non-optional), and tolerates `tdse_dir` not
     existing (Sec 5.4.4: run_tdse: false is expected until Phase 8) with a
-    stderr note rather than raising. Computes and writes nothing (ADR-0005).
+    stderr note rather than raising. Writes TISE-side plots into `tise_dir`
+    per ADR-0016 (continuum/eigenstate/phase-shift PNGs); computes and
+    writes nothing for REQ-F-060's TDSE-dependent quantities, per ADR-0005's
+    still-open question.
 
     Raises AnalysisError (ConfigError or TiseOutputError) on failure;
     never a raw exception.

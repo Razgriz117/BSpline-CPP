@@ -747,7 +747,7 @@ std::vector<std::vector<Real>> buildContinuumState(
 
 }
 
-// === Coulomb-tail continuum matching (ADR-0009, supersedes ADR-0010) ===
+// === Coulomb-tail continuum matching (ADR-0013, supersedes ADR-0010) ===
 // See the module-level comment on matchAsymptotic's declaration (tise.hpp)
 // and docs/planning/coulomb-tail-continuum-matching.md for the full
 // derivation and validation record.
@@ -772,7 +772,10 @@ std::complex<Real> lanczosGamma(std::complex<Real> z)
         -0.13857109526572012,  9.9843695780195716e-6, 1.5056327351493116e-7,
     };
 
-    if (z.real() < 0.5)
+    // The Lanczos approximation below is only valid for Re(z)>=0.5; this is
+    // the standard reflection-formula boundary, not a tunable accuracy knob.
+    static constexpr Real kLanczosReflectionThreshold = 0.5;
+    if (z.real() < kLanczosReflectionThreshold)
         // Reflection formula: extends the approximation (valid for
         // Re(z)>=0.5) to the rest of the complex plane. Only Re(z)=1
         // (from coulombPhaseShift's Gamma(1+i*eta)) is actually exercised
@@ -802,6 +805,17 @@ Real coulombPhaseShift(int l, Real eta)
 CoulombWaveResult evaluateCoulombFunctions(int l, Real eta, Real rho,
                                             Real farMultiplier, Real stepSize)
 {
+    // Shared central-difference derivative, f'(r) ~ (f(r+h)-f(r-h))/(2h).
+    // Used below for two functions with two independently-chosen step
+    // sizes (kLocalKPrimeStep, kNumerovSeedCoeffPrimeStep) -- each is
+    // evaluated exactly once per call (not per integration step), so
+    // there's no performance reason for them to differ; they were tuned
+    // separately during implementation and there's no known reason they
+    // need to match, so both are kept as-is rather than unified, to avoid
+    // re-validating this evaluator's accuracy envelope (docs/planning/
+    // coulomb-tail-continuum-matching.md) against a numeric change.
+    auto centralDiff = [](auto f, Real r, Real h) { return (f(r + h) - f(r - h)) / (2.0 * h); };
+
     // Local "index of refraction" for the Coulomb radial equation
     // u'' + k(rho)^2 u = 0, k(rho)^2 = 1 - 2*eta/rho - l(l+1)/rho^2.
     auto localK = [&](Real r) {
@@ -809,10 +823,8 @@ CoulombWaveResult evaluateCoulombFunctions(int l, Real eta, Real rho,
     };
     // Central-difference derivative of localK -- cheap, and only ever
     // evaluated once per F/G pair (at rhoStart), not per integration step.
-    auto localKPrime = [&](Real r) {
-        constexpr Real h = 1e-4;
-        return (localK(r + h) - localK(r - h)) / (2.0 * h);
-    };
+    constexpr Real kLocalKPrimeStep = 1e-4;
+    auto localKPrime = [&](Real r) { return centralDiff(localK, r, kLocalKPrimeStep); };
 
     const Real sigmaL = coulombPhaseShift(l, eta);
     const Real rhoStart = rho * farMultiplier;
@@ -855,8 +867,8 @@ CoulombWaveResult evaluateCoulombFunctions(int l, Real eta, Real rho,
         const Real h = diff / nsteps; // exact fit: rhoStart - nsteps*h == rho
         const Real c0 = coeffAt(rhoStart);
         const Real u2 = -c0 * u0; // u'' = -coeff*u
-        constexpr Real kEps = 1e-5;
-        const Real cPrime = (coeffAt(rhoStart + kEps) - coeffAt(rhoStart - kEps)) / (2.0 * kEps);
+        constexpr Real kNumerovSeedCoeffPrimeStep = 1e-5;
+        const Real cPrime = centralDiff(coeffAt, rhoStart, kNumerovSeedCoeffPrimeStep);
         const Real u3 = -(cPrime * u0 + c0 * up0); // u''' = -(coeff'*u + coeff*u')
         Real rCurr = rhoStart - h;
         Real uPrev = u0; // at rhoStart (one point farther out than rCurr)
@@ -899,7 +911,9 @@ AsymptoticResult matchAsymptotic(
     int order, const std::vector<Real> &Hmat, const std::vector<Real> &Smat,
     std::optional<std::vector<int>> dropSet,
     Real fineDE,
-    std::optional<std::pair<int, Real>> coulombLC
+    std::optional<std::pair<int, Real>> coulombLC,
+    Real coulombFarMultiplier,
+    Real coulombStepSize
 )
 {
     AsymptoticResult result;
@@ -949,7 +963,8 @@ AsymptoticResult matchAsymptotic(
         }
         const auto [l, C] = *coulombLC;
         const Real eta = C / k;
-        const CoulombWaveResult cw = evaluateCoulombFunctions(l, eta, k * R);
+        const CoulombWaveResult cw =
+            evaluateCoulombFunctions(l, eta, k * R, coulombFarMultiplier, coulombStepSize);
         const Real psiPrimeOverK = psiPrime_R / k;
         const Real W = cw.F * cw.Gprime - cw.G * cw.Fprime; // ~1 by construction; computed, not assumed
         const Real alpha = (psi_R * cw.Gprime - psiPrimeOverK * cw.G) / W; // A_E*cos(delta)
@@ -1583,6 +1598,7 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
     // interior cluster).
     std::vector<int> fillDropSet = {1};
     bool rightEdgeSingular = false;
+    bool interiorSingularSplit = false;
     for (const auto &j : joins)
     {
         if (j.type != JoinType::Singular)
@@ -1600,6 +1616,12 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
         if (atLeftEdge || atRightEdge)
             continue; // already regularized by the classic wall exclusion
 
+        // A genuine interior Singular join splits the domain into two
+        // physically decoupled regions -- continuum construction at rMax
+        // has no meaning for the sub-region on the other side of it (see
+        // interiorSingularSplit's doc comment, tise.hpp).
+        interiorSingularSplit = true;
+
         auto candidates = bSplinesTouchingX(nNodesActual, order, grid, j.x);
         constexpr Real kNonzeroTol = 1e-6; // B-spline peak values are O(1);
                                             // roundoff for a mathematically-
@@ -1615,7 +1637,7 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
     const int nEnFilled = nBSplines - static_cast<int>(fillDropSet.size()); // == nEnBound + 1
     const int nEnBound  = nEnFilled - 1;
 
-    return StrategicGridResult{grid, bs, nBSplines, fillDropSet, nEnBound, rightEdgeSingular};
+    return StrategicGridResult{grid, bs, nBSplines, fillDropSet, nEnBound, rightEdgeSingular, interiorSingularSplit};
 }
 
 SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,

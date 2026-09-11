@@ -12,6 +12,6 @@ For the new configurability, we should first make these values configurable via 
 5. ~~Review engineer B changes, merge into main, rebase the TISE-Generalization branch and resolve any conflicts.~~
 6. ~~Create plan for TDSE for engineers A and B.~~
 7. Wire up interface with recent changes to TISE and generate end-to-end/integration tests.
-8. Verify node placement implementation is at least as capable as what we discussed in original design meetings.
+8. ~~Verify node placement implementation is at least as capable as what we discussed in original design meetings.~~ Done 2026-09-11: found two real, narrow gaps against the original design docs, both formalized as deferrals rather than silently dropped — see [ADR-0014](../adr/0014-defer-delta-potential-join-detection.md) (delta-potential join detection) and [ADR-0015](../adr/0015-defer-user-supplied-node-placement-formula.md) (user-supplied node-placement formula).
 9. Determine what was deemed out of scope (if anything) for each task in the engineer A plan and make both an ADR for each item and a planning doc to address it. 
 10. Make updates to the SDD and other docs that need to be made after these changes, if any.

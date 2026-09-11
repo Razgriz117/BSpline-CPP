@@ -53,7 +53,7 @@ tise:
     n_energies:  100          # number of energy points in [E_threshold, E_max]
     n_pts:       500          # spatial grid points per continuum state output
     l:           1            # angular momentum for Coulomb-tail continuum matching
-                               # (ADR-0009 supersedes ADR-0010) -- must match the
+                               # (ADR-0013 supersedes ADR-0010) -- must match the
                                # centrifugal term l(l+1)/2x^2 baked into `function`
                                # above (1*2/2=1, matching the "+1/x^2" term); cannot
                                # be inferred automatically since a centrifugal term

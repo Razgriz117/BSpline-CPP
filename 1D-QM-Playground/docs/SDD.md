@@ -96,7 +96,7 @@ Explicitly **out of scope** for the version of the system this SDD describes:
 - The FEDVR basis as an alternative to B-splines ([ADR-0001](adr/0001-defer-fedvr-basis.md)).
 - WKB-proportional node placement ([ADR-0002](adr/0002-defer-wkb-collocation.md)).
 - A parameterized visualization schema — plot ranges, state subsets, etc. ([ADR-0004](adr/0004-defer-visualization-plot-parameters.md)).
-- The Analysis module's output artifact — whether/where/how it produces any file or stdout output at all, as distinct from ADR-0004's narrower plot-parameter question above ([ADR-0005](adr/0005-defer-analysis-output-artifact-format.md)).
+- The Analysis module's output artifact for REQ-F-060's TDSE-dependent quantities (bound-state populations, expectation values, spectral distributions) — whether/where/how these produce any file or stdout output at all, as distinct from ADR-0004's narrower plot-parameter question above ([ADR-0005](adr/0005-defer-analysis-output-artifact-format.md)). The TISE-side plot artifacts (continuum states, eigenstates, phase shifts) are no longer part of this open question — see [ADR-0016](adr/0016-analysis-plot-artifact-format.md).
 - Outer-boundary treatments beyond the domain-geometry/asymptote logic of REQ-F-030 — specifically complex absorbing potentials, outgoing-wave (Siegert) boundary conditions, and exterior complex scaling, which remain genuinely undecided ([§12.B](#b-open-design-questions)).
 
 ### 1.3 Intended Audience
@@ -228,7 +228,8 @@ Additional non-functional requirements (e.g., performance targets, portability) 
 | *(ADR-0002)* | WKB-proportional collocation | [§5.2](#52-tise-solver) | — | — | Deferred — see ADR-0002 |
 | *(ADR-0003)* | Multi-particle / 3D extension | [§5.1](#51-controller), [§3.1](#31-functional-requirements) (REQ-F-010 scope) | — | — | Deferred — see ADR-0003 |
 | *(ADR-0004)* | Visualization plot-parameter schema | [§5.4](#54-analysis-module), [§6.1](#61-configuration-schema) | — | — | Deferred — see ADR-0004 |
-| *(ADR-0005)* | Analysis output-artifact format (file/plot existence, location, shape) | [§5.4](#54-analysis-module), [§7.2.3](#723-controller-to-analysis) | — | — | Deferred — see ADR-0005 |
+| *(ADR-0005)* | Analysis output-artifact format for TDSE-dependent quantities | [§5.4](#54-analysis-module), [§7.2.3](#723-controller-to-analysis) | — | — | Partially superseded — TISE-side plotting now covered by ADR-0016; TDSE-dependent half still deferred |
+| *(ADR-0016)* | Analysis plot-artifact format for TISE-side output (continuum/eigenstate/phase-shift PNGs) | [§5.4](#54-analysis-module), [§7.2.3](#723-controller-to-analysis) | — | — | Implemented — see ADR-0016 |
 | *([§12.B](#b-open-design-questions))* | CAP / outgoing-wave BC / exterior complex scaling | [§5.2](#52-tise-solver) (related to REQ-F-030) | — | — | Open — see [§12.B](#b-open-design-questions) |
 
 ---
@@ -561,7 +562,7 @@ $$\frac{d\delta}{dE} = \frac{1}{2\cos(2\delta)}\frac{d\sin(2\delta)}{dE}$$
 
 Each $\psi_{\varepsilon_i}(x)$ is tabulated on a uniform grid $x_i = \dfrac{R}{N_x-1}(i-1)$ (`tise.continuum.n_pts`, [§6.1](#61-configuration-schema)) and written to `continuum_state_NNN.dat` ([§6.3](#63-persistent-storage-format)), alongside $\varepsilon_i$, $\delta(\varepsilon_i)$, $d\delta/dE$ in `phase_shifts.dat`. REQ-F-040's `[E_threshold, E_max]` range is a later generalization of the PDF's simpler single-`E_max` grid, not a discrepancy.
 
-This is the general recipe for Case 2's *flat*-asymptote sub-branch. The *Coulomb*-tail sub-branch (matching to Coulomb functions instead of $\sin(kx+\delta)$) is required by REQ-F-030 but not yet worked out at this level of detail by any source document — implementers should derive the analogous formulas (following Bachau, `docs/planning/bsplines.md`) before relying on the flat-case formulas above for a Coulomb tail. This gap is formalized as [ADR-0010](adr/0010-defer-coulomb-tail-continuum-matching.md); see `docs/planning/coulomb-tail-continuum-matching.md` for the derivation sketch.
+This is the general recipe for Case 2's *flat*-asymptote sub-branch. The *Coulomb*-tail sub-branch (matching to Coulomb wave functions $F_\ell$/$G_\ell$ instead of $\sin(kx+\delta)$) is implemented: `matchAsymptotic` dispatches to a hand-rolled, Numerov-integrated Coulomb-function evaluator (WKB-corrected start, no external dependency) whenever the right-edge asymptote is classified Coulomb, using the angular momentum supplied via `tise.continuum.l` ([§6.1](#61-configuration-schema)). This reverses the deferral originally recorded as ADR-0010; see [ADR-0013](adr/0013-coulomb-tail-continuum-matching.md) for the implementation record and `docs/planning/coulomb-tail-continuum-matching.md` for the derivation.
 
 **Figure 10 — B-Spline Construction via de Boor Recursion.** *(Source: `docs/planning/bsplines.md`, "Recursion Tree for $B_i^3$"; reused verbatim.)*
 
@@ -990,7 +991,7 @@ Each subsection below is a complete, standalone contract per [§2.4](#24-assumpt
 - **Direction:** Controller invokes Analysis as a subprocess.
 - **Invocation:** `analysis.py --config <config.yaml> --tise-dir <data/tise/> --tdse-dir <data/tdse/>`.
 - **Inputs:** `analysis`, `visualization` config blocks ([§6.1](#61-configuration-schema)); `--tise-dir`/`--tdse-dir` paths.
-- **Outputs:** none in Phase 3 — no plots, no derived-data files, no placeholder artifact of any kind ([ADR-0005](adr/0005-defer-analysis-output-artifact-format.md)); once REQ-F-060 quantities are computable, expected outputs are plots/derived data whose format/location is not yet fixed and matures alongside ADR-0005's revisit trigger (a broader question than ADR-0004's `visualization` plot-*parameter* scope); process exit code.
+- **Outputs:** TISE-side plots — `continuum_NNN.png` (unconditional, whenever continuum states are present), `eigenstate_NNN.png` (gated on `visualization.eigenstates`/`bound_states_squared`), `phase_shifts.png` (gated on `visualization.phase_shifts`) — written directly into `--tise-dir` ([ADR-0016](adr/0016-analysis-plot-artifact-format.md)); process exit code. Once REQ-F-060's TDSE-dependent quantities are computable, expected additional outputs are plots/derived data whose format/location is not yet fixed and matures alongside ADR-0005's revisit trigger (a broader question than ADR-0004's `visualization` plot-*parameter* scope).
 - **Success/failure:** as [§7.2.1](#721-controller-to-tise-solver). This contract is revisited/extended in [§10](#10-implementation-roadmap-and-phasing) Phase 7 once TDSE output also needs to be consumed.
 - **Related:** REQ-F-060.
 
@@ -1038,7 +1039,7 @@ This policy is synthesized from responsibilities stated across the source planni
 
 **Warning taxonomy.** Distinguish two classes of non-fatal signal, both to be well short of a non-zero exit:
 
-- *Physics warnings* — the computation completed but a result may be approximate or should be scrutinized: the Case-3 boundary-discontinuity warning (REQ-F-030), the `E_max > E_acc` continuum-accuracy warning (REQ-F-040), and the per-state well-containment flag ($\psi'(x_\text{max}) \neq 0$, [§5.2.3](#523-internal-design)).
+- *Physics warnings* — the computation completed but a result may be approximate or should be scrutinized: the Case-3 boundary-discontinuity warning (REQ-F-030), the `E_max > E_acc` continuum-accuracy warning (REQ-F-040), the per-state well-containment flag ($\psi'(x_\text{max}) \neq 0$, [§5.2.3](#523-internal-design)), and the R-bound/domain-validity warning — when the right-edge asymptote is Flat and $|V(r_\text{max})|$ exceeds 1% of the smallest requested continuum energy, `matchAsymptotic`'s flat-asymptote assumption ($V(r_\text{max})\approx 0$) is flagged as suspect ([ADR-0013](adr/0013-coulomb-tail-continuum-matching.md)'s practical mitigation for boxes too small for the requested energy range).
 - *Operational warnings* — e.g., an optional upstream artifact was absent and Analysis skipped a quantity that depends on it ([§5.4.4](#544-error-handling), [§7.2.2](#722-tise-solver-to-analysis)/[§7.2.5](#725-tdse-solver-to-analysis)).
 
 **Destination.** Warnings and errors go to `stderr`, consistently across the C++ binaries and Python scripts, keeping `stdout` free for any data a tool might pipe. Physics and operational warnings are also written to a machine-readable sidecar file, `data/tise/warnings.json`, as a JSON array of objects shaped `{"category": "physics"|"operational", "message": "..."}` ([§6.3](#63-persistent-storage-format)). This allows downstream stages (Analysis or the Controller) to programmatically surface warnings rather than requiring a human to parse solver `stderr`. The Controller must read `data/tise/warnings.json` after a successful TISE run and report its contents, degrading gracefully (treating it as zero warnings) if the file is missing or malformed. This sidecar-file convention was established as part of the Phase 1 Controller↔TISE contract ([§7.2.1](#721-controller-to-tise-solver)); the TDSE solver is expected to follow the same pattern (`data/tdse/warnings.json`) once implemented in Phase 5 ([§7.2.4](#724-controller-to-tdse-solver)).

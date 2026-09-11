@@ -158,7 +158,7 @@ enum class AsymptoteCase
     Irregular          // Case 3: unknown/irregular tail
 };
 
-// Case-2 sub-branch. Coulomb-tail continuum matching (ADR-0009, supersedes
+// Case-2 sub-branch. Coulomb-tail continuum matching (ADR-0013, supersedes
 // ADR-0010) uses this to identify the Sommerfeld-parameter-bearing tail;
 // Flat's continuum-matching formula predates it (Engineer B's B3).
 enum class AsymptoteSubType
@@ -347,7 +347,7 @@ std::vector<std::vector<Real>> buildContinuumState(
 // docs/tests/reports/8236239/finite_square_well.md section 7 item 1 for why
 // the previous sin(2*delta)/cos(2*delta) construction across the production
 // grid was replaced.
-// === Coulomb-tail continuum matching (ADR-0009, supersedes ADR-0010) ===
+// === Coulomb-tail continuum matching (ADR-0013, supersedes ADR-0010) ===
 //
 // The regular/irregular Coulomb wave functions F_l(eta,rho), G_l(eta,rho)
 // are the correct exterior solutions for a potential with a genuine
@@ -418,11 +418,22 @@ CoulombWaveResult evaluateCoulombFunctions(int l, Real eta, Real rho,
 // used the wrong eta at every energy except whichever one it happened to
 // be computed from). Default (nullopt) preserves the original
 // flat-asymptote-only behavior exactly.
+// coulombFarMultiplier/coulombStepSize: forwarded to evaluateCoulombFunctions
+// when coulombLC is set (ignored otherwise) -- see that function's doc
+// comment and the module-level comment above for what these control and
+// why 50.0/0.1 is the current default operating point. Exposed here (not
+// just as evaluateCoulombFunctions' own defaults) so a caller needing a
+// different accuracy/speed tradeoff for a specific config -- e.g. a larger
+// R or more extreme l/eta than this project's own configs exercise -- can
+// reach them without recompiling; production callers (tise_solver_main.cpp)
+// currently always use the default.
 AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, const EigenResult &eigen, std::vector<Real> grid, Real R,
                                   int order, const std::vector<Real> &Hmat, const std::vector<Real> &Smat,
                                   std::optional<std::vector<int>> dropSet = std::nullopt,
                                   Real fineDE = 1e-3,
-                                  std::optional<std::pair<int, Real>> coulombLC = std::nullopt);
+                                  std::optional<std::pair<int, Real>> coulombLC = std::nullopt,
+                                  Real coulombFarMultiplier = 50.0,
+                                  Real coulombStepSize = 0.1);
 
 // Writes phase_shifts.dat-style output (epsilon_i, delta, dDeltaDE) to `out`,
 // and one continuum_state_NNN.dat-style block (x, psi_E(x)) per energy to
@@ -707,6 +718,15 @@ struct StrategicGridResult
     bool rightEdgeSingular;    // true iff the potential is singular at x=rMax --
                                 // matchAsymptotic's flat-asymptote assumption there
                                 // is affected regardless of B-spline removal
+    bool interiorSingularSplit; // true iff a Singular join was found strictly
+                                // inside (rMin, rMax) -- the domain is physically
+                                // two decoupled regions, e.g. a box union a
+                                // repulsive-Coulomb well split at the join. A
+                                // "continuum state" built by matching at rMax
+                                // against such a domain describes nothing
+                                // physical (docs/tests/reports/f4e8359/
+                                // interior_singularity.md); callers should skip
+                                // continuum construction when this is true.
 };
 
 // Default tolerance for buildStrategicGridAndDropSet's `edgeTolerance`
