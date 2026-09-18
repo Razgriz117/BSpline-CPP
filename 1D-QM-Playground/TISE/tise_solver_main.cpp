@@ -243,6 +243,16 @@ int main(int argc, char *argv[])
             n_energies  = validateNEnergies(continuumNode);
             E_threshold = continuumNode["E_threshold"].as<tise::Real>();
             E_max       = continuumNode["E_max"].as<tise::Real>();
+            // matchAsymptotic (tise.cpp) computes k = sqrt(2*mass*E)/hbar
+            // for every energy in the continuum grid; a negative
+            // E_threshold would let a negative energy reach that sqrt and
+            // silently produce NaN instead of erroring, corrupting
+            // phase_shifts.dat/continuum_state_*.dat rather than failing
+            // cleanly.
+            if (E_threshold < 0.0)
+                throw std::runtime_error(
+                    "tise.continuum.E_threshold must be >= 0 (got E_threshold=" +
+                    std::to_string(E_threshold) + ")");
             // buildEnergyGrid (tise.hpp) samples the ascending window
             // [E_threshold, E_max]; E_max <= E_threshold would silently
             // yield a degenerate (equal) or descending (reversed) grid

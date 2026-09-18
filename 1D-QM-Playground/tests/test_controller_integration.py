@@ -169,6 +169,32 @@ class TestRunTiseSolverRealSubprocess:
         assert "TISE solver" in str(excinfo.value)
         assert not tise_dir.exists() or not any(tise_dir.iterdir())
 
+    def test_continuum_negative_E_threshold_raises_and_leaves_no_partial_files(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """Regression guard: a negative E_threshold was never checked, so it
+        flowed unchecked into buildEnergyGrid (tise.hpp) and then into
+        matchAsymptotic's k = sqrt(2*mass*E)/hbar -- sqrt of a negative
+        number silently yields NaN rather than erroring, producing
+        NaN-filled phase_shifts.dat/continuum_state_*.dat instead of a hard
+        failure. Same "non-zero exit == no partial output" contract as the
+        E_max/n_energies/mass/hbar guards above."""
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["tise"]["continuum"]["enabled"] = True
+        cfg["tise"]["continuum"]["E_threshold"] = -1.0
+        bad_config = tmp_path / "config_continuum_negative_E_threshold.yaml"
+        with open(bad_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_tise_solver(str(bad_config), tise_dir, binary=tise_solver_binary)
+
+        assert "TISE solver" in str(excinfo.value)
+        assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
     def test_overlapping_potential_pieces_raises_and_leaves_no_partial_files(
         self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
     ):
