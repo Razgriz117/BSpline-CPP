@@ -596,6 +596,13 @@ int main(int argc, char *argv[])
             }
             tise::writeContinuumInfo(phaseShiftsOut, bs, ar, energyGrid, states, continuumStateOut,
                                       n_pts, rMin, rMax, er, sgr.fillDropSet);
+            {
+                // Continuum counterpart of eigenstates.dat -- see there.
+                std::ofstream ctOut(outputDir / "continuum_states.dat");
+                tise::writeContinuumTable(ctOut, bs, ar, energyGrid, states, er,
+                                           n_pts, rMin, rMax, sgr.fillDropSet,
+                                           mass, hbar);
+            }
         }
 
         // er.vectors are nEn(=nEnBound)-dimensional -- excluded from them is
@@ -619,6 +626,17 @@ int main(int argc, char *argv[])
         {
             std::ofstream out(outputDir / "eigenvalues.dat");
             tise::writeEigenvalues(out, er, er.dim);
+        }
+        {
+            // One consolidated, directly-loadable table of every eigenstate,
+            // alongside (not instead of) the per-state eigenstate_NNN.dat
+            // files: column 1 is x, column n+1 is psi_n, energies in the
+            // header. Removes the glob + index-join + 0-vs-1-based off-by-one
+            // a caller would otherwise need to plot psi_n at its own E_n.
+            std::ofstream out(outputDir / "eigenstates.dat");
+            tise::writeEigenstateTable(out, bs, er, er.dim, nBSplines,
+                                        nPtsEigenstate, rMin, rMax, fullDropSet,
+                                        mass, hbar);
         }
         {
             std::ofstream out(outputDir / "eigenvectors.dat");

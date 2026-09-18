@@ -702,6 +702,51 @@ void writeEigenstate(std::ostream &out,
                      Real rMin,
                      Real rMax);
 
+// Write eigenstates.dat: ONE self-contained, directly-loadable table of every
+// eigenstate, as an alternative to globbing the per-state eigenstate_NNN.dat
+// files and index-joining them against eigenvalues.dat (whose index column is
+// 0-based while those filenames are 1-based -- an off-by-one this file removes
+// entirely). Layout: column 1 is x, column n+1 is psi_n(x), for n = 1..nStates.
+//
+// Every eigenvalue is repeated in the '#' header, so the table stands alone:
+// nothing else needs to be opened to know what energy a column belongs to.
+// Comments use '#' and columns are whitespace-separated, so the file is read
+// by numpy.loadtxt(path) and by gnuplot's `plot ... using 1:k` with no
+// preprocessing. The per-state files are still written; this is additive.
+//
+// `dropSet` carries the same contract as eigenstateCoefficients: it MUST match
+// whatever drop-set `er` was diagonalized under, or coefficients are silently
+// misattributed.
+void writeEigenstateTable(std::ostream &out,
+                           const bspline::BSpline &bs,
+                           const EigenResult &er,
+                           int nStates,
+                           int nBSplines,
+                           int npts,
+                           Real rMin,
+                           Real rMax,
+                           std::optional<std::vector<int>> dropSet = std::nullopt,
+                           Real mass = 1.0,
+                           Real hbar = 1.0);
+
+// Write continuum_states.dat: the continuum counterpart of
+// writeEigenstateTable. Column 1 is x, column i+1 is psi_{eps_i}(x), with each
+// energy and its phase shift delta(eps_i) carried in the '#' header. Same
+// rationale: one loadable table instead of globbing continuum_state_NNN.dat
+// and index-joining against phase_shifts.dat.
+void writeContinuumTable(std::ostream &out,
+                          const bspline::BSpline &bs,
+                          const AsymptoticResult &result,
+                          const std::vector<Real> &grid,
+                          const std::vector<std::vector<Real>> &states,
+                          const EigenResult &eigen,
+                          int npts,
+                          Real rMin,
+                          Real rMax,
+                          std::optional<std::vector<int>> dropSet = std::nullopt,
+                          Real mass = 1.0,
+                          Real hbar = 1.0);
+
 // Write eigenvalues.dat: 0-based index, E_n, one line per state, for the
 // first nStates entries of er.values (ascending, per EigenResult's own
 // contract). Per ADR-0007, no bound/continuum filtering is applied here --

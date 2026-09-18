@@ -2226,6 +2226,114 @@ TEST_F(WriteEigenstateTest, LastXIsRMax)
 // correctness.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// writeEigenstateTable (eigenstates.dat)
+// ---------------------------------------------------------------------------
+
+class WriteEigenstateTableTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> grid(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            grid[i] = i * 1.0 / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+        nBSplines = bs.getNBSplines();
+        nEn = nBSplines - 2;
+
+        er.dim = nEn;
+        er.ldz = nEn;
+        er.values.resize(nEn);
+        er.vectors.assign(nEn * nEn, 0.0);
+        for (int n = 0; n < nEn; ++n)
+        {
+            er.values[n] = -1.0 + 0.25 * n;
+            // A non-trivial, non-identity eigenvector matrix, so a column
+            // mix-up in the table cannot pass by coincidence.
+            for (int i = 0; i < nEn; ++i)
+                er.vectors[i + n * nEn] = std::sin(0.7 * (i + 1) * (n + 1));
+        }
+    }
+
+    // Data rows only -- everything before the first non-'#' line is header.
+    static std::vector<std::vector<double>> dataRows(const std::string &text)
+    {
+        std::vector<std::vector<double>> rows;
+        std::istringstream in(text);
+        std::string line;
+        while (std::getline(in, line))
+        {
+            if (line.empty() || line[0] == '#')
+                continue;
+            std::istringstream ls(line);
+            std::vector<double> row;
+            double v;
+            while (ls >> v)
+                row.push_back(v);
+            if (!row.empty())
+                rows.push_back(row);
+        }
+        return rows;
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 11, order = 4, nBSplines = 0, nEn = 0;
+    tise::EigenResult er;
+};
+
+TEST_F(WriteEigenstateTableTest, ShapeIsNptsByNStatesPlusOne)
+{
+    std::ostringstream ss;
+    const int npts = 17;
+    tise::writeEigenstateTable(ss, bs, er, nEn, nBSplines, npts, 0.0, 1.0);
+
+    const auto rows = dataRows(ss.str());
+    ASSERT_EQ(static_cast<int>(rows.size()), npts);
+    for (const auto &r : rows)
+        ASSERT_EQ(static_cast<int>(r.size()), nEn + 1) << "x plus one column per state";
+}
+
+TEST_F(WriteEigenstateTableTest, HeaderCarriesEveryEigenvalue)
+{
+    std::ostringstream ss;
+    tise::writeEigenstateTable(ss, bs, er, nEn, nBSplines, 5, 0.0, 1.0);
+    const std::string text = ss.str();
+
+    // The table must stand alone: no second file needed to learn E_n.
+    for (int n = 1; n <= nEn; ++n)
+        EXPECT_NE(text.find("# E_" + std::to_string(n)), std::string::npos)
+            << "missing E_" << n << " in header";
+}
+
+TEST_F(WriteEigenstateTableTest, ColumnsMatchPerStateWriteEigenstate)
+{
+    // The consolidated table and the per-state eigenstate_NNN.dat files must
+    // not drift: column n+1 has to be exactly what writeEigenstate emits for
+    // state n, on the same grid.
+    const int npts = 13;
+    std::ostringstream tableSS;
+    tise::writeEigenstateTable(tableSS, bs, er, nEn, nBSplines, npts, 0.0, 1.0);
+    const auto table = dataRows(tableSS.str());
+    ASSERT_EQ(static_cast<int>(table.size()), npts);
+
+    for (int n = 1; n <= nEn; ++n)
+    {
+        std::ostringstream single;
+        auto coeffs = tise::eigenstateCoefficients(er.vectors, n, er.dim, nBSplines);
+        tise::writeEigenstate(single, bs, coeffs, npts, 0.0, 1.0);
+        const auto ref = dataRows(single.str());
+        ASSERT_EQ(static_cast<int>(ref.size()), npts);
+
+        for (int ix = 0; ix < npts; ++ix)
+        {
+            EXPECT_NEAR(table[ix][0], ref[ix][0], 1e-15) << "x mismatch, row " << ix;
+            EXPECT_NEAR(table[ix][n], ref[ix][1], 1e-15)
+                << "psi_" << n << " mismatch at row " << ix;
+        }
+    }
+}
+
 class WriteEigenOutputTest : public ::testing::Test
 {
 protected:
