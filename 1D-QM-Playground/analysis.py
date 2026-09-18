@@ -157,7 +157,8 @@ class TiseData:
 # ─── Generic .dat row parsing ───────────────────────────────────────────────
 
 
-def _read_data_rows(path: Path, description: str) -> list[list[float]]:
+def _read_data_rows(path: Path, description: str,
+                     allow_non_finite: bool = False) -> list[list[float]]:
     """Read `path` and parse its data rows into a list of float lists.
 
     Every `.dat` file (docs/SDD.md Sec 6.3) has one '#'-prefixed comment
@@ -174,7 +175,18 @@ def _read_data_rows(path: Path, description: str) -> list[list[float]]:
     float("inf") both parse without raising, so this needs an explicit
     math.isfinite() check of its own -- a solver that failed to converge
     could plausibly write one of these once Phase 4 lands real numerics,
-    and it should be caught here rather than flow silently downstream). A
+    and it should be caught here rather than flow silently downstream).
+
+    `allow_non_finite` opts out of that last check only. It exists for
+    potential.dat, where NaN is a deliberate, meaningful value rather than
+    a symptom: tise_solver writes NaN at any grid point no potential piece
+    covers -- the measure-zero-gap idiom for excising a singular point, or
+    an endpoint an open interval excludes (hydrogen's '(0, inf)' does not
+    include x = 0, where -1/x diverges). Dropping those rows instead would
+    desynchronize potential.dat's grid from eigenstates.dat's, and
+    rejecting them would make the file unreadable for exactly the
+    potentials it is most interesting to plot. Every other caller leaves
+    this False and keeps the strict guard. A
     single except clause covers "missing" and "otherwise unreadable"
     together (both are OSError subclasses, e.g. FileNotFoundError/
     PermissionError/IsADirectoryError) since str(e) already carries the
@@ -211,7 +223,7 @@ def _read_data_rows(path: Path, description: str) -> list[list[float]]:
                 raise TiseOutputError(
                     f"malformed {description} at {path}: line {lineno} has a non-numeric field: {e}"
                 ) from e
-            if not math.isfinite(value):
+            if not allow_non_finite and not math.isfinite(value):
                 raise TiseOutputError(
                     f"malformed {description} at {path}: line {lineno} has a non-finite field "
                     f"(NaN/Infinity not permitted): {field!r}"
@@ -413,7 +425,7 @@ def read_potential(tise_dir: Path) -> list[tuple[float, float]]:
     path = tise_dir / "potential.dat"
     if not path.is_file():
         return []
-    rows = _read_data_rows(path, "potential")
+    rows = _read_data_rows(path, "potential", allow_non_finite=True)
     _check_row_width(rows, 2, path, "potential")
     return [(r[0], r[1]) for r in rows]
 
