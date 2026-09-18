@@ -1,5 +1,6 @@
 #include "time_evolution.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <complex>
@@ -39,11 +40,32 @@ Eigen::VectorXd computeGaussianOverlaps(const bspline::BSpline &bs,
         return gaussianWavepacket(x, r0, mOmega, hbar);
     };
 
+    // <B_i|G> is obtained from the partition-of-unity identity sum_j B_j(x) = 1:
+    //
+    //   <B_i|G> = int B_i(x) G(x) dx
+    //           = int B_i(x) G(x) [sum_j B_j(x)] dx
+    //           = sum_j integral(G, i, j)
+    //
+    // BSpline::integral only ever forms TWO-spline matrix elements, so this
+    // identity is the route to a single-spline overlap. The sum must run over
+    // EVERY j whose support meets B_i's -- the full band |i - j| <= order-1,
+    // clamped to the physical range [1, nBSplines] -- otherwise the partition
+    // of unity is truncated and the identity does not hold.
+    //
+    // This loop previously reused the BANDED-MATRIX FILL bounds from
+    // Template.f90/main.cpp (j = max(2, i-order+1) .. i), which walk only the
+    // lower half of the band because a symmetric matrix needs nothing more.
+    // That is correct for filling H and S; it is wrong here, and undercounted
+    // <B_i|G> by a factor of ~3 precisely where the wavepacket carries its
+    // amplitude. Guarded by ComputeGaussianOverlapsTest.MatchesDirectQuadrature.
+    const int nBSplines = bs.getNBSplines();
+
     for (int iBs2 = 2; iBs2 <= nEn + 1; ++iBs2)
     {
         double sum = 0.0;
-        int iBs1Min = std::max(2, iBs2 - order + 1);
-        for (int iBs1 = iBs1Min; iBs1 <= iBs2; ++iBs1)
+        const int iBs1Min = std::max(1, iBs2 - order + 1);
+        const int iBs1Max = std::min(nBSplines, iBs2 + order - 1);
+        for (int iBs1 = iBs1Min; iBs1 <= iBs1Max; ++iBs1)
             sum += bs.integral(fGauss, iBs2, iBs1);
 
         B_G(iBs2 - 2) = sum; // 0-based: iBs2=2 -> index 0
@@ -52,10 +74,10 @@ Eigen::VectorXd computeGaussianOverlaps(const bspline::BSpline &bs,
     return B_G;
 }
 
-Eigen::VectorXd projectToEigenBasis(const Eigen::MatrixXd &Cinv,
+Eigen::VectorXd projectToEigenBasis(const Eigen::MatrixXd &M,
                                      const Eigen::VectorXd &B_G)
 {
-    return Cinv * B_G;
+    return M * B_G;
 }
 
 Eigen::VectorXcd timeEvolveState(const Eigen::VectorXd &Phi_G,
@@ -126,9 +148,23 @@ void runTimeEvolution(const bspline::BSpline &bs,
     Eigen::VectorXd B_G = computeGaussianOverlaps(bs, nEn, order, r0, mOmega, hbar);
 
     Eigen::Map<const Eigen::MatrixXd> C(er.vectors.data(), nEn, nEn);
-    Eigen::MatrixXd Cinv = C.inverse();
 
-    Eigen::VectorXd Phi_G = projectToEigenBasis(Cinv, B_G);
+    // Spectral amplitudes a_n = <phi_n|G>, for |phi_n> = sum_i C(i,n) |B_i>.
+    //
+    // DSBGV returns S-ORTHONORMAL eigenvectors (C^T S C = I), so the phi_n are
+    // already orthonormal under the B-spline overlap matrix and the amplitude
+    // is just the C-weighted sum of the B-spline overlaps in B_G:
+    //
+    //   a_n = <phi_n|G> = sum_i C(i,n) <B_i|G>   =>   Phi_G = C^T B_G
+    //
+    // NOT C^{-1} B_G. S-orthonormality means C^{-1} = C^T S, so routing through
+    // the inverse applies one spurious extra factor of S. (C^{-1} is the right
+    // operator for a B-spline COEFFICIENT vector c -- and B_G could be turned
+    // into one via c = S^{-1} B_G -- but B_G holds overlaps, not coefficients,
+    // and the two S factors then cancel to leave exactly C^T.) Transposing is
+    // also O(n^2) against C.inverse()'s O(n^3), and avoids inverting a matrix
+    // that never needed inverting.
+    Eigen::VectorXd Phi_G = projectToEigenBasis(C.transpose(), B_G);
 
     for (int step = 0; step < timeSteps; ++step)
     {
