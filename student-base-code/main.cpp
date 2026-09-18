@@ -208,14 +208,16 @@ int main()
                     // Kinetic energy: T = -1/2 d^2/dr^2
                     // The matrix element is ∫ B'_i Bs'_j dr / 2 (with appropriate radial measure).
                     // Here bspline.integral(fUni, iBs1, iBs2, 1, 1) computes
-                    // ∫ B_i^(1)(r) B_j^(1)(r) dr (with the internal r^2 factor in the module);
-                    // dividing by 2 gives the -1/2 factor in the Hamiltonian.
+                    // ∫ B_i^(1)(r) B_j^(1)(r) dr; dividing by 2 gives the -1/2
+                    // factor in the Hamiltonian. (Plain dr -- no r^2 Jacobian:
+                    // these are matrix elements for the reduced radial function
+                    // u(r) = r*R(r), normalized as integral |u|^2 dr.)
                     Real kinetic = bspline.integral(fUni, iBs1, iBs2,
                                                     /*n1=*/1, /*n2=*/1) /
                                    2.0;
 
                     // Potential energy: V_l(r) = l(l+1)/(2 r^2) - 1/r
-                    // The matrix element is ∫ B_i(r) V_l(r) B_j(r) dr (again with r^2 from the module).
+                    // The matrix element is ∫ B_i(r) V_l(r) B_j(r) dr.
                     Real potential = bspline.integral(fPot, iBs1, iBs2,
                                                       /*n1=*/0, /*n2=*/0,
                                                       parvec);

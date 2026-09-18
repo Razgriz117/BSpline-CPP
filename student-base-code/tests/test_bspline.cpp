@@ -156,14 +156,14 @@ TEST_F(BSplineTest, ValuesZeroOutsideSupport)
 }
 
 // -----------------------------------------------------------------------------
-// Normalization factors: f(i)^2 * ∫ B_i(r)^2 r^2 dr ≈ 1
+// Normalization factors: f(i)^2 * ∫ B_i(r)^2 dr ≈ 1
 // -----------------------------------------------------------------------------
 
 TEST_F(BSplineTest, NormFactorsProduceUnitL2Norm)
 {
      for (int i = 1; i <= nBSplines; ++i)
      {
-          double Iii = spline.integral(&UnityOperator, i, i); // ∫ B_i B_i * 1 * r^2 dr
+          double Iii = spline.integral(&UnityOperator, i, i); // ∫ B_i B_i dr
           double f = spline.getNormFactor(i);
           double normSq = f * f * Iii;
 
@@ -209,7 +209,7 @@ TEST_F(BSplineTest, FunctionEvalMatchesExplicitLinearCombination)
 
 // -----------------------------------------------------------------------------
 // Integral symmetry: for real B-splines and real local operators,
-// ∫ B_i f B_j r^2 dr should be symmetric in (i,j).
+// ∫ B_i f B_j dr should be symmetric in (i,j).
 // -----------------------------------------------------------------------------
 
 TEST_F(BSplineTest, IntegralSymmetryWithUnity)

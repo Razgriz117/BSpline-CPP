@@ -103,6 +103,7 @@ analysis:
 
 # ─── Visualization (what to plot; boolean toggles only) ───────────────────────
 visualization:
+  spectrum_overview:         true   # TISE:     V(x) with each psi_n drawn on its level E_n
   eigenstates:               true   # TISE:     |phi_n(x)|^2 for bound states
   phase_shifts:              true   # TISE:     delta(E), d(delta)/dE (requires tise.continuum.enabled)
   time_evolution:            true   # TDSE:     |Psi(x,t)|^2 heatmap/animation (requires run_tdse)

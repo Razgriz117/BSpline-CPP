@@ -1568,6 +1568,146 @@ void writeEigenstate(std::ostream &out,
     }
 }
 
+void writeEigenstateTable(std::ostream &out,
+                           const bspline::BSpline &bs,
+                           const EigenResult &er,
+                           int nStates,
+                           int nBSplines,
+                           int npts,
+                           Real rMin,
+                           Real rMax,
+                           std::optional<std::vector<int>> dropSet,
+                           Real mass,
+                           Real hbar)
+{
+    // Resolve every state's coefficients up front: each column of the table
+    // needs its own, and re-deriving them per row would be O(npts*nStates)
+    // redundant work on the hot loop.
+    std::vector<std::vector<Real>> coeffs;
+    coeffs.reserve(nStates);
+    for (int n = 1; n <= nStates; ++n)
+        coeffs.push_back(eigenstateCoefficients(er.vectors, n, er.dim, nBSplines, dropSet));
+
+    out << "# eigenstates.dat -- psi_n(x), one column per state\n";
+    out << "# atomic units: hbar = " << hbar << ", mass = " << mass << "\n";
+    out << "# domain [" << rMin << ", " << rMax << "], " << npts
+        << " points; <psi_n|psi_n> = 1, sign arbitrary\n";
+    out << "# col 1 = x, col n+1 = psi_n\n";
+    out << std::scientific << std::setprecision(16);
+    for (int n = 1; n <= nStates; ++n)
+        out << "# E_" << std::setw(4) << std::left << n << std::right
+            << " = " << std::setw(24) << er.values[n - 1] << "\n";
+
+    // Column-label row, aligned with the 25-wide data columns below.
+    out << "#" << std::setw(24) << "x";
+    for (int n = 1; n <= nStates; ++n)
+    {
+        std::ostringstream lbl;
+        lbl << "psi_" << n;
+        out << " " << std::setw(24) << lbl.str();
+    }
+    out << "\n";
+
+    for (int ix = 1; ix <= npts; ++ix)
+    {
+        const Real x = rMin + (rMax - rMin) *
+                       static_cast<Real>(ix - 1) / static_cast<Real>(npts - 1);
+        out << " " << std::setw(24) << x;
+        for (int n = 0; n < nStates; ++n)
+            out << " " << std::setw(24)
+                << bs.eval(x, coeffs[n].data(), static_cast<int>(coeffs[n].size()));
+        out << "\n";
+    }
+}
+
+void writeContinuumTable(std::ostream &out,
+                          const bspline::BSpline &bs,
+                          const AsymptoticResult &result,
+                          const std::vector<Real> &grid,
+                          const std::vector<std::vector<Real>> &states,
+                          const EigenResult &eigen,
+                          int npts,
+                          Real rMin,
+                          Real rMax,
+                          std::optional<std::vector<int>> dropSet,
+                          Real mass,
+                          Real hbar)
+{
+    const int nBSplines = bs.getNBSplines();
+    const ColumnMap map = columnIndexMap(nBSplines, dropSet.value_or(std::vector<int>{1}));
+    const std::vector<int> &physicalOf = map.physicalOf;
+
+    // Transform every energy's coefficients once, for the same reason
+    // writeEigenstateTable pre-resolves its own.
+    std::vector<std::vector<Real>> fc;
+    fc.reserve(grid.size());
+    for (std::size_t i = 0; i < grid.size(); ++i)
+        fc.push_back(continuumStateToBSplineCoeffs(states[i], eigen, nBSplines, physicalOf));
+
+    const std::size_t nE = grid.size();
+    out << "# continuum_states.dat -- psi_eps(x), one column per energy\n";
+    out << "# atomic units: hbar = " << hbar << ", mass = " << mass << "\n";
+    out << "# domain [" << rMin << ", " << rMax << "], " << npts
+        << " points; energy-normalized, <psi_E|psi_E'> = delta(E-E')\n";
+    out << "# col 1 = x, col i+1 = psi_eps_i\n";
+    out << std::scientific << std::setprecision(16);
+    for (std::size_t i = 0; i < nE; ++i)
+        out << "# eps_" << std::setw(4) << std::left << (i + 1) << std::right
+            << " = " << std::setw(24) << grid[i]
+            << "   delta = " << std::setw(24) << result.delta[i] << "\n";
+
+    out << "#" << std::setw(24) << "x";
+    for (std::size_t i = 0; i < nE; ++i)
+    {
+        std::ostringstream lbl;
+        lbl << "psi_eps_" << (i + 1);
+        out << " " << std::setw(24) << lbl.str();
+    }
+    out << "\n";
+
+    for (int ix = 1; ix <= npts; ++ix)
+    {
+        const Real x = rMin + (rMax - rMin) *
+                       static_cast<Real>(ix - 1) / static_cast<Real>(npts - 1);
+        out << " " << std::setw(24) << x;
+        for (std::size_t i = 0; i < nE; ++i)
+            out << " " << std::setw(24)
+                << result.A_E[i] * bs.eval(x, fc[i].data(), static_cast<int>(fc[i].size()), 0);
+        out << "\n";
+    }
+}
+
+void writePotential(std::ostream &out,
+                     const std::map<std::string, std::string> &potential,
+                     int npts,
+                     Real rMin,
+                     Real rMax)
+{
+    out << "# potential.dat -- V(x) on the eigenstate output grid\n";
+    out << "# col 1 = x, col 2 = V(x)\n";
+    out << std::scientific << std::setprecision(16);
+    for (int ix = 1; ix <= npts; ++ix)
+    {
+        const Real x = rMin + (rMax - rMin) *
+                       static_cast<Real>(ix - 1) / static_cast<Real>(npts - 1);
+        // A grid point can legitimately fall outside every piece's domain --
+        // the measure-zero gap idiom used to excise a singular point (see the
+        // authoring guide's tiling rules), or an endpoint an open interval
+        // excludes. Emit NaN there rather than aborting the whole solve:
+        // numpy.loadtxt reads it as nan and matplotlib leaves a gap, which is
+        // the honest picture of a potential that is undefined at that point.
+        Real v = std::numeric_limits<Real>::quiet_NaN();
+        try
+        {
+            v = evaluateFunction(potential, x);
+        }
+        catch (const std::runtime_error &)
+        {
+        }
+        out << " " << std::setw(24) << x << " " << std::setw(24) << v << "\n";
+    }
+}
+
 void writeEigenvalues(std::ostream &out, const EigenResult &er, int nStates)
 {
     out << "# eigenvalues.dat: index, E_n\n";

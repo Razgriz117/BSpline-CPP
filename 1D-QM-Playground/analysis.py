@@ -157,7 +157,8 @@ class TiseData:
 # ─── Generic .dat row parsing ───────────────────────────────────────────────
 
 
-def _read_data_rows(path: Path, description: str) -> list[list[float]]:
+def _read_data_rows(path: Path, description: str,
+                     allow_non_finite: bool = False) -> list[list[float]]:
     """Read `path` and parse its data rows into a list of float lists.
 
     Every `.dat` file (docs/SDD.md Sec 6.3) has one '#'-prefixed comment
@@ -174,7 +175,18 @@ def _read_data_rows(path: Path, description: str) -> list[list[float]]:
     float("inf") both parse without raising, so this needs an explicit
     math.isfinite() check of its own -- a solver that failed to converge
     could plausibly write one of these once Phase 4 lands real numerics,
-    and it should be caught here rather than flow silently downstream). A
+    and it should be caught here rather than flow silently downstream).
+
+    `allow_non_finite` opts out of that last check only. It exists for
+    potential.dat, where NaN is a deliberate, meaningful value rather than
+    a symptom: tise_solver writes NaN at any grid point no potential piece
+    covers -- the measure-zero-gap idiom for excising a singular point, or
+    an endpoint an open interval excludes (hydrogen's '(0, inf)' does not
+    include x = 0, where -1/x diverges). Dropping those rows instead would
+    desynchronize potential.dat's grid from eigenstates.dat's, and
+    rejecting them would make the file unreadable for exactly the
+    potentials it is most interesting to plot. Every other caller leaves
+    this False and keeps the strict guard. A
     single except clause covers "missing" and "otherwise unreadable"
     together (both are OSError subclasses, e.g. FileNotFoundError/
     PermissionError/IsADirectoryError) since str(e) already carries the
@@ -211,7 +223,7 @@ def _read_data_rows(path: Path, description: str) -> list[list[float]]:
                 raise TiseOutputError(
                     f"malformed {description} at {path}: line {lineno} has a non-numeric field: {e}"
                 ) from e
-            if not math.isfinite(value):
+            if not allow_non_finite and not math.isfinite(value):
                 raise TiseOutputError(
                     f"malformed {description} at {path}: line {lineno} has a non-finite field "
                     f"(NaN/Infinity not permitted): {field!r}"
@@ -400,6 +412,24 @@ def read_eigenstates(tise_dir: Path) -> list[tuple[int, list[EigenstatePoint]]]:
 # ─── Aggregator ──────────────────────────────────────────────────────────────
 
 
+def read_potential(tise_dir: Path) -> list[tuple[float, float]]:
+    """Read potential.dat: 2 columns per row, (x, V(x)).
+
+    Optional, unlike Sec 7.2.2's required files: a run produced before
+    tise_solver emitted this file simply has none, and [] is then a normal
+    result rather than an error. V(x) may legitimately be NaN where no
+    potential piece covers x (the measure-zero-gap idiom for excising a
+    singular point) -- those rows are kept as-is so a plot shows a gap
+    rather than interpolating across the singularity.
+    """
+    path = tise_dir / "potential.dat"
+    if not path.is_file():
+        return []
+    rows = _read_data_rows(path, "potential", allow_non_finite=True)
+    _check_row_width(rows, 2, path, "potential")
+    return [(r[0], r[1]) for r in rows]
+
+
 def read_tise_output(tise_dir: Path) -> TiseData:
     """Read every file under one data/tise/ directory into one TiseData.
 
@@ -526,6 +556,79 @@ def plot_eigenstates(tise_data: TiseData, tise_dir: str, square_bound_states: bo
         plt.close()
 
 
+def plot_spectrum_overview(tise_data: TiseData, potential: list[tuple[float, float]],
+                            tise_dir: str) -> None:
+    """Plot V(x) with each psi_n(x) drawn on its own energy level E_n.
+
+    The conventional textbook figure: one axes, V(x) as the heavy curve, a
+    horizontal line at each eigenvalue, and psi_n riding on that line. Raw
+    psi_n, not |psi_n|^2 -- the nodes are the point of the picture.
+
+    Only states with E_n < 0 are drawn when the run has a continuum (the
+    same threshold classifyBoundStates uses); with no continuum there is no
+    bound/box-artifact distinction to make and every computed state is
+    drawn, matching plot_eigenstates' own convention.
+
+    All states share one amplitude scale, so relative amplitudes stay
+    honest: scaling each psi_n to its own level spacing would make every
+    state look alike. The scale is set from the median level gap, so one
+    anomalously close pair cannot collapse the whole figure.
+    """
+    if not tise_data.eigenstates:
+        return
+
+    energy_by_index = {row.index: row.energy for row in tise_data.eigenvalues}
+    no_continuum = not tise_data.continuum_states
+
+    drawn = []
+    for idx, eigenstate in tise_data.eigenstates:
+        energy = energy_by_index.get(idx - 1)  # filenames 1-based, column 0-based
+        if energy is None:
+            continue
+        if not no_continuum and energy >= 0.0:
+            continue
+        drawn.append((idx, energy, eigenstate))
+    if not drawn:
+        return
+
+    energies = [e for _, e, _ in drawn]
+    if len(energies) > 1:
+        gaps = sorted(energies[i + 1] - energies[i] for i in range(len(energies) - 1))
+        spacing = gaps[len(gaps) // 2] or (max(energies) - min(energies)) or 1.0
+    else:
+        spacing = abs(energies[0]) or 1.0
+    peak = max((max(abs(p.phi) for p in st) for _, _, st in drawn), default=1.0) or 1.0
+    scale = 0.8 * spacing / peak
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    if potential:
+        ax.plot([x for x, _ in potential], [v for _, v in potential],
+                color="black", linewidth=1.8, label="V(x)", zorder=1)
+
+    for idx, energy, eigenstate in drawn:
+        xs = [p.x for p in eigenstate]
+        ax.axhline(energy, color="0.75", linewidth=0.6, zorder=0)
+        ax.plot(xs, [energy + scale * p.phi for p in eigenstate], linewidth=1.1, zorder=2)
+        ax.annotate(f"n={idx}", xy=(xs[0], energy), xytext=(2, 2),
+                    textcoords="offset points", fontsize=7, color="0.35")
+
+    # V can dive far below the bound states (a Coulomb tail runs to -inf at the
+    # origin); clamp to the band the states actually occupy so the figure is
+    # not one spike and a flat line.
+    lo, hi = min(energies), max(energies)
+    ax.set_ylim(lo - 1.5 * spacing, hi + 1.5 * spacing)
+    ax.set_xlim(min(p.x for _, _, st in drawn for p in st),
+                max(p.x for _, _, st in drawn for p in st))
+    ax.set_xlabel("x")
+    ax.set_ylabel("E,  psi_n offset to E_n")
+    ax.set_title("Bound spectrum")
+    if potential:
+        ax.legend(loc="upper right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(f"{tise_dir}/spectrum_overview.png", dpi=150)
+    plt.close(fig)
+
+
 def plot_phase_shifts(tise_data: TiseData, tise_dir: str) -> None:
     """Plot delta(E) and d(delta)/dE vs. E (docs/SDD.md Sec 6.1's
     visualization.phase_shifts toggle -- TISE-only, not TDSE-gated, unlike
@@ -570,6 +673,8 @@ def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     tise_output = read_tise_output(Path(tise_dir))
 
     plot_tise(tise_output, tise_dir)
+    if cfg.get("visualization", {}).get("spectrum_overview", True):
+        plot_spectrum_overview(tise_output, read_potential(Path(tise_dir)), tise_dir)
     if cfg.get("visualization", {}).get("eigenstates", False):
         plot_eigenstates(
             tise_output, tise_dir,

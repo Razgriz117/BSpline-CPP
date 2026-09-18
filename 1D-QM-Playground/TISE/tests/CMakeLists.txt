@@ -15,7 +15,6 @@ target_link_libraries(test_tise
 add_test(NAME TISETests COMMAND test_tise)
 
 add_executable(test_time_evolution test_time_evolution.cpp)
-target_include_directories(test_time_evolution PRIVATE /usr/include/eigen3)
 target_link_libraries(test_time_evolution
-    PRIVATE GTest::gtest GTest::gtest_main time_evolution_lib)
+    PRIVATE GTest::gtest GTest::gtest_main time_evolution_lib Eigen3::Eigen)
 add_test(NAME TimeEvolutionTests COMMAND test_time_evolution)
