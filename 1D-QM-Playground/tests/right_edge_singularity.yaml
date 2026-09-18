@@ -1,7 +1,7 @@
 run:
   run_tise:     true
   run_tdse:     false
-  run_analysis: false
+  run_analysis: true
   output_dir:   "./data/right_edge_singularity"
 bspline:
   n_nodes: 41
@@ -18,3 +18,6 @@ tise:
     E_max:       0.5
     n_energies:  3
     n_pts:       200
+visualization:
+  eigenstates: true
+  bound_states_squared: true

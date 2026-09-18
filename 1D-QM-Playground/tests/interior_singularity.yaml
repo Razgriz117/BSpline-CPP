@@ -1,7 +1,7 @@
 run:
   run_tise:     true
   run_tdse:     false
-  run_analysis: false
+  run_analysis: true
   output_dir:   "./data/interior_singularity"
 bspline:
   n_nodes: 41
@@ -21,3 +21,4 @@ tise:
     n_pts:       500
 visualization:
   eigenstates: true
+  bound_states_squared: true

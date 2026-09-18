@@ -60,7 +60,7 @@ import pytest
 import yaml
 
 from analysis import ContinuumPoint, EigenstatePoint, EigenvalueRow, PhaseShiftRow, read_tise_output
-from controller import run_tise_solver
+from controller import run_analysis_stage, run_tise_solver
 
 # The tests/ dir itself -- where the known-solution reference configs
 # (free_particle.yaml, finite_square_well.yaml, harmonic_oscillator.yaml,
@@ -776,6 +776,28 @@ class TestInteriorSingularityRealSubprocess:
         assert data.phase_shifts == []
         assert data.continuum_states == []
 
+    def test_analysis_plots_squared_bound_eigenstates_and_nothing_continuum(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # tests/interior_singularity.yaml sets run_analysis: true and
+        # visualization: {eigenstates: true, bound_states_squared: true} --
+        # every computed state here is a genuine, verified bound state (the
+        # interior singularity forces psi=0 like a hard wall on both
+        # sides), so |phi_n(x)|^2 is physically correct. Locks in that
+        # analysis.py keeps producing one eigenstate_*.png per computed
+        # state for this config, and never phase_shifts.png/continuum_*.png
+        # (no continuum data ever exists to plot, per the test above).
+        config = _load_known_solution_config("interior_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        run_analysis_stage(str(config), tise_dir, tmp_path / "data" / "tdse")
+
+        assert len(list(tise_dir.glob("eigenstate_*.png"))) == len(data.eigenvalues)
+        assert not (tise_dir / "phase_shifts.png").exists()
+        assert not list(tise_dir.glob("continuum_*.png"))
+
 
 class TestRightEdgeSingularWarningRealSubprocess:
     """right_edge_singularity.yaml: potential singular exactly AT x=rMax
@@ -829,6 +851,29 @@ class TestRightEdgeSingularWarningRealSubprocess:
         assert not list(tise_dir.glob("continuum_state_*.dat"))
         assert data.phase_shifts == []
         assert data.continuum_states == []
+
+    def test_analysis_plots_squared_bound_eigenstates_and_nothing_continuum(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # tests/right_edge_singularity.yaml sets run_analysis: true and
+        # visualization: {eigenstates: true, bound_states_squared: true} --
+        # every computed state here is a genuine, verified bound state of a
+        # fully confining box (the right-edge singularity plays the same
+        # role as a hard wall), so |phi_n(x)|^2 is physically correct.
+        # Locks in that analysis.py keeps producing one eigenstate_*.png
+        # per computed state for this config, and never
+        # phase_shifts.png/continuum_*.png (no continuum data ever exists
+        # to plot, per the test above).
+        config = _load_known_solution_config("right_edge_singularity", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        run_analysis_stage(str(config), tise_dir, tmp_path / "data" / "tdse")
+
+        assert len(list(tise_dir.glob("eigenstate_*.png"))) == len(data.eigenvalues)
+        assert not (tise_dir / "phase_shifts.png").exists()
+        assert not list(tise_dir.glob("continuum_*.png"))
 
 
 class TestBoundStateDiagnosticsRealSubprocess:
@@ -951,6 +996,34 @@ class TestCase3RemediationRealSubprocess:
 
         messages = [w["message"] for w in warnings]
         assert any("Irregular" in m and "tapering" in m for m in messages)
+
+    def test_analysis_plots_raw_eigenstates_and_nothing_continuum(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        # tests/case3_irregular_tail.yaml sets run_analysis: true and
+        # visualization: {eigenstates: true} -- deliberately WITHOUT
+        # bound_states_squared: this potential is V>=0 everywhere and
+        # decays to 0 at infinity, so it has no true bound states at all
+        # (E<0 is impossible for a purely repulsive potential); every
+        # computed state is a box-discretized stand-in for a continuum
+        # state that would exist if the tail's irregular power law had a
+        # closed form to match against. Squaring would misrepresent these
+        # as confined states (docs/tests/reports/8236239/
+        # case3_irregular_tail.md: "V>=0 everywhere, so all states are box
+        # states"). Locks in that analysis.py keeps producing raw
+        # eigenstate_*.png for this config, and never
+        # phase_shifts.png/continuum_*.png (continuum is disabled here by
+        # config, so that data never exists to plot).
+        config = _load_known_solution_config("case3_irregular_tail", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        run_analysis_stage(str(config), tise_dir, tmp_path / "data" / "tdse")
+
+        assert len(list(tise_dir.glob("eigenstate_*.png"))) == len(data.eigenvalues)
+        assert not (tise_dir / "phase_shifts.png").exists()
+        assert not list(tise_dir.glob("continuum_*.png"))
 
 
 def _write_flat_tail_config(tmp_config: Path, tmp_path: Path, tail_value: float) -> Path:
