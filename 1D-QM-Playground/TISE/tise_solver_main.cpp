@@ -496,11 +496,9 @@ int main(int argc, char *argv[])
         // happily draw.
         if (continuumEnabled && !sgr.rightEdgeSingular && !sgr.interiorSingularSplit)
         {
-            // mass=1.0 hardcoded, matching fillBandedMatrices' own
-            // internal kinetic-energy term (which already hardcodes /2.0,
-            // i.e. mass=1 baked into the matrix fill itself) -- reading
-            // config["physics"]["mass"] only here would suggest it's
-            // configurable when the core solve ignores it entirely.
+            // mass/hbar come from config["physics"] (ADR-0017); fillBandedMatrices'
+            // kinetic term is hbar^2/(2*mass), so this ceiling is computed in the
+            // same units the matrix fill actually used.
             // minInterNodeGap (not a flat (rMax-rMin)/(nNodes-1) average):
             // sgr.grid may now be a non-uniform strategic grid, and the
             // physically-correct nodeSpacing for a non-uniform grid is its

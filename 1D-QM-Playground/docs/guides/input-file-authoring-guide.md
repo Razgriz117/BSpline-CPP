@@ -86,7 +86,11 @@ physics:
   hbar: 1.0
 ```
 
-Both fields default to `1.0` (atomic units) if the block or either field is omitted — this remains the simplest option for the common case, and every worked example elsewhere in this guide leaves it out. If you *do* need a different particle mass or a rescaled $\hbar$, any **positive** value now works end to end: the kinetic-energy matrix element, the accuracy-ceiling calculation (`E_acc`, [§3.3](#33-bspline)), and every continuum formula in [§3.6](#36-tisecontinuum) (the wavenumber $k=\sqrt{2\,\text{mass}\,E}/\hbar$, the Sommerfeld parameter, and the continuum-state normalization) all honor whatever you set here — see [ADR-0017](../adr/0017-mass-hbar-generalization.md) for the derivation.
+Both fields default to `1.0` (atomic units) if the block or either field is omitted — this remains the simplest option for the common case, and every worked example elsewhere in this guide leaves it out.
+
+> **Leave `hbar` at 1.** It is not a unit-conversion knob. The solver works in atomic units throughout, and `V(x)` is whatever bare numbers you typed in `potential:` — so `hbar` only sets the *dimensionless ratio* between the kinetic and potential energy scales. Entering a physical constant (`hbar: 1.0545718e-34`) does **not** give you SI results: it makes the kinetic term some 68 orders of magnitude smaller than the potential, so `H` degenerates to `V` alone and the eigenproblem returns numerical noise. Only non-positive values are rejected, so nothing will stop you — the output will simply be meaningless. `mass` is a genuine knob at `hbar = 1` (it is an honest different-particle problem in atomic units); `hbar` is not.
+
+If you *do* need a different particle mass, any **positive** value works end to end: the kinetic-energy matrix element, the accuracy-ceiling calculation (`E_acc`, [§3.3](#33-bspline)), and every continuum formula in [§3.6](#36-tisecontinuum) (the wavenumber $k=\sqrt{2\,\text{mass}\,E}/\hbar$, the Sommerfeld parameter, and the continuum-state normalization) all honor whatever you set here — see [ADR-0017](../adr/0017-mass-hbar-generalization.md) for the derivation.
 
 The only requirement is physical sanity — zero or negative values are rejected:
 

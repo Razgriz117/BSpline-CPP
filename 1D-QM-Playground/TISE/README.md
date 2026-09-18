@@ -23,7 +23,7 @@ cmake -S TISE -B TISE/build -DBUILD_TESTING=ON
 cmake --build TISE/build
 ```
 
-This builds `H-BoundStates` unconditionally, plus `tise_solver` — but only if `yaml-cpp` is discoverable (`find_package(yaml-cpp QUIET)` in `CMakeLists.txt`; install it via e.g. `sudo apt-get install libyaml-cpp-dev` if the configure step warns `"yaml-cpp not found -- skipping tise_solver target"`). `tise_solver` additionally needs [nlohmann-json](https://github.com/nlohmann/json) (also required by `H-BoundStates`, see [Dependencies](#dependencies) below) for its `warnings.json` sidecar.
+This builds both `H-BoundStates` and `tise_solver`. A missing `yaml-cpp` is a **hard configure error** (`find_package(yaml-cpp REQUIRED)`) rather than a warning, because `tise_solver` is the binary `controller.py` drives — install it with e.g. `sudo apt-get install libyaml-cpp-dev`. If you genuinely want `H-BoundStates` alone, pass `-DBUILD_TISE_SOLVER=OFF`. `tise_solver` additionally needs [nlohmann-json](https://github.com/nlohmann/json) (also required by `H-BoundStates`, see [Dependencies](#dependencies) below) for its `warnings.json` sidecar.
 
 Run it directly against any `config.yaml` (see the top-level README's "Quick start" and `config.yaml`'s own inline comments for the schema):
 
@@ -31,7 +31,20 @@ Run it directly against any `config.yaml` (see the top-level README's "Quick sta
 ./TISE/build/tise_solver --config config.yaml --output-dir data/tise
 ```
 
-This writes `eigenvalues.dat`, `eigenvectors.dat`, `eigenstate_NNN.dat` (one per bound state, unconditionally), `hamiltonian.dat`, `overlap.dat`, and `warnings.json` always; `phase_shifts.dat`/`continuum_state_NNN.dat` additionally when `tise.continuum.enabled: true`. Non-zero exit means no partial output is left behind (see `docs/SDD.md` §7.2.1). Ordinarily you'd drive this via `controller.py` rather than invoking it directly — see the top-level README.
+This writes `eigenvalues.dat`, `eigenvectors.dat`, `eigenstates.dat`, `eigenstate_NNN.dat` (one per bound state, unconditionally), `hamiltonian.dat`, `overlap.dat`, and `warnings.json` always; `phase_shifts.dat`, `continuum_states.dat` and `continuum_state_NNN.dat` additionally when `tise.continuum.enabled: true`.
+
+**`eigenstates.dat` and `continuum_states.dat` are the ones to reach for if you are writing your own analysis.** Each is a single table — column 1 is `x`, column `n+1` is the n-th wavefunction — with every eigenvalue (and, for the continuum, every phase shift) repeated in the `#` header, so the file needs nothing else opened alongside it:
+
+```python
+d = np.loadtxt('eigenstates.dat')     # (n_points, n_states + 1)
+plt.plot(d[:, 0], d[:, 3])            # psi_3
+```
+
+```gnuplot
+plot 'eigenstates.dat' using 1:4 with lines   # psi_3
+```
+
+The per-state `eigenstate_NNN.dat` / `continuum_state_NNN.dat` files are still written and unchanged; the tables are additive. Note that those filenames are 1-based while `eigenvalues.dat`'s index column is 0-based — an off-by-one the consolidated tables avoid entirely. Non-zero exit means no partial output is left behind (see `docs/SDD.md` §7.2.1). Ordinarily you'd drive this via `controller.py` rather than invoking it directly — see the top-level README.
 
 ---
 
@@ -131,7 +144,9 @@ sudo apt-get install liblapack-dev libblas-dev libeigen3-dev nlohmann-json3-dev 
 
 ## Building with CMake
 
-From the project root:
+From this `TISE/` directory (there is no CMakeLists.txt one level up, so
+`-S .` only works from here -- the top-level README's `-S TISE -B TISE/build`
+is the equivalent invocation from the project root):
 
 ```bash
 cmake -S . -B build
@@ -198,6 +213,9 @@ From the project root directory (`TISE/`). This mirrors what `CMakeLists.txt` do
    ```bash
    g++ -O2 -std=c++17 -c BSpline.cpp
    g++ -O2 -std=c++17 -c tise.cpp $(pkg-config --cflags muparser)
+   # -I path is Eigen's; /usr/include/eigen3 is the Debian/Ubuntu location.
+   # Homebrew: /opt/homebrew/include/eigen3, MacPorts: /opt/local/include/eigen3.
+   # The CMake build finds this for you via find_package(Eigen3).
    g++ -O2 -std=c++17 -I/usr/include/eigen3 -c time_evolution.cpp
    g++ -O2 -std=c++17 -I/usr/include/eigen3 -c main.cpp
    ```

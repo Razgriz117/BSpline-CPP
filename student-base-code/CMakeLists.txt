@@ -10,6 +10,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Options
 option(BUILD_TESTING "Build the testing tree." OFF)
 
+# Otherwise a plain `cmake -S . -B build` compiles with no optimization at all.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # Find BLAS and LAPACK
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
@@ -25,7 +30,6 @@ add_library(bspline_lib BSpline.cpp)
 target_include_directories(bspline_lib
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
-        /usr/include/eigen3
 )
 target_link_libraries(bspline_lib
     PUBLIC

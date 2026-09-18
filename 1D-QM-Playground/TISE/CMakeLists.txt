@@ -8,6 +8,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(BUILD_TESTING "Build the testing tree." OFF)
 
+# Without this a bare `cmake -S TISE -B TISE/build` builds with NO optimization
+# flags at all, which for a continuum sweep (100+ energies, each a Coulomb-wave
+# evaluation) is the difference between seconds and minutes. Only applies when
+# the user has not chosen a build type themselves.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 option(ENABLE_COVERAGE "Build with --coverage instrumentation (gcov/gcovr)" OFF)
 if(ENABLE_COVERAGE)
     add_compile_options(--coverage -O0 -g)
@@ -16,6 +24,11 @@ if(ENABLE_COVERAGE)
 endif()
 
 find_package(BLAS REQUIRED)
+# Eigen3 via its own CMake config rather than a hardcoded /usr/include/eigen3,
+# which is Debian/Ubuntu-only -- Homebrew puts it under /opt/homebrew/include,
+# MacPorts under /opt/local/include, conda under $CONDA_PREFIX/include. The
+# imported target carries the right include directory on every platform.
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(LAPACK REQUIRED)
 # nlohmann_json: parses the JSON-encoded piecewise potential passed as input.
 find_package(nlohmann_json 3.10.5 REQUIRED)
@@ -61,11 +74,9 @@ target_link_libraries(tise_lib PUBLIC
 # Time evolution library (Project Part 2)
 add_library(time_evolution_lib time_evolution.cpp)
 target_include_directories(time_evolution_lib
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        /usr/include/eigen3
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(time_evolution_lib PUBLIC bspline_lib tise_lib)
+target_link_libraries(time_evolution_lib PUBLIC bspline_lib tise_lib Eigen3::Eigen)
 
 # Main executable
 add_executable(H-BoundStates main.cpp)
@@ -82,11 +93,11 @@ target_compile_definitions(H-BoundStates PRIVATE
 )
 
 target_include_directories(H-BoundStates PRIVATE
-    /usr/include/eigen3
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(H-BoundStates PRIVATE
+    Eigen3::Eigen
     tise_lib
     time_evolution_lib
     utils_lib
@@ -94,12 +105,16 @@ target_link_libraries(H-BoundStates PRIVATE
     ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES}
 )
 
-# TISE solver subprocess CLI stub (Controller<->TISE contract, docs/SDD.md §7.2.1)
-# Scoped to this target only: a REQUIRED find_package here would run at
-# top-level configure time and take H-BoundStates down with it if yaml-cpp
-# isn't discoverable, even though H-BoundStates never links it.
-find_package(yaml-cpp QUIET)
-if (yaml-cpp_FOUND)
+# TISE solver CLI (Controller<->TISE contract, docs/SDD.md §7.2.1).
+# BUILD_TISE_SOLVER=OFF is the way to opt out of tise_solver deliberately.
+# Left ON (the default), a missing yaml-cpp is a hard error: this is the binary
+# controller.py drives and the one students actually run, and the previous
+# message(WARNING) let the build "succeed" without it, turning a missing
+# dependency into a much later, much less obvious "could not execute" from the
+# controller.
+option(BUILD_TISE_SOLVER "Build the config-driven tise_solver binary." ON)
+if (BUILD_TISE_SOLVER)
+    find_package(yaml-cpp REQUIRED)
     add_executable(tise_solver tise_solver_main.cpp)
     target_compile_features(tise_solver PRIVATE cxx_std_17)
     target_link_libraries(tise_solver PRIVATE
@@ -107,6 +122,4 @@ if (yaml-cpp_FOUND)
         yaml-cpp
         nlohmann_json::nlohmann_json
     )
-else()
-    message(WARNING "yaml-cpp not found -- skipping tise_solver target (H-BoundStates is unaffected)")
 endif()
