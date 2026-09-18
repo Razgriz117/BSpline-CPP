@@ -22,15 +22,20 @@ phases):
     inputs.
   - No binary-format support for hamiltonian.dat/overlap.dat -- Sec 6.3
     leaves "plain text or binary" undecided; only plain text exists today.
-  - No plotting.
   - No computation of any REQ-F-060 quantity (bound-state populations,
     expectation values, spectral distributions, etc.) -- those require
-    TDSE output (Sec 7.2.5) too and are Phase 8's job.
-  - No output artifact of any kind: no plot files, no derived-data files,
-    no data/analysis/ directory, no placeholder stdout payload. run()
-    computes and writes nothing -- deliberately deferred per ADR-0005
-    (docs/adr/0005-defer-analysis-output-artifact-format.md), not an
-    oversight.
+    TDSE output (Sec 7.2.5) too and are Phase 8's job. No output artifact
+    for these TDSE-dependent quantities exists yet; that half of
+    ADR-0005's original question remains open.
+
+TISE-side plotting (plot_tise/plot_eigenstates/plot_phase_shifts, called
+from run() below) IS implemented -- it requires only TISE output, not TDSE,
+so it was never actually blocked by the reasoning above. Plots are written
+directly into --tise-dir (no separate data/analysis/ directory, no
+--output-dir flag of Analysis's own). See ADR-0016
+(docs/adr/0016-analysis-plot-artifact-format.md), which supersedes
+ADR-0005 for this TISE-side output; ADR-0005 itself is retained for its
+still-open TDSE-dependent question.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
+import matplotlib.pyplot as plt
 
 import yaml
 
@@ -51,6 +57,9 @@ import yaml
 # PARSED INTEGER, not the filename string (see its docstring) -- so parsing
 # is kept lenient about width rather than assuming exactly 3 digits.
 _CONTINUUM_STATE_RE = re.compile(r"^continuum_state_(\d+)\.dat$")
+
+# Same leniency-about-width reasoning as _CONTINUUM_STATE_RE above.
+_EIGENSTATE_RE = re.compile(r"^eigenstate_(\d+)\.dat$")
 
 
 class AnalysisError(Exception):
@@ -75,12 +84,13 @@ class ConfigError(AnalysisError):
     Deliberately narrower than controller.ConfigValidationError: this
     module's load_config() performs none of controller.py's solver-specific
     schema checks (potential-piece tiling, bspline.domain, run.run_tise/
-    output_dir) -- Phase 3 doesn't read or act on the `analysis`/
-    `visualization` blocks' contents yet (their REQ-F-060 quantities all
-    require TDSE output, unavailable until Phase 8 -- see this module's
-    top docstring). That's a separate point from ADR-0005
+    output_dir) -- Phase 3 reads `visualization.eigenstates`/
+    `bound_states_squared`/`phase_shifts` (ADR-0016) but still doesn't read
+    or act on the `analysis` block's contents at all (its REQ-F-060
+    quantities all require TDSE output, unavailable until Phase 8 -- see
+    this module's top docstring). That's a separate point from ADR-0005
     (docs/adr/0005-defer-analysis-output-artifact-format.md), which defers
-    only Phase 3's own output-artifact format/location, not input
+    only the TDSE-dependent output-artifact format/location, not input
     validation.
     """
 
@@ -107,6 +117,13 @@ class ContinuumPoint(NamedTuple):
     psi: float
 
 
+class EigenstatePoint(NamedTuple):
+    """One row of an eigenstate_NNN.dat file: a grid point x, phi_n(x)."""
+
+    x: float
+    phi: float
+
+
 @dataclass(frozen=True)
 class TiseData:
     """Bundled result of reading every file under one data/tise/ directory.
@@ -115,6 +132,10 @@ class TiseData:
     was false for the run that produced tise_dir (see
     read_phase_shifts/read_continuum_states) -- an empty list here is a
     normal, successful result, not a sentinel for "not read yet".
+    eigenstates, by contrast, is unconditional -- tise_solver writes an
+    eigenstate_NNN.dat for every computed bound state regardless of
+    tise.continuum.enabled (see read_eigenstates); [] there means the run
+    predates that output existing, or the directory is otherwise empty.
 
     Note: frozen=True stops a field from being REASSIGNED (e.g.
     `some_tise_data.eigenvalues = [...]` raises FrozenInstanceError), but
@@ -130,6 +151,7 @@ class TiseData:
     overlap: list[list[float]]
     phase_shifts: list[PhaseShiftRow]
     continuum_states: list[tuple[int, list[ContinuumPoint]]]
+    eigenstates: list[tuple[int, list[EigenstatePoint]]]
 
 
 # ─── Generic .dat row parsing ───────────────────────────────────────────────
@@ -336,16 +358,55 @@ def read_continuum_states(tise_dir: Path) -> list[tuple[int, list[ContinuumPoint
     return result
 
 
+def read_eigenstates(tise_dir: Path) -> list[tuple[int, list[EigenstatePoint]]]:
+    """Read every eigenstate_NNN.dat file under `tise_dir`.
+
+    Each matching file holds 2 columns per row, (x, phi). Returns a list of
+    (index, [(x, phi), ...]) pairs, one per file, sorted by ASCENDING
+    NUMERIC index parsed from the filename's NNN -- same int()-not-string
+    sort as read_continuum_states() above.
+
+    Returns [] (does NOT raise) if `tise_dir` doesn't exist, or exists but
+    contains no matching files. Unlike continuum_state_NNN.dat, tise_solver
+    writes these unconditionally (one per bound state, regardless of
+    tise.continuum.enabled), so [] here means either an older tise_dir that
+    predates this output, or an otherwise-empty directory -- not a
+    config-driven "disabled" case. If a matching file IS present but
+    malformed, this raises TiseOutputError -- absence is tolerated,
+    corruption is not.
+    """
+    if not tise_dir.is_dir():
+        return []
+
+    matches: list[tuple[int, Path]] = []
+    for entry in tise_dir.iterdir():
+        if not entry.is_file():
+            continue
+        m = _EIGENSTATE_RE.match(entry.name)
+        if m:
+            matches.append((int(m.group(1)), entry))
+
+    matches.sort(key=lambda pair: pair[0])
+
+    result: list[tuple[int, list[EigenstatePoint]]] = []
+    for index, path in matches:
+        rows = _read_data_rows(path, path.name)
+        _check_row_width(rows, 2, path, path.name)
+        result.append((index, [EigenstatePoint(row[0], row[1]) for row in rows]))
+
+    return result
+
+
 # ─── Aggregator ──────────────────────────────────────────────────────────────
 
 
 def read_tise_output(tise_dir: Path) -> TiseData:
     """Read every file under one data/tise/ directory into one TiseData.
 
-    Calls all six reader functions above. No special-casing is needed for
+    Calls all seven reader functions above. No special-casing is needed for
     a nonexistent `tise_dir`: read_eigenvalues() runs first and naturally
     raises TiseOutputError (its file can't be found under a nonexistent
-    directory) before any of the other five readers run.
+    directory) before any of the other six readers run.
     """
     eigenvalues = read_eigenvalues(tise_dir / "eigenvalues.dat")
     eigenvectors = read_eigenvectors(tise_dir / "eigenvectors.dat")
@@ -353,6 +414,7 @@ def read_tise_output(tise_dir: Path) -> TiseData:
     overlap = read_overlap(tise_dir / "overlap.dat")
     phase_shifts = read_phase_shifts(tise_dir / "phase_shifts.dat")
     continuum_states = read_continuum_states(tise_dir)
+    eigenstates = read_eigenstates(tise_dir)
 
     return TiseData(
         eigenvalues=eigenvalues,
@@ -361,6 +423,7 @@ def read_tise_output(tise_dir: Path) -> TiseData:
         overlap=overlap,
         phase_shifts=phase_shifts,
         continuum_states=continuum_states,
+        eigenstates=eigenstates,
     )
 
 
@@ -392,6 +455,102 @@ def load_config(config_path: str) -> dict:
     return cfg
 
 
+def plot_tise(tise_data: TiseData, tise_dir: str) -> None:
+    # plot continuum states
+    continuum = tise_data.continuum_states
+    for idx, continuum_state in continuum:
+        plt.xlim(0, continuum_state[-1].x)
+        plt.xlabel("r")
+        plt.ylabel("psi")
+        # reformat continuum state data for matplotlib
+        xs = [p.x for p in continuum_state]
+        psis = [p.psi for p in continuum_state]
+        plt.plot(xs, psis)
+        plt.title(fr"Continuum state {idx}", pad=20)
+        plt.savefig(f"{tise_dir}/continuum_{idx}.png")
+        plt.close()
+
+
+def plot_eigenstates(tise_data: TiseData, tise_dir: str, square_bound_states: bool = False) -> None:
+    """Plot phi_n(x) for each eigenstate (docs/SDD.md Sec 6.1's
+    visualization.eigenstates toggle) -- raw by default, matching
+    plot_tise's raw psi convention so every wavefunction-style plot in a
+    run is directly comparable.
+
+    `square_bound_states`: docs/SDD.md Sec 6.1's visualization.
+    bound_states_squared toggle. When true, a state confirmed bound is
+    plotted as |phi_n(x)|^2 instead -- the conventional probability-density
+    view. Boundness:
+      - If this run has no continuum at all (tise_data.continuum_states ==
+        [], per tise.continuum.enabled: false) there is no continuum/box-
+        artifact distinction to make in the first place -- EVERY computed
+        eigenstate is treated as bound. This matters concretely: a
+        potential like the harmonic oscillator has V_min=0 and E_n=n+0.5
+        (all positive), so the E<0 threshold below would otherwise never
+        fire and silently defeat this flag for exactly the pedagogical
+        "textbook probability density" case it's meant for.
+      - Otherwise (continuum enabled), a state is bound only if its
+        eigenvalue is confirmed < 0.0 -- the same strict threshold
+        classifyBoundStates/checkWellContainment already use to separate
+        real bound states from continuum-adjacent box-discretization
+        artifacts. A state this can't confirm (no matching eigenvalues.dat
+        row -- e.g. hand-built test data, or an eigenstate/eigenvalues
+        mismatch) always stays raw; never silently squares on ambiguous
+        data. Different indices in the same call may end up using
+        different representations.
+    """
+    # eigenstate_NNN.dat's filename index is 1-based; eigenvalues.dat's own
+    # index column is 0-based (TISE/tise_solver_main.cpp:446-466 writes
+    # eigenstate_{j}.dat for j=1..nEn using er.values[j-1], while
+    # writeEigenvalues writes the 0-based i alongside it).
+    energy_by_index = {row.index: row.energy for row in tise_data.eigenvalues}
+    no_continuum = not tise_data.continuum_states
+
+    for idx, eigenstate in tise_data.eigenstates:
+        if no_continuum:
+            is_bound = True
+        else:
+            energy = energy_by_index.get(idx - 1)
+            is_bound = energy is not None and energy < 0.0
+        use_squared = square_bound_states and is_bound
+
+        xs = [p.x for p in eigenstate]
+        ys = [p.phi**2 for p in eigenstate] if use_squared else [p.phi for p in eigenstate]
+
+        plt.xlim(eigenstate[0].x, eigenstate[-1].x)
+        plt.xlabel("x")
+        plt.ylabel(r"$|\phi_n(x)|^2$" if use_squared else r"$\phi_n(x)$")
+        plt.plot(xs, ys)
+        plt.title(fr"Eigenstate {idx}", pad=20)
+        plt.savefig(f"{tise_dir}/eigenstate_{idx}.png")
+        plt.close()
+
+
+def plot_phase_shifts(tise_data: TiseData, tise_dir: str) -> None:
+    """Plot delta(E) and d(delta)/dE vs. E (docs/SDD.md Sec 6.1's
+    visualization.phase_shifts toggle -- TISE-only, not TDSE-gated, unlike
+    most of its visualization.* neighbors). One PNG, two stacked subplots;
+    writes nothing when tise.continuum.enabled was false for this run
+    (phase_shifts == [], same tolerate-absence convention plot_tise's own
+    continuum-state loop already follows)."""
+    if not tise_data.phase_shifts:
+        return
+
+    energies = [row.energy for row in tise_data.phase_shifts]
+    deltas = [row.delta for row in tise_data.phase_shifts]
+    ddelta_dEs = [row.ddelta_dE for row in tise_data.phase_shifts]
+
+    fig, (ax_delta, ax_ddelta) = plt.subplots(2, 1, sharex=True)
+    ax_delta.plot(energies, deltas)
+    ax_delta.set_ylabel(r"$\delta(E)$")
+    ax_ddelta.plot(energies, ddelta_dEs)
+    ax_ddelta.set_xlabel("E")
+    ax_ddelta.set_ylabel(r"$d\delta/dE$")
+    fig.suptitle("Phase shift")
+    fig.savefig(f"{tise_dir}/phase_shifts.png")
+    plt.close(fig)
+
+
 def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     """Run Analysis's Phase 3 scope (Sec 7.2.3, Sec 10.2 Phase 3).
 
@@ -399,13 +558,25 @@ def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     `tise_dir` (raises TiseOutputError if missing/malformed -- Sec 7.2.2's
     required files are non-optional), and tolerates `tdse_dir` not
     existing (Sec 5.4.4: run_tdse: false is expected until Phase 8) with a
-    stderr note rather than raising. Computes and writes nothing (ADR-0005).
+    stderr note rather than raising. Writes TISE-side plots into `tise_dir`
+    per ADR-0016 (continuum/eigenstate/phase-shift PNGs); computes and
+    writes nothing for REQ-F-060's TDSE-dependent quantities, per ADR-0005's
+    still-open question.
 
     Raises AnalysisError (ConfigError or TiseOutputError) on failure;
     never a raw exception.
     """
-    load_config(config_path)
-    read_tise_output(Path(tise_dir))
+    cfg = load_config(config_path)
+    tise_output = read_tise_output(Path(tise_dir))
+
+    plot_tise(tise_output, tise_dir)
+    if cfg.get("visualization", {}).get("eigenstates", False):
+        plot_eigenstates(
+            tise_output, tise_dir,
+            square_bound_states=cfg.get("visualization", {}).get("bound_states_squared", False),
+        )
+    if cfg.get("visualization", {}).get("phase_shifts", False):
+        plot_phase_shifts(tise_output, tise_dir)
 
     if not Path(tdse_dir).is_dir():
         print(
