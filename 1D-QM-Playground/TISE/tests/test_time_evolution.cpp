@@ -4,6 +4,7 @@
 #include "BSpline.hpp"
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <sstream>
@@ -196,6 +197,95 @@ TEST_F(ComputeGaussianOverlapsTest, NonNegativeNearPeak)
     for (int i = 0; i < nEn; ++i)
         if (B_G(i) > 0.0) anyPositive = true;
     EXPECT_TRUE(anyPositive);
+}
+
+// The two tests below are the regression guard for a projection bug in which
+// a Gaussian wavepacket was never actually the state being propagated. Both
+// failure modes were value-invisible to the smoke tests above (a truncated or
+// S-contaminated B_G is still finite, still positive near the peak, still the
+// right length) and produced a plausible-looking oscillating wavepacket, so
+// they assert against independent references instead of self-consistency.
+
+TEST_F(ComputeGaussianOverlapsTest, MatchesDirectQuadrature)
+{
+    // computeGaussianOverlaps reaches <B_i|G> through the partition-of-unity
+    // identity sum_j B_j = 1, summing two-spline integrals over the band.
+    // Check it against a direct fine-grid quadrature of int B_i(x) G(x) dx,
+    // which shares none of that machinery. Truncating the band sum (as an
+    // earlier version did, reusing the banded-matrix FILL bounds) undercounts
+    // these by a factor of ~3 near the wavepacket centre.
+    auto B_G = tevol::computeGaussianOverlaps(bs, nEn, order, r0, mOmega, hbar);
+
+    const int N = 60001; // odd, for composite Simpson
+    const double h = (rMax - rMin) / (N - 1);
+
+    for (int i = 0; i < nEn; ++i)
+    {
+        double ref = 0.0;
+        for (int k = 0; k < N; ++k)
+        {
+            const double x = rMin + k * h;
+            const double w = (k == 0 || k == N - 1) ? 1.0 : ((k % 2) ? 4.0 : 2.0);
+            ref += w * bs.eval(x, i + 2, 0) * tevol::gaussianWavepacket(x, r0, mOmega, hbar);
+        }
+        ref *= h / 3.0;
+
+        // Far tail overlaps decay to ~1e-80; a relative test there measures
+        // quadrature noise, not correctness. Compare where there is signal.
+        if (std::abs(ref) < 1e-12)
+            continue;
+        EXPECT_NEAR(B_G(i), ref, 1e-5 * std::abs(ref))
+            << "overlap index " << i << " (B-spline " << i + 2 << ")";
+    }
+}
+
+TEST_F(ComputeGaussianOverlapsTest, ProjectionOntoEigenbasisConservesNorm)
+{
+    // Parseval: for an S-orthonormal eigenbasis {phi_n}, the spectral
+    // amplitudes a_n = <phi_n|G> must satisfy sum_n |a_n|^2 = <G|G>, up to
+    // however much of G the truncated basis fails to span.
+    //
+    // This is the end-to-end guard on the projection operator. Using C^{-1}
+    // instead of C^T (they differ by a factor of S, since C^{-1} = C^T S)
+    // inflates this sum by ~36% for this basis -- i.e. the propagated state
+    // carries a norm it should not have, and is not the Gaussian requested.
+    const int nBs = bs.getNBSplines();
+
+    // Particle in a box (V = 0): H and S in LAPACK symmetric-band storage,
+    // over the interior B-splines 2..nBs-1, matching fillBandedMatrices'
+    // own index convention.
+    std::vector<double> H(order * nEn, 0.0), S(order * nEn, 0.0);
+    bspline::D2DFun uni = [](double, const double *) { return 1.0; };
+    for (int iBs2 = 2; iBs2 <= nEn + 1; ++iBs2)
+        for (int iBs1 = std::max(2, iBs2 - order + 1); iBs1 <= iBs2; ++iBs1)
+        {
+            const int idx = (iBs1 + order - iBs2 - 1) + (iBs2 - 2) * order;
+            S[idx] = bs.integral(uni, iBs1, iBs2);
+            H[idx] = 0.5 * bs.integral(uni, iBs1, iBs2, 1, 1);
+        }
+
+    const tise::EigenResult er = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+    ASSERT_EQ(er.dim, nEn);
+
+    Eigen::Map<const Eigen::MatrixXd> C(er.vectors.data(), nEn, nEn);
+    Eigen::VectorXd B_G = tevol::computeGaussianOverlaps(bs, nEn, order, r0, mOmega, hbar);
+    Eigen::VectorXd Phi_G = tevol::projectToEigenBasis(C.transpose(), B_G);
+
+    // <G|G> by the same independent quadrature used above.
+    const int N = 60001;
+    const double h = (rMax - rMin) / (N - 1);
+    double gg = 0.0;
+    for (int k = 0; k < N; ++k)
+    {
+        const double x = rMin + k * h;
+        const double w = (k == 0 || k == N - 1) ? 1.0 : ((k % 2) ? 4.0 : 2.0);
+        const double g = tevol::gaussianWavepacket(x, r0, mOmega, hbar);
+        gg += w * g * g;
+    }
+    gg *= h / 3.0;
+
+    EXPECT_NEAR(Phi_G.squaredNorm(), gg, 2.0e-3)
+        << "spectral norm " << Phi_G.squaredNorm() << " vs <G|G> " << gg;
 }
 
 // ---------------------------------------------------------------------------

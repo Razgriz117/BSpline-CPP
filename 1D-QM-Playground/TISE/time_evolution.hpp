@@ -28,8 +28,10 @@ Eigen::VectorXd computeGaussianOverlaps(const bspline::BSpline &bs,
                                          double mOmega,
                                          double hbar);
 
-// Project B-spline overlaps to the eigenstate basis: Phi_G = Cinv * B_G.
-Eigen::VectorXd projectToEigenBasis(const Eigen::MatrixXd &Cinv,
+// Project B-spline overlaps onto the eigenstate basis: Phi_G = M * B_G.
+// Callers pass M = C^T, C being DSBGV's S-orthonormal eigenvector matrix --
+// see runTimeEvolution for why that is the transpose and not the inverse.
+Eigen::VectorXd projectToEigenBasis(const Eigen::MatrixXd &M,
                                      const Eigen::VectorXd &B_G);
 
 // Apply diagonal time-evolution: V(t)[k] = exp(-i E_k t / hbar) * Phi_G[k].
