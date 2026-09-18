@@ -747,6 +747,17 @@ void writeContinuumTable(std::ostream &out,
                           Real mass = 1.0,
                           Real hbar = 1.0);
 
+// Write potential.dat: 2 columns, x and V(x), on the same uniform grid
+// writeEigenstateTable samples. The piecewise potential is only ever
+// evaluable inside the solver (the `function` strings are muparser
+// expressions), so without this file a downstream script cannot draw V(x)
+// alongside the wavefunctions without re-implementing the expression parser.
+void writePotential(std::ostream &out,
+                     const std::map<std::string, std::string> &potential,
+                     int npts,
+                     Real rMin,
+                     Real rMax);
+
 // Write eigenvalues.dat: 0-based index, E_n, one line per state, for the
 // first nStates entries of er.values (ascending, per EigenResult's own
 // contract). Per ADR-0007, no bound/continuum filtering is applied here --

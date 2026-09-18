@@ -1677,6 +1677,37 @@ void writeContinuumTable(std::ostream &out,
     }
 }
 
+void writePotential(std::ostream &out,
+                     const std::map<std::string, std::string> &potential,
+                     int npts,
+                     Real rMin,
+                     Real rMax)
+{
+    out << "# potential.dat -- V(x) on the eigenstate output grid\n";
+    out << "# col 1 = x, col 2 = V(x)\n";
+    out << std::scientific << std::setprecision(16);
+    for (int ix = 1; ix <= npts; ++ix)
+    {
+        const Real x = rMin + (rMax - rMin) *
+                       static_cast<Real>(ix - 1) / static_cast<Real>(npts - 1);
+        // A grid point can legitimately fall outside every piece's domain --
+        // the measure-zero gap idiom used to excise a singular point (see the
+        // authoring guide's tiling rules), or an endpoint an open interval
+        // excludes. Emit NaN there rather than aborting the whole solve:
+        // numpy.loadtxt reads it as nan and matplotlib leaves a gap, which is
+        // the honest picture of a potential that is undefined at that point.
+        Real v = std::numeric_limits<Real>::quiet_NaN();
+        try
+        {
+            v = evaluateFunction(potential, x);
+        }
+        catch (const std::runtime_error &)
+        {
+        }
+        out << " " << std::setw(24) << x << " " << std::setw(24) << v << "\n";
+    }
+}
+
 void writeEigenvalues(std::ostream &out, const EigenResult &er, int nStates)
 {
     out << "# eigenvalues.dat: index, E_n\n";

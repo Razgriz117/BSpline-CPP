@@ -626,6 +626,14 @@ int main(int argc, char *argv[])
             tise::writeEigenvalues(out, er, er.dim);
         }
         {
+            // V(x) as data, on the same grid as eigenstates.dat: the potential
+            // is a set of muparser expressions only this binary can evaluate,
+            // so emitting it here is what lets any downstream script draw V(x)
+            // under the wavefunctions without reimplementing the parser.
+            std::ofstream out(outputDir / "potential.dat");
+            tise::writePotential(out, potential, nPtsEigenstate, rMin, rMax);
+        }
+        {
             // One consolidated, directly-loadable table of every eigenstate,
             // alongside (not instead of) the per-state eigenstate_NNN.dat
             // files: column 1 is x, column n+1 is psi_n, energies in the
