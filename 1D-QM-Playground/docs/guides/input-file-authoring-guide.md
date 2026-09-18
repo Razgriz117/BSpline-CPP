@@ -36,27 +36,29 @@ Before opening a YAML file, answer these on paper:
 
 - **What is $V(x)$?** Write it as one or more pieces, each a closed-form expression over an interval. A single smooth potential is one piece; a step, a well, a barrier, or anything with a kink is multiple pieces.
 - **What box contains the states you care about?** The solver always works on a finite domain `[x_min, x_max]` (a hard Dirichlet wall at each end, unless the boundary-condition machinery detects and matches an unbounded tail — see below). Pick it big enough that the bound states you want aren't touching the wall.
-- **Do you need only bound states, or also continuum/scattering states?** Bound states ($E<0$-style, confined) always come out of a solve. Continuum (scattering) states are optional and cost extra config (§3.6).
+- **Do you need only bound states, or also continuum/scattering states?** Bound states ($E<0$-style, confined) always come out of a solve. Continuum (scattering) states are optional and cost extra config ([§3.6](#36-tisecontinuum)).
 - **What does $V(x)$ do beyond your box?** This determines whether you should declare your potential's domain as bounded (matching the box) or genuinely unbounded past it:
   - **Flat** (goes to 0, or a constant): declare it bounded, matching the box — this is the common case (e.g. a finite square well capped by hard walls).
-  - **Coulomb-like** ($V \sim C/x$, unbounded): declare the piece's domain as **genuinely unbounded** (e.g. `(0, inf)`), even though your box is finite — this is what lets the solver detect the true tail shape and match continuum states against Coulomb wave functions instead of the wrong (flat-asymptote) formula. See [§3.6.1](#361-the-l-field-and-coulomb-tail-matching).
-  - **Irregular** (some other unbounded power law): also declare it unbounded; the solver detects this as "Case 3" and warns rather than silently mismatching it.
+  - **Coulomb-like** ($V \sim C/x$, unbounded): declare the piece's domain as **genuinely unbounded** (e.g. `(0, inf)`), even though your box is finite — this is what lets the solver detect the true tail shape and match continuum states against Coulomb wave functions instead of the wrong (flat-asymptote) formula. See [§3.6.1](#361-the-l-field-and-coulomb-tail-matching), which also quotes the confirming console/`warnings.json` message you'll see once the match engages.
+  - **Irregular** (some other unbounded power law, e.g. $V\sim x^{-1.5}$): also declare it unbounded; the solver fits the tail's power-law exponent, and if it matches neither flat ($p\approx0$) nor Coulomb ($p\approx1$), classifies the tail "Case 3"/Irregular and warns rather than silently mismatching it — see [§3.6.2](#362-irregular-tails-case-3-and-tapering) for the actual message and what the solver does about it.
+
+**What "warns" actually means.** Both cases above can make `tise_solver` print a *warning* instead of failing outright: it appends a `{"category": "physics", "message": "..."}` entry to `<output_dir>/tise/warnings.json` and prints an identical `tise_solver: warning: ...` line to the console the instant it fires; `controller.py` then reprints every entry from that file a second time once the solve finishes ([§5](#5-read-your-output)). A warning means the result was still computed and written to disk, but should be treated with suspicion — usually because your grid is too coarse, your box is too small for the energies you asked for, or your physical setup is ambiguous in some specific, named way. This is categorically different from a **hard error** (a malformed config, a bad `function` expression, a domain that doesn't tile — the gotchas in [§3.2](#32-physics)/[§3.4](#34-potential)): errors abort the pipeline *before* `tise_solver` produces any output at all, so nothing under `<output_dir>/` gets written. Every warning message the solver can emit, with what it means and how to react, is catalogued in [§7](#7-troubleshooting-reference).
 
 ## 2. Find your starting point
 
-`tests/*.yaml` are real, runnable, physics-verified reference configs (checked against closed-form analytic solutions — see [§9](#9-further-reading)). Find the row closest to your problem and start from that file rather than from scratch.
+`tests/*.yaml` are real, runnable, physics-verified reference configs (checked against closed-form analytic solutions — see [§9](#9-further-reading)). Find the row closest to your problem and start from that file rather than from scratch. **The "Demonstrates" column names the specific physics mechanism or solver edge case each file is the reference implementation for** — what it's checked against, and which part of the solver it exercises — so you can jump straight to a config that's structurally like your problem.
 
 | Your potential looks like... | Start from | Demonstrates |
 |---|---|---|
-| Nothing special, just want to see the pipeline work | [`tests/free_particle.yaml`](../../tests/free_particle.yaml) | The simplest possible config: $V=0$ in a box (an infinite square well, not a literal free particle — the walls are still hard). |
-| A well or barrier with a genuine jump in $V$ | [`tests/finite_square_well.yaml`](../../tests/finite_square_well.yaml) | A two-piece potential with a real step discontinuity; energy-dependent phase shifts. See [§3.4](#34-potential)'s worked diff against `free_particle.yaml`. |
-| A smooth, confining potential (e.g. $x^2$) | [`tests/harmonic_oscillator.yaml`](../../tests/harmonic_oscillator.yaml) | A single smooth piece, no continuum (bound-only); the cleanest example for reasoning about `n_nodes`/`order` accuracy — see [§3.3](#33-bspline). |
-| A Coulomb-tailed / hydrogenic potential | [`tests/hydrogen.yaml`](../../tests/hydrogen.yaml) | The `tise.continuum.l` field and unbounded-domain declaration for Coulomb-tail continuum matching — see [§3.6.1](#361-the-l-field-and-coulomb-tail-matching). |
-| A genuine singularity **inside** your domain | [`tests/interior_singularity.yaml`](../../tests/interior_singularity.yaml) | The double-open-interval idiom for excluding a point singularity; automatic strategic node placement handles the rest. Bound states are unaffected, but continuum construction is refused (same as the right-edge-singular row below) — an interior singular join splits your domain into two physically decoupled regions, so a "continuum state" matched at `bspline.domain`'s right edge wouldn't mean anything anyway. |
-| A singularity **exactly at** your box wall | [`tests/right_edge_singularity.yaml`](../../tests/right_edge_singularity.yaml) | Continuum construction is refused outright (no `phase_shifts.dat`) rather than producing wrong output; bound states are unaffected. |
-| An unbounded tail that's neither flat nor Coulomb | [`tests/case3_irregular_tail.yaml`](../../tests/case3_irregular_tail.yaml) | The "Case 3" irregular-asymptote taper/warning path; domain starting just short of a true origin singularity. |
+| Nothing special, just want to see the pipeline work | [`tests/free_particle.yaml`](../../tests/free_particle.yaml) | **Baseline: the trivial flat-tail case.** $V=0$ inside a hard-walled box (an infinite square well, not a literal free particle — the walls are still hard); checked against $E_n=n^2\pi^2/2L^2$, $\phi_n=\sqrt{2/L}\sin(n\pi x/L)$. With continuum enabled, the exact phase shift is $\delta(E)\equiv0$ at every energy — the simplest possible correctness check for flat-tail continuum matching ([§3.6](#36-tisecontinuum)), and the file that `finite_square_well.yaml` (below) diffs against for a real discontinuity. |
+| A well or barrier with a genuine jump in $V$ | [`tests/finite_square_well.yaml`](../../tests/finite_square_well.yaml) | **Tests: a real step discontinuity → nonzero, energy-dependent phase shifts.** Two pieces — $V=-1$ on $[0,10)$, $V=0$ on $[10,100]$ — otherwise identical `bspline:`/`tise:` blocks to `free_particle.yaml` so [§3.4](#34-potential) can diff the two directly. Checked against the transcendental bound-state condition $K\cot(Ka)=-\kappa$ (4 bound states) and the closed-form phase shift $\delta(E)=\arctan(\tfrac{k}{K}\tan Ka)-ka$ — unlike `free_particle`'s trivial $\delta\equiv0$, this is genuinely energy-dependent. |
+| A smooth, confining potential (e.g. $x^2$) | [`tests/harmonic_oscillator.yaml`](../../tests/harmonic_oscillator.yaml) | **Tests: pure grid-resolution accuracy, no confounds.** A single smooth piece, no continuum (bound-only); box walls at $\pm20$ stay well outside every relevant turning point through $n\approx200$, so there's no box-edge, discontinuity, or singularity to muddy the error — checked against $E_n=n+\tfrac12$ (Hermite-function eigenstates). This is the cleanest file for reasoning about `n_nodes`/`order` accuracy, and is the source of [§3.3](#33-bspline)'s own "~3.3 nodes per de Broglie wavelength for $10^{-6}$ accuracy" rule. |
+| A Coulomb-tailed / hydrogenic potential | [`tests/hydrogen.yaml`](../../tests/hydrogen.yaml) | **Tests: Coulomb-tail continuum matching, and the `tise.continuum.l` field.** Single piece on $(0,\infty)$, $V=-1/x+1/x^2$ — Coulomb plus an $\ell(\ell+1)/x^2$ centrifugal term baked into the expression for $\ell=1$, matched by `l: 1`; the only one of these 7 files that uses `l`, and a mismatch between it and the baked-in centrifugal term is a silent-wrong-answer trap ([§3.6.1](#361-the-l-field-and-coulomb-tail-matching)). Checked against $E_n=-1/2n^2$ ($n\ge2$; $\ell=1$ excludes 1s); because the tail is declared genuinely unbounded, continuum states are matched against real Coulomb functions $F_1,G_1$ instead of plane waves, so — like `free_particle` — the target is $\delta\equiv0$, but this time testing the Coulomb-matching machinery specifically. |
+| A genuine singularity **inside** your domain | [`tests/interior_singularity.yaml`](../../tests/interior_singularity.yaml) | **Tests: excluding an interior singularity, and why continuum can't be matched across a split domain.** Two half-open pieces around $x=20$ — the "double-open-interval idiom" — split $[0,40]$ into two physically decoupled regions (a field-free box, and a repulsive-Coulomb-in-a-box); automatic strategic node placement at the join handles the rest. Bound states on both sides check out against box-state energies / zeros of $F_0$, but continuum construction is refused — for a structurally different reason than the row below: here the domain itself splits into two regions that share no physical continuum, not a singularity sitting exactly at the matching edge. |
+| A singularity **exactly at** your box wall | [`tests/right_edge_singularity.yaml`](../../tests/right_edge_singularity.yaml) | **Tests: a singularity exactly at the box wall → continuum refused outright.** Single piece with a repulsive-Coulomb-like singularity placed exactly at `bspline.domain`'s right edge, where continuum phase-shift matching would need to evaluate. Bound states check out against zeros of $F_0(1/k,100k)$ and are completely unaffected; continuum refuses outright instead of degrading — no `phase_shifts.dat`/`continuum_state_*.dat` at all ([§7](#7-troubleshooting-reference)). |
+| An unbounded tail that's neither flat nor Coulomb | [`tests/case3_irregular_tail.yaml`](../../tests/case3_irregular_tail.yaml) | **Tests: the Irregular/"Case 3" tail classification and taper warning** ([§3.6.2](#362-irregular-tails-case-3-and-tapering)). Domain genuinely unbounded but starting at `bspline.domain: [0.1, 50.0]` — just short of the true origin singularity in $V=1/x^{1.5}$ — a different idiom from `interior_singularity.yaml`'s double-open-interval (this one keeps the box away from an edge singularity rather than excluding an interior point). The tail's fitted exponent ($p\approx1.5$) is neither flat nor Coulomb; continuum is disabled here, so the taper is correctly skipped for the bound-state solve. No closed form — checked against Richardson-extrapolated finite-difference eigenvalues. |
 
-**Note:** `interior_singularity.yaml`, `right_edge_singularity.yaml`, and `case3_irregular_tail.yaml` all ship with `run_analysis: false` and no `visualization:` block — running them produces `.dat` files only, no plots. That's deliberate (they're numerical-correctness checks), not a bug in the config.
+**Note on plotting these three.** `interior_singularity.yaml` and `right_edge_singularity.yaml` set `visualization: {eigenstates: true, bound_states_squared: true}` — every computed state in both is a genuine, verified bound state of a fully confining system (the interior/edge singularity forces $\psi\to0$ there exactly like a hard wall, per the two rows above), so $|\phi_n(x)|^2$ is physically meaningful. `case3_irregular_tail.yaml` sets `eigenstates: true` only, deliberately *without* `bound_states_squared`: its potential is purely repulsive and decays to $0$ at infinity, so — unlike the other two, where the box edge is a real wall — it has no true bound states at all ($V\ge0$ everywhere forbids $E<0$); every computed state there is a box-discretized stand-in for what would be a continuum state if its irregular tail had a closed form to match against. Squaring those into "probability density" plots would misrepresent them as confined, so they stay raw — matching `free_particle.yaml`'s same choice for the same reason. None of the three ever produces `phase_shifts.png`/`continuum_NNN.png`: continuum construction is refused for the first two and disabled by config for the third, so that data never exists to plot.
 
 ## 3. Build a config, field by field
 
@@ -193,6 +195,15 @@ B-spline node spacing); results at energies above E_acc are unreliable.
 ```
 Fix by raising `bspline.n_nodes` or lowering `E_max` — see [§3.3](#33-bspline)'s resolution discussion (and remember the practical ceiling is closer to `E_acc/2.7` than the raw reported value).
 
+**A flat right-edge tail also needs to be small *at* the wall, not just far past it.** `classifyAsymptote` only checks the tail's functional *shape* well beyond the box edge — not whether $V$ has actually decayed to zero exactly at `x=rMax`. If it hasn't (the box is too small for the continuum energies you asked for), you'll see:
+```
+Warning: potential at the right domain edge x=100 is V(rMax)=-0.02, not negligible compared to the
+smallest requested continuum energy E=0.1 (ratio 0.2 exceeds 0.01); matchAsymptotic's flat-asymptote
+matching assumes V(rMax) is approximately zero, so the resulting phase shifts may be inaccurate --
+consider enlarging bspline.domain.
+```
+(Illustrative numbers, same convention as the warning above — none of the 7 reference configs are misconfigured enough to trigger this one.) Only fires for a **flat** right asymptote with continuum enabled, and checks against the *smallest* requested energy, not `E_max` (the relative distortion from a fixed leftover $V(r_\text{max})$ is worst at the smallest energy). A genuine Coulomb tail is exempt — its nonzero $V(r_\text{max})$ is expected and handled by its own matching path instead ([§3.6.1](#361-the-l-field-and-coulomb-tail-matching)). Fix by enlarging `bspline.domain`.
+
 **A specific continuum energy can also land suspiciously close to one of your bound eigenvalues** — a finite-box discretization artifact, not real physics:
 ```
 Warning: continuum energy grid point E=0.1 is within 0.00327788 of confined eigenvalue E_13=0.0967221;
@@ -227,9 +238,27 @@ see docs/planning/coulomb-tail-continuum-matching.md.
 
 **`l` cannot be inferred automatically** — a centrifugal term decays faster than the $1/x$ Coulomb term and is asymptotically invisible to the tail-shape fit. If you omit `l`, it **silently defaults to `0`** (s-wave). If your `function` has a nonzero centrifugal term baked in but you forget to set a matching `l` (or set the wrong one), **you get no error and no warning** — just continuum results matched against the wrong Coulomb wave functions.
 
+#### 3.6.2 Irregular tails ("Case 3") and tapering
+
+If a piece's declared domain is genuinely unbounded ([§1](#1-characterize-your-physics-problem)) and the solver's tail fit comes out as neither flat ($p\approx0$) nor Coulomb ($p\approx1$), it's classified **Irregular / "Case 3"** and produces two chained `warnings.json` entries — regardless of whether `tise.continuum.enabled` is set (this is a tail-shape classification, not a continuum-only concern).
+
+First, the classifier's own detection message, e.g. from `tests/case3_irregular_tail.yaml` (`1/x^1.5` on a genuinely unbounded domain):
+```
+Warning: potential asymptote on the right side is irregular (fitted power-law exponent p=1.5);
+the potential will be smoothly tapered to zero over a transition width delta=4.99 approaching
+the box boundary (see docs/planning/boundary-condition-case-3-smoothing.md), avoiding an abrupt
+truncation. This remains an approximation -- the true asymptotic tail is not analytically known
+-- so continuum normalization will be approximate.
+```
+Second, a summary that actually decides what happens to your bound-state solve, gated on `continuum.enabled`:
+- **Continuum disabled** (this is what `case3_irregular_tail.yaml` ships with): `potential's right-edge tail is Irregular (Case 3); continuum is disabled, so the raw (untapered) potential is integrated to the wall -- the bound-state spectrum is unaffected.`
+- **Continuum enabled**: `potential's right-edge tail is Irregular (Case 3); tapering it to 0 over a transition width of <delta> before x=<rMax> rather than integrating the raw tail up to the wall (see evaluateWindowedPotential).`
+
+**Read the second message, not just the first.** The first message always says the potential "will be smoothly tapered" — that's the classifier's own recommendation, made before it even knows whether continuum is enabled. Whether a taper is actually applied to your solve is decided by the second message: if continuum is disabled, no taper touches your bound-state solve and the first message's wording is stale in that context, not a bug in your config.
+
 ### 3.7 `tdse:` and `analysis:` (specified, not runnable)
 
-`config.yaml`'s `tdse:` (initial state, gauge, driving field, time step) and `analysis:` (populations, expectation values) blocks are fully specified in the schema — you'll see them in `config.yaml`'s own shipped example — but **nothing consumes them yet**. There is no `tdse_solver` binary. Setting `run.run_tdse: true` aborts the pipeline immediately (§3.1). Leave these blocks out, or leave them as shipped with `run.run_tdse: false` — either way they have zero effect on a TISE-only run.
+`config.yaml`'s `tdse:` (initial state, gauge, driving field, time step) and `analysis:` (populations, expectation values) blocks are fully specified in the schema — you'll see them in `config.yaml`'s own shipped example — but **nothing consumes them yet**. There is no `tdse_solver` binary. Setting `run.run_tdse: true` aborts the pipeline immediately ([§3.1](#31-run)). Leave these blocks out, or leave them as shipped with `run.run_tdse: false` — either way they have zero effect on a TISE-only run.
 
 ### 3.8 `visualization:`
 
@@ -247,7 +276,7 @@ Only three fields actually do anything today: `eigenstates` and `bound_states_sq
 python3 controller.py --config <your-file>.yaml
 ```
 
-`controller.py` validates your config (§3's tiling/type checks), runs `tise_solver` into `<output_dir>/tise/`, prints any `warnings.json` entries to the console, then — if `run_analysis: true` — runs `analysis.py` against that output to produce plots.
+`controller.py` validates your config ([§3](#3-build-a-config-field-by-field)'s tiling/type checks), runs `tise_solver` into `<output_dir>/tise/`, prints any `warnings.json` entries to the console, then — if `run_analysis: true` — runs `analysis.py` against that output to produce plots.
 
 **Validation happens entirely before any output file is written.** If your config is rejected (or the solver hits a hard error), nothing stale is left behind under `<output_dir>/`, so a failed run's output directory is always either absent or complete from the *last successful* run — never a half-written mess from the failed one.
 
@@ -261,9 +290,9 @@ Under `<output_dir>/tise/`:
 | `eigenvectors.dat` | the full B-spline coefficient matrix. |
 | `eigenstate_NNN.dat` (+ `.png` if `visualization.eigenstates: true`) | $x$, $\phi_n(x)$ — one pair per computed state. |
 | `hamiltonian.dat` / `overlap.dat` | the banded H/S matrices the eigenproblem was built from. |
-| `phase_shifts.dat` (+ `.png` if `visualization.phase_shifts: true`) | $\varepsilon_i$, $\delta(\varepsilon_i)$, $d\delta/dE$ — only present if continuum is enabled *and* not refused (§3.6.1, right-edge singularities). |
+| `phase_shifts.dat` (+ `.png` if `visualization.phase_shifts: true`) | $\varepsilon_i$, $\delta(\varepsilon_i)$, $d\delta/dE$ — only present if continuum is enabled *and* not refused ([§7](#7-troubleshooting-reference) — right-edge or interior singularities). |
 | `continuum_state_NNN.dat` (+ `continuum_NNN.png`) | $x$, $\psi_{\varepsilon_i}(x)$ per continuum energy — same presence condition as `phase_shifts.dat`. |
-| `warnings.json` | **always present.** An array of `{"category": "physics", "message": "..."}` entries — always includes an informational bound-state count, plus anything from §3.3/§3.6/§7. |
+| `warnings.json` | **always present.** An array of `{"category": "physics", "message": "..."}` entries — see [§1](#1-characterize-your-physics-problem) for what a warning means; always includes an informational bound-state count, plus anything from [§3.3](#33-bspline)/[§3.6](#36-tisecontinuum)/[§3.6.2](#362-irregular-tails-case-3-and-tapering)/[§7](#7-troubleshooting-reference). |
 
 ## 6. Iterating on a config you already have
 
@@ -273,6 +302,8 @@ Quick task → section pointers, once you've already got a working file and want
 - *"My `E_max` exceeds the accuracy ceiling"* → raise `n_nodes` or lower `E_max` ([§3.3](#33-bspline)/[§3.6](#36-tisecontinuum)).
 - *"I need to add a piece to my potential"* → [§3.4](#34-potential) (tiling rules + the `free_particle`→`finite_square_well` diff).
 - *"I want to turn on continuum for an existing bound-only config"* → [§3.6](#36-tisecontinuum), and check whether your tail is flat or Coulomb ([§3.6.1](#361-the-l-field-and-coulomb-tail-matching)) before you do.
+- *"An 'Irregular'/'Case 3' warning showed up"* → [§3.6.2](#362-irregular-tails-case-3-and-tapering).
+- *"A 'V(rMax) not negligible' warning showed up"* → [§3.6](#36-tisecontinuum).
 - *"`tise_solver` crashed instead of printing an error"* → almost certainly a malformed `function` expression ([§3.4](#34-potential)).
 - *"A message I don't recognize showed up"* → [§7](#7-troubleshooting-reference).
 
@@ -291,7 +322,9 @@ Quick task → section pointers, once you've already got a working file and want
 | `terminate called after throwing an instance of 'mu::ParserError'` / `Aborted` | Malformed `function` expression — not caught cleanly. | [§3.4](#34-potential) — test the expression alone first |
 | `BSpline::init failed with code -1` / `-2` | `n_nodes < 2` / `order < 1`. | [§3.3](#33-bspline) |
 | `Warning: requested continuum E_max=... exceeds the basis accuracy ceiling E_acc=...` | Grid too coarse for the requested continuum energy range. | [§3.3](#33-bspline)/[§3.6](#36-tisecontinuum) — raise `n_nodes` or lower `E_max` |
+| `potential at the right domain edge x=... is V(rMax)=..., not negligible compared to ...` | Box isn't large enough for the smallest requested continuum energy — flat-asymptote matching assumes V≈0 at the wall. | [§3.6](#36-tisecontinuum) — enlarge `bspline.domain` |
 | `Warning: continuum energy grid point E=... is within ... of confined eigenvalue ...` | A box-discretization artifact, not physical. | [§3.6](#36-tisecontinuum) — distrust that row, or shift the energy grid |
+| `potential's right-edge tail is Irregular (Case 3); ...` (preceded by `Warning: potential asymptote on the ... side is irregular ...`) | Tail is unbounded but fits neither flat nor Coulomb; solver tapers it near the wall if continuum is enabled, otherwise leaves it untapered (bound states unaffected either way). | [§1](#1-characterize-your-physics-problem)/[§3.6.2](#362-irregular-tails-case-3-and-tapering) |
 | `potential is singular at the right domain edge ... skipping continuum construction entirely` | Your potential is singular exactly at the box wall. | [§2](#2-find-your-starting-point)'s `right_edge_singularity.yaml` row — bound states are still valid |
 | `potential has a singular join strictly inside the domain ... skipping continuum construction entirely` | Your potential has a genuine interior singularity, splitting the domain into two decoupled regions. | [§2](#2-find-your-starting-point)'s `interior_singularity.yaml` row — bound states are still valid |
 | `bound state <j> ... appears to be colliding with the outer wall ...` | Box too small for that state. | [§3.3](#33-bspline) — enlarge `bspline.domain` |
@@ -315,4 +348,4 @@ Things you cannot configure your way around today — see the linked ADRs for th
 - [`docs/tests/reports/f4e8359/`](../tests/reports/f4e8359/) — the physics-verification reports (all 7 `tests/*.yaml` configs, all PASS) this guide's worked examples and accuracy numbers are drawn from.
 - [`TISE/README.md`](../../TISE/README.md) — build instructions and dependency list.
 - [`README.md`](../../README.md) — pipeline overview and inter-component contract.
-- [`docs/planning/tdse-task-breakdown.md`](../planning/tdse-task-breakdown.md) — TDSE implementation status, for anyone curious when §3.7 stops being "not yet."
+- [`docs/planning/tdse-task-breakdown.md`](../planning/tdse-task-breakdown.md) — TDSE implementation status, for anyone curious when [§3.7](#37-tdse-and-analysis-specified-not-runnable) stops being "not yet."
