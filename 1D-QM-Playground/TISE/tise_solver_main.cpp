@@ -195,6 +195,16 @@ int main(int argc, char *argv[])
         // architecture) and previously had no such guard of its own.
         tise::validateNoOverlappingPotentialPieces(potential);
 
+        // One-time eager parse/eval validation (mu::ParserError crash fix):
+        // forces every piece's own expression to actually evaluate once, so
+        // a malformed `function` string anywhere in the config is caught
+        // here -- before buildStrategicGridAndDropSet (or any other solve
+        // work) begins -- rather than only if/when the solve's own grid
+        // probing happens to land in that particular piece's domain. Must
+        // run AFTER validateNoOverlappingPotentialPieces above (see that
+        // function's own tise.cpp definition for why).
+        tise::validatePotentialExpressionsParse(potential);
+
         // Construct the B-spline basis: automatically strategic per REQ-F-050
         // if the potential has detectable Step/StitchedKink/Singular
         // structure, with A4b interior-singular-B-spline removal applied --

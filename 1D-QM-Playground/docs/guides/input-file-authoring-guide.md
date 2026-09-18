@@ -156,7 +156,7 @@ Evaluated by [muparser](https://beltoforion.de/en/muparser/), with **`x` as the 
 
 Supported operators: `+ - * / ^`, comparisons `< <= > >= == !=`, logical `&& ||`, ternary `?:`. Supported functions: `sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh log2 log10 ln exp abs sqrt rint sign sum avg min max`; constants `_pi`, `_e`.
 
-> **Gotcha — a malformed expression does not fail cleanly.** A syntax error in `function` (unbalanced parens, a stray operator, etc.) is not caught anywhere in the solver and crashes the whole process: `terminate called after throwing an instance of 'mu::ParserError'` followed by `Aborted`, instead of a clean `tise_solver: ...` message. **Test a new or edited expression in a tiny, throwaway config first** before dropping it into a real run — if `tise_solver` aborts instead of printing a normal error, the `function` string is where to look.
+A syntax error in `function` (unbalanced parens, a stray operator, an undefined identifier, etc.) is caught eagerly, right after the config is loaded — before the solver does any other work — and reported cleanly: `tise_solver: malformed potential expression in domain '<domain>': '<function>': <muParser's own message>` (e.g. `Unexpected end of expression at position 5`).
 
 ### 3.5 `tise:`
 
@@ -304,7 +304,7 @@ Quick task → section pointers, once you've already got a working file and want
 - *"I want to turn on continuum for an existing bound-only config"* → [§3.6](#36-tisecontinuum), and check whether your tail is flat or Coulomb ([§3.6.1](#361-the-l-field-and-coulomb-tail-matching)) before you do.
 - *"An 'Irregular'/'Case 3' warning showed up"* → [§3.6.2](#362-irregular-tails-case-3-and-tapering).
 - *"A 'V(rMax) not negligible' warning showed up"* → [§3.6](#36-tisecontinuum).
-- *"`tise_solver` crashed instead of printing an error"* → almost certainly a malformed `function` expression ([§3.4](#34-potential)).
+- *"`tise_solver` failed with a `malformed potential expression` message"* → a syntax error in a `function` string; the message itself names the offending domain and expression ([§3.4](#34-potential)).
 - *"A message I don't recognize showed up"* → [§7](#7-troubleshooting-reference).
 
 ## 7. Troubleshooting reference
@@ -319,7 +319,7 @@ Quick task → section pointers, once you've already got a working file and want
 | `tise.continuum.n_energies must be a positive integer` | `n_energies` is missing, zero, or negative. | [§3.6](#36-tisecontinuum) |
 | `tise.continuum.E_max must be greater than E_threshold (got ...)` | `E_max` is equal to or less than `E_threshold`. | [§3.6](#36-tisecontinuum) |
 | `physics.mass/physics.hbar must be positive (got ...)` | `physics:` block present with a zero or negative value. | [§3.2](#32-physics) — use a positive value |
-| `terminate called after throwing an instance of 'mu::ParserError'` / `Aborted` | Malformed `function` expression — not caught cleanly. | [§3.4](#34-potential) — test the expression alone first |
+| `malformed potential expression in domain '<domain>': '<function>': <message>` | A syntax error in a `function` expression (unbalanced parens, unknown identifier, stray operator, etc.), caught eagerly at config-load time. | [§3.4](#34-potential) |
 | `BSpline::init failed: n_nodes must be >= 2 ...` / `order must be >= 1 ...` | `n_nodes < 2` / `order < 1`. | [§3.3](#33-bspline) |
 | `Warning: requested continuum E_max=... exceeds the basis accuracy ceiling E_acc=...` | Grid too coarse for the requested continuum energy range. | [§3.3](#33-bspline)/[§3.6](#36-tisecontinuum) — raise `n_nodes` or lower `E_max` |
 | `potential at the right domain edge x=... is V(rMax)=..., not negligible compared to ...` | Box isn't large enough for the smallest requested continuum energy — flat-asymptote matching assumes V≈0 at the wall. | [§3.6](#36-tisecontinuum) — enlarge `bspline.domain` |

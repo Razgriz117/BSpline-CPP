@@ -197,6 +197,49 @@ class TestRunTiseSolverRealSubprocess:
         assert "TISE solver" in str(excinfo.value)
         assert not tise_dir.exists() or not any(tise_dir.iterdir())
 
+    def test_malformed_potential_expression_fails_cleanly_not_sigabrt(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """Regression guard for the mu::ParserError-escapes-uncaught crash
+        (evaluateFunction, TISE/tise.cpp): mu::ParserError does not derive
+        from std::exception (muParserError.h), so a malformed `function`
+        expression previously escaped every catch(const std::exception&) in
+        the binary and reached std::terminate() -> SIGABRT, not the clean
+        `tise_solver: <message>` + non-zero-exit contract every other
+        validation failure in this suite gets.
+
+        CalledProcessError.returncode is -6 (SIGABRT) for the pre-fix crash
+        and 1 (a plain EXIT_FAILURE) for the fixed clean error -- both are
+        nonzero, so a bare `pytest.raises(SolverStageError)` would pass
+        against EITHER the crashing binary or the fixed one and prove
+        nothing about the crash actually being gone. This asserts the
+        failure mode itself: the SolverStageError text must report "exit 1"
+        (not a negative/signal return code, per controller.py's
+        `f"{stage_name} failed (exit {e.returncode})."`), stderr must
+        contain the expected `tise_solver: ` clean-error prefix, and stderr
+        must NOT contain the abort markers ("terminate called after
+        throwing" / "Aborted") the unfixed binary printed."""
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["potential"] = [
+            "{'domain': '(0, inf)', 'function': 'x +* 2'}",
+        ]
+        bad_config = tmp_path / "config_malformed_potential_expression.yaml"
+        with open(bad_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_tise_solver(str(bad_config), tise_dir, binary=tise_solver_binary)
+
+        message = str(excinfo.value)
+        assert "exit 1" in message
+        assert "tise_solver: " in message
+        assert "terminate called after throwing" not in message
+        assert "Aborted" not in message
+        assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
     def test_non_unity_mass_now_succeeds(
         self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
     ):

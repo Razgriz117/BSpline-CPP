@@ -597,7 +597,7 @@ The top-level `solveTISE(...)` returns a `SolveTISEResult{eigen, bs, grid, nBSpl
 
 #### 5.2.4 Error Handling
 
-Numerical failure modes to surface (see [§8](#8-error-handling-and-logging-strategy) for the shared policy): `BSpline::init()` error codes (`-1` invalid node count, `-2` invalid order, `-4` grid/node-count mismatch, `1` non-monotonic grid); eigensolver non-convergence; invalid domain/potential combinations caught during validation ([§6.4](#64-data-validation-rules)) before the solver runs at all.
+Numerical failure modes to surface (see [§8](#8-error-handling-and-logging-strategy) for the shared policy): `BSpline::init()` error codes (`-1` invalid node count, `-2` invalid order, `-4` grid/node-count mismatch, `1` non-monotonic grid); eigensolver non-convergence; invalid domain/potential combinations, including malformed muparser `function` expressions, caught during validation ([§6.4](#64-data-validation-rules)) before the solver runs at all.
 
 ### 5.3 TDSE Solver
 

@@ -135,10 +135,22 @@ double evaluateFunction(std::map<std::string, std::string> function, double x)
             // fresh Parser each call since the expression string varies per piece
             mu::Parser p;
             p.DefineVar("x", &x);
-            p.SetExpr(fn);
-
-            // return result
-            return p.Eval();
+            try
+            {
+                p.SetExpr(fn);
+                return p.Eval();
+            }
+            catch (const mu::ParserError &e)
+            {
+                // mu::ParserError does not derive from std::exception, so it
+                // would otherwise escape every catch (const std::exception&)
+                // in the codebase uncaught, crashing the whole process via
+                // std::terminate() instead of failing cleanly. Re-thrown as
+                // std::runtime_error, naming the offending domain and
+                // expression alongside muParser's own message.
+                throw std::runtime_error("malformed potential expression in domain '" + domain +
+                                          "': '" + fn + "': " + e.GetMsg());
+            }
         }
     }
     std::ostringstream oss;
@@ -200,6 +212,62 @@ void validateNoOverlappingPotentialPieces(const std::map<std::string, std::strin
                                               "' and '" + domainB + "' both cover x=" + std::to_string(x));
             }
         }
+    }
+}
+
+namespace
+{
+// One arbitrary finite x guaranteed to lie inside `iv`'s own domain, for
+// validatePotentialExpressionsParse's one-time eager-parse probe below.
+// Unlike validateNoOverlappingPotentialPieces's finiteProbe above (which
+// deliberately probes a magnitude-max/4 stand-in for infinity, so it reads
+// as "definitely outside every finite piece" when tested against a
+// DIFFERENT piece), this only needs a single point inInterval() maps into
+// THIS piece -- a modest, near-boundary offset is both sufficient (the
+// parse/eval errors this guards against -- e.g. an unknown identifier --
+// are independent of x's value) and safer to feed into an arbitrary user
+// expression than a near-DBL_MAX magnitude (e.g. x^3 at that scale).
+double representativePointInPiece(const ParsedInterval &iv)
+{
+    constexpr double kOffset = 1.0;
+    const bool lowerFinite = std::isfinite(iv.lower);
+    const bool upperFinite = std::isfinite(iv.upper);
+
+    if (lowerFinite && upperFinite)
+        return (iv.lower + iv.upper) / 2.0; // interior for lower <= upper,
+                                             // including a degenerate
+                                             // lower==upper single point
+    if (lowerFinite)
+        return iv.lower + kOffset;  // e.g. "[0, inf)" -> 1.0
+    if (upperFinite)
+        return iv.upper - kOffset;  // e.g. "(-inf, 0]" -> -1.0
+    return 0.0;                     // "(-inf, inf)"
+}
+} // namespace
+
+void validatePotentialExpressionsParse(const std::map<std::string, std::string> &potential)
+{
+    // One-time, eager pre-solve validation (call once per config, NOT per
+    // evaluateFunction call -- same contract as
+    // validateNoOverlappingPotentialPieces above): forces every piece's own
+    // expression to actually parse/evaluate at one representative point
+    // within its own domain, so a malformed `function` string in ANY piece
+    // -- even one this run's actual solve/grid pipeline would never itself
+    // probe -- is caught immediately after config load. MUST run AFTER
+    // validateNoOverlappingPotentialPieces has already confirmed no two
+    // pieces' domains overlap -- that guarantee is what lets
+    // representativePointInPiece's single interior point be trusted to fall
+    // in exactly this piece under evaluateFunction's own first-match
+    // resolution.
+    for (const auto &[domain, fn] : potential)
+    {
+        (void)fn; // evaluateFunction re-looks-up fn from `potential` itself
+        const double x = representativePointInPiece(parseInterval(domain));
+        // evaluateFunction already converts a mu::ParserError into
+        // std::runtime_error -- reusing it here (rather than constructing a
+        // second mu::Parser) exercises the exact runtime code path callers
+        // will hit, and needs no try/catch of its own.
+        evaluateFunction(potential, x);
     }
 }
 

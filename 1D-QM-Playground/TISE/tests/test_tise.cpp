@@ -185,6 +185,44 @@ TEST(EvaluateFunctionTest, ThrowsWhenXUncovered)
     EXPECT_THROW(tise::evaluateFunction(potential, 10.0), std::runtime_error);
 }
 
+// mu::ParserError does not derive from std::exception (muParserError.h), so
+// a malformed expression previously escaped every catch (const
+// std::exception&) in the codebase uncaught, crashing the whole process via
+// std::terminate()/SIGABRT instead of failing cleanly. This proves
+// evaluateFunction's own throw-type contract; it does NOT prove the real
+// tise_solver binary no longer aborts end-to-end -- GoogleTest's own
+// EXPECT_THROW (and its default per-test catch(...)) swallows ANY thrown
+// type when checking against a mismatched expected type -- see
+// tests/test_controller_integration.py's process-level regression test for
+// that proof.
+TEST(EvaluateFunctionTest, MalformedExpressionThrowsRuntimeErrorNotParserError)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 5)", "x + ("}  // unbalanced parens
+    };
+    EXPECT_THROW(tise::evaluateFunction(potential, 2.0), std::runtime_error);
+}
+
+TEST(EvaluateFunctionTest, MalformedExpressionErrorNamesDomainAndExpression)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 5)", "x +* 2"}  // stray operator
+    };
+    bool threw = false;
+    try
+    {
+        tise::evaluateFunction(potential, 2.0);
+    }
+    catch (const std::runtime_error &e)
+    {
+        threw = true;
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("[0, 5)"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("x +* 2"), std::string::npos) << msg;
+    }
+    EXPECT_TRUE(threw);
+}
+
 // ---------------------------------------------------------------------------
 // validateNoOverlappingPotentialPieces -- evaluateFunction's own first-
 // match-wins resolution (std::map iteration order, i.e. domain-string
@@ -238,6 +276,65 @@ TEST(ValidateNoOverlappingPotentialPiecesTest, SinglePieceNeverThrows)
 {
     std::map<std::string, std::string> potential = {{"[0, 100]", "0"}};
     EXPECT_NO_THROW(tise::validateNoOverlappingPotentialPieces(potential));
+}
+
+// ---------------------------------------------------------------------------
+// validatePotentialExpressionsParse -- eager, one-time validation (call once
+// per config, NOT per evaluateFunction call, and only after
+// validateNoOverlappingPotentialPieces has confirmed no overlap) that every
+// piece's `function` string actually parses/evaluates, so a malformed
+// expression in ANY piece is caught right after config load.
+// ---------------------------------------------------------------------------
+
+TEST(ValidatePotentialExpressionsParseTest, AllValidMultiPieceDoesNotThrow)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 5)", "x * x"},
+        {"[5, 10]", "10 - x"},
+        {"(10, inf)", "1 / x"}
+    };
+    EXPECT_NO_THROW(tise::validatePotentialExpressionsParse(potential));
+}
+
+TEST(ValidatePotentialExpressionsParseTest, ThrowsOnMalformedExpressionInInteriorPiece)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 5)", "x * x"},
+        {"[5, 10]", "x +* 2"},        // malformed, interior finite piece
+        {"(10, inf)", "1 / x"}
+    };
+    EXPECT_THROW(tise::validatePotentialExpressionsParse(potential), std::runtime_error);
+}
+
+TEST(ValidatePotentialExpressionsParseTest, ThrowsOnMalformedExpressionInInfiniteBoundPiece)
+{
+    std::map<std::string, std::string> potential = {
+        {"[0, 5)", "x * x"},
+        {"[5, 10]", "10 - x"},
+        {"(10, inf)", "x + ("}        // malformed, infinite-bound piece
+    };
+    EXPECT_THROW(tise::validatePotentialExpressionsParse(potential), std::runtime_error);
+}
+
+TEST(ValidatePotentialExpressionsParseTest, VisitsEveryPieceRegardlessOfSolveReachability)
+{
+    // validatePotentialExpressionsParse visits EVERY piece unconditionally,
+    // once -- unlike the solve's own probing (classifyAsymptote and
+    // friends), which only reaches whatever a given run's grid actually
+    // touches. A narrow, off-the-beaten-path piece a real run might never
+    // probe still gets caught here.
+    std::map<std::string, std::string> potential = {
+        {"[0, 1000)", "0"},
+        {"[1000, 1001)", "x +* 2"},   // malformed, narrow piece
+        {"[1001, 2000]", "0"}
+    };
+    EXPECT_THROW(tise::validatePotentialExpressionsParse(potential), std::runtime_error);
+}
+
+TEST(ValidatePotentialExpressionsParseTest, SinglePieceValidDoesNotThrow)
+{
+    std::map<std::string, std::string> potential = {{"[0, 100]", "-1/x + 1/x^2"}};
+    EXPECT_NO_THROW(tise::validatePotentialExpressionsParse(potential));
 }
 
 // ---------------------------------------------------------------------------

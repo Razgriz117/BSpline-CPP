@@ -50,12 +50,18 @@ bool inInterval(double x, const std::string &interval);
 
 // Given a piecewise potential (domain string -> muparser expression string in
 // `x`), find the piece whose domain contains x and evaluate it there. Throws
-// std::runtime_error if no piece's domain covers x. If more than one piece's
-// domain covers x, the first match under this map's own (domain-string
-// sorted, NOT declaration-order) iteration is silently used -- see
-// validateNoOverlappingPotentialPieces below to guard against that
-// ambiguity ahead of time, since evaluateFunction itself is called on the
-// hot path (once per quadrature point) and does not re-check it.
+// std::runtime_error if no piece's domain covers x, OR if the matching
+// piece's expression fails to parse/evaluate (a malformed `function` string
+// -- unbalanced parens, unknown identifier, stray operator, etc. -- naming
+// the offending domain, expression, and muParser's own error message;
+// mu::ParserError does not derive from std::exception, so it is caught here
+// and re-thrown as std::runtime_error rather than allowed to escape
+// uncaught). If more than one piece's domain covers x, the first match
+// under this map's own (domain-string sorted, NOT declaration-order)
+// iteration is silently used -- see validateNoOverlappingPotentialPieces
+// below to guard against that ambiguity ahead of time, since evaluateFunction
+// itself is called on the hot path (once per quadrature point) and does not
+// re-check it.
 double evaluateFunction(std::map<std::string, std::string> function, double x);
 
 // One-time validation (call once per config/potential, NOT per
@@ -69,14 +75,37 @@ double evaluateFunction(std::map<std::string, std::string> function, double x);
 // is evaluateFunction's own, unrelated "does not cover x" error).
 void validateNoOverlappingPotentialPieces(const std::map<std::string, std::string> &potential);
 
+// One-time, eager validation (call once per config/potential, NOT per
+// evaluateFunction call, and only AFTER validateNoOverlappingPotentialPieces
+// has already confirmed no piece overlaps another -- see this function's
+// own tise.cpp definition for why that ordering matters): forces every
+// piece's `function` expression to actually parse and evaluate at one
+// representative finite point within its own domain, so a malformed
+// expression (unbalanced parens, an unknown identifier, a stray operator,
+// etc.) in ANY piece is caught immediately after config load -- even a
+// piece this run's actual solve/grid pipeline would never itself reach.
+// Reuses evaluateFunction directly, so it throws the exact same
+// std::runtime_error (naming the offending domain, expression, and
+// muParser's own message) that a later, lazy evaluateFunction call at the
+// same point would have thrown -- just earlier, before any output file is
+// opened. Does not reject anything evaluateFunction itself wouldn't
+// eventually reject: a syntactically valid expression that merely
+// evaluates to NaN/Inf at the probed point (e.g. sqrt(-1)) is not an error
+// here, matching muParser's own behavior.
+void validatePotentialExpressionsParse(const std::map<std::string, std::string> &potential);
+
 // Parse one config.yaml `potential` list entry -- a single-quoted Python
 // dict-literal string, e.g. "{'domain': '(0, 100]', 'function': '-1/x'}"
 // (controller.py's parse_potential_piece, via ast.literal_eval, is the
 // Python-side twin of this parser -- NOT JSON, unlike main.cpp's argv-based
 // parsePiecewise). Returns {domain, function}. Throws std::runtime_error on
-// a missing key or malformed input; does not validate the domain/function
-// strings themselves -- that happens the first time evaluateFunction uses
-// them.
+// a missing key or malformed input; does not itself validate that `domain`
+// parses as an interval, that pieces don't overlap, or that `function`
+// parses/evaluates as a muparser expression -- see
+// validateNoOverlappingPotentialPieces and validatePotentialExpressionsParse
+// (both meant to be called once per config, right after every piece has
+// been parsed) for those checks, ahead of evaluateFunction's own lazy,
+// per-call validation on the solve's hot path.
 std::pair<std::string, std::string> parsePotentialPiece(const std::string &piece);
 
 // Result of fitting a sampled sequence V[0..N-1] (assumed to be sampled at
