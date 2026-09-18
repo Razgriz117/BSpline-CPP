@@ -113,7 +113,7 @@ bspline:
 $$h \;\lesssim\; \frac{2\pi}{3.3\sqrt{2\,(E - V_\text{min})}}$$
 for the highest-energy state you care about. The solver's own built-in accuracy-ceiling warning ([§3.6](#36-tisecontinuum)) is looser than this — it only guarantees the 2-nodes/wavelength Nyquist floor — so treat the reported `E_acc` as roughly `E_acc/2.7`, not as your real ceiling. See [`docs/tests/reports/f4e8359/harmonic_oscillator.md`](../tests/reports/f4e8359/harmonic_oscillator.md) for the full derivation.
 
-**If `n_nodes`/`order` are unreasonable** (e.g. `n_nodes < 2` or `order < 1`), the failure surfaces late and generically as `tise_solver: BSpline::init failed with code -1` (bad `n_nodes`) or `-2` (bad `order`) — not a friendly named-field message.
+**If `n_nodes`/`order` are unreasonable** (e.g. `n_nodes < 2` or `order < 1`), the failure surfaces as `tise_solver: BSpline::init failed: n_nodes must be >= 2 (got ...)` or `order must be >= 1 (got ...)`, naming the bad field and its actual value (the numeric `BSpline::init` code, e.g. `-1`/`-2`, is kept alongside it for anyone tracing the underlying return contract).
 
 ### 3.4 `potential:`
 
@@ -319,7 +319,7 @@ Quick task → section pointers, once you've already got a working file and want
 | `tise.continuum.n_energies must be a positive integer` | `n_energies` is missing, zero, or negative. | [§3.6](#36-tisecontinuum) |
 | `physics.mass/physics.hbar must be positive (got ...)` | `physics:` block present with a zero or negative value. | [§3.2](#32-physics) — use a positive value |
 | `terminate called after throwing an instance of 'mu::ParserError'` / `Aborted` | Malformed `function` expression — not caught cleanly. | [§3.4](#34-potential) — test the expression alone first |
-| `BSpline::init failed with code -1` / `-2` | `n_nodes < 2` / `order < 1`. | [§3.3](#33-bspline) |
+| `BSpline::init failed: n_nodes must be >= 2 ...` / `order must be >= 1 ...` | `n_nodes < 2` / `order < 1`. | [§3.3](#33-bspline) |
 | `Warning: requested continuum E_max=... exceeds the basis accuracy ceiling E_acc=...` | Grid too coarse for the requested continuum energy range. | [§3.3](#33-bspline)/[§3.6](#36-tisecontinuum) — raise `n_nodes` or lower `E_max` |
 | `potential at the right domain edge x=... is V(rMax)=..., not negligible compared to ...` | Box isn't large enough for the smallest requested continuum energy — flat-asymptote matching assumes V≈0 at the wall. | [§3.6](#36-tisecontinuum) — enlarge `bspline.domain` |
 | `Warning: continuum energy grid point E=... is within ... of confined eigenvalue ...` | A box-discretization artifact, not physical. | [§3.6](#36-tisecontinuum) — distrust that row, or shift the energy grid |

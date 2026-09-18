@@ -3342,6 +3342,48 @@ TEST(BuildStrategicGridAndDropSetTest, InteriorSingularSplitFalseForOrdinaryPote
     EXPECT_FALSE(sgr.interiorSingularSplit);
 }
 
+// An unreasonable n_nodes/order used to surface only as the generic
+// "BSpline::init failed with code -1/-2" -- the raw Fortran-mirroring
+// IOSTAT code, with no indication of which named input field was bad or
+// what value it actually had. buildStrategicGridAndDropSet is the one
+// place that turns that code into a thrown std::runtime_error, so the
+// descriptive text belongs here rather than inside BSpline::init itself
+// (BSpline::init's numeric-code return contract is shared with other,
+// non-tise_solver callers and stays generic).
+TEST(BuildStrategicGridAndDropSetTest, ThrowsDescriptiveErrorForTooFewNodes)
+{
+    std::map<std::string, std::string> potential = {{"[0,40]", "0.5*x^2"}};
+    try
+    {
+        tise::buildStrategicGridAndDropSet(1, 8, 0.0, 40.0, potential);
+        FAIL() << "expected std::runtime_error";
+    }
+    catch (const std::runtime_error &e)
+    {
+        std::string msg = e.what();
+        EXPECT_NE(msg.find("n_nodes"), std::string::npos) << msg;
+        EXPECT_NE(msg.find('1'), std::string::npos) << msg;
+        EXPECT_NE(msg.find("-1"), std::string::npos) << msg; // code preserved
+    }
+}
+
+TEST(BuildStrategicGridAndDropSetTest, ThrowsDescriptiveErrorForInvalidOrder)
+{
+    std::map<std::string, std::string> potential = {{"[0,40]", "0.5*x^2"}};
+    try
+    {
+        tise::buildStrategicGridAndDropSet(41, 0, 0.0, 40.0, potential);
+        FAIL() << "expected std::runtime_error";
+    }
+    catch (const std::runtime_error &e)
+    {
+        std::string msg = e.what();
+        EXPECT_NE(msg.find("order"), std::string::npos) << msg;
+        EXPECT_NE(msg.find('0'), std::string::npos) << msg;
+        EXPECT_NE(msg.find("-2"), std::string::npos) << msg; // code preserved
+    }
+}
+
 // ---------------------------------------------------------------------------
 // solveTISE — end-to-end: strategic grid + singular removal actually wired
 //

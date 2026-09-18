@@ -1571,8 +1571,29 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
     bspline::BSpline bs;
     int initInfo = bs.init(nNodesActual, order, grid);
     if (initInfo != 0)
-        throw std::runtime_error("BSpline::init failed with code " +
-                                 std::to_string(initInfo));
+    {
+        // BSpline::init's return value mirrors the Fortran routine's IOSTAT
+        // codes (BSpline.hpp:37-51) and stays generic on purpose -- it's
+        // shared with other, non-tise_solver callers that interpret the
+        // code themselves. This is the one place in the TISE solver that
+        // turns a failure into a thrown exception, so the named-field,
+        // valued message belongs here instead.
+        std::string reason;
+        switch (initInfo)
+        {
+            case -1: reason = "n_nodes must be >= 2 (got " +
+                              std::to_string(nNodesActual) + ")"; break;
+            case -2: reason = "order must be >= 1 (got " +
+                              std::to_string(order) + ")"; break;
+            case -4: reason = "grid size (" + std::to_string(grid.size()) +
+                              ") is smaller than n_nodes (" +
+                              std::to_string(nNodesActual) + ")"; break;
+            case 1:  reason = "grid is not non-decreasing"; break;
+            default: reason = "unrecognized BSpline::init error"; break;
+        }
+        throw std::runtime_error("BSpline::init failed: " + reason +
+                                 " (code " + std::to_string(initInfo) + ")");
+    }
 
     int nBSplines = bs.getNBSplines();
 
