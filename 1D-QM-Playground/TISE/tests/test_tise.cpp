@@ -449,6 +449,28 @@ TEST(ClassifySequenceConvergenceTest, ThrowsOnFewerThanThreeSamples)
     EXPECT_THROW(tise::classifySequenceConvergence(V, 4.0), std::runtime_error);
 }
 
+// ratio feeds std::log(ratio) (tail-window power-law fit) and std::pow(ratio,
+// -pFit); ratio <= 0 makes log(ratio) NaN/undefined, so it's guarded
+// explicitly rather than left as a latent UB trap -- same rationale as the
+// V.size()/windowSize guards above.
+TEST(ClassifySequenceConvergenceTest, ThrowsOnNonPositiveRatio)
+{
+    std::vector<double> V(16);
+    for (int k = 0; k < 16; ++k)
+        V[k] = 3.0 * std::pow(4.0, -1.5 * k);
+    EXPECT_THROW(tise::classifySequenceConvergence(V, 0.0), std::runtime_error);
+    EXPECT_THROW(tise::classifySequenceConvergence(V, -4.0), std::runtime_error);
+}
+
+// ratio == 1 makes std::log(ratio) == 0, dividing pEstimates by zero.
+TEST(ClassifySequenceConvergenceTest, ThrowsOnRatioEqualToOne)
+{
+    std::vector<double> V(16);
+    for (int k = 0; k < 16; ++k)
+        V[k] = 3.0 * std::pow(4.0, -1.5 * k);
+    EXPECT_THROW(tise::classifySequenceConvergence(V, 1.0), std::runtime_error);
+}
+
 // Proves windowSize actually threads through and changes the fit, not just
 // compiles: a smaller windowSize uses fewer (but still >= 1) trailing
 // difference-ratio estimates, so on a sequence whose apparent power-law
@@ -535,6 +557,15 @@ TEST(Case3WindowFunctionTest, LeftSideMirrorsRightSide)
     EXPECT_NEAR(tise::case3WindowFunction(R + 5.0, R, delta, tise::DomainSide::Left), 1.0, 1e-14);
     EXPECT_NEAR(tise::case3WindowFunction(R, R, delta, tise::DomainSide::Left), 0.0, 1e-14);
     EXPECT_NEAR(tise::case3WindowFunction(R - 5.0, R, delta, tise::DomainSide::Left), 0.0, 1e-14);
+}
+
+// delta <= 0 makes theta = (pi/2)*(d/delta) divide by zero (delta == 0) or
+// flip the taper's sign (delta < 0); guarded explicitly rather than left as
+// a latent div-by-zero/sign-flip trap.
+TEST(Case3WindowFunctionTest, ThrowsOnNonPositiveDelta)
+{
+    EXPECT_THROW(tise::case3WindowFunction(9.0, 10.0, 0.0, tise::DomainSide::Right), std::runtime_error);
+    EXPECT_THROW(tise::case3WindowFunction(9.0, 10.0, -2.0, tise::DomainSide::Right), std::runtime_error);
 }
 
 TEST(EvaluateWindowedPotentialTest, MatchesRawPotentialWellInsideBoundary)

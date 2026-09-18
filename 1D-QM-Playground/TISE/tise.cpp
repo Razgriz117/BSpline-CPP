@@ -122,7 +122,7 @@ bool inInterval(double x, const std::string& interval)
     return leftOK && rightOK;
 }
 
-double evaluateFunction(std::map<std::string, std::string> function, double x)
+double evaluateFunction(const std::map<std::string, std::string> &function, double x)
 {
     // given a map from domain to function, evaluate function for input x
     // for now, this naively assumes that the first match is the correct one
@@ -315,6 +315,11 @@ ConvergenceFit classifySequenceConvergence(const std::vector<Real> &V, Real rati
         throw std::runtime_error("classifySequenceConvergence: V must have at least 3 samples");
     if (windowSize < 3)
         throw std::runtime_error("classifySequenceConvergence: windowSize must be >= 3");
+    // ratio feeds std::log(ratio) and std::pow(ratio, -pFit) below; ratio <= 0
+    // makes log(ratio) NaN/undefined, and ratio == 1 makes it zero, dividing
+    // pEstimates by zero. Same caller-reachable-parameter rationale as above.
+    if (ratio <= 0.0 || ratio == 1.0)
+        throw std::runtime_error("classifySequenceConvergence: ratio must be > 0 and != 1");
 
     const int N = static_cast<int>(V.size());
 
@@ -404,6 +409,13 @@ constexpr Real kPi = 3.14159265358979323846;
 
 Real case3WindowFunction(Real x, Real R, Real delta, DomainSide side)
 {
+    // delta <= 0 makes theta = (pi/2)*(d/delta) below divide by zero (delta
+    // == 0) or flip the taper's sign (delta < 0); guarded explicitly rather
+    // than left as a latent div-by-zero/sign-flip trap, same rationale as
+    // classifySequenceConvergence's ratio guard.
+    if (delta <= 0.0)
+        throw std::runtime_error("case3WindowFunction: delta must be > 0");
+
     // Signed distance beyond the boundary: d > 0 means x is outside the box
     // (beyond the wall), d < 0 means x is inside the trusted region.
     const Real d = (side == DomainSide::Right) ? (x - R) : (R - x);

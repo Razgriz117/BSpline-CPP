@@ -62,7 +62,7 @@ bool inInterval(double x, const std::string &interval);
 // below to guard against that ambiguity ahead of time, since evaluateFunction
 // itself is called on the hot path (once per quadrature point) and does not
 // re-check it.
-double evaluateFunction(std::map<std::string, std::string> function, double x);
+double evaluateFunction(const std::map<std::string, std::string> &function, double x);
 
 // One-time validation (call once per config/potential, NOT per
 // evaluateFunction call): throws std::runtime_error naming the two
