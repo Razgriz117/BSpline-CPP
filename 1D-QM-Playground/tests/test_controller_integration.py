@@ -170,20 +170,57 @@ class TestRunTiseSolverRealSubprocess:
         assert "TISE solver" in str(excinfo.value)
         assert not tise_dir.exists() or not any(tise_dir.iterdir())
 
-    def test_non_unity_mass_raises_and_leaves_no_partial_files(
+    def test_non_unity_mass_now_succeeds(
         self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
     ):
-        """physics.mass/physics.hbar guard-rail (Part C): both fields are
-        documented in config.yaml but were never consumed anywhere --
-        fillBandedMatrices hardcodes mass=1 internally, so a user setting
-        physics.mass to anything else got silent wrong physics with no
-        error. Guard-rail only (not full mass/hbar generalization, which
-        would touch k=sqrt(2E)/computeEAcc/the kinetic-energy term
-        throughout): an honest config error instead."""
+        """physics.mass/physics.hbar generalization (ADR-0017, completes
+        the deferred half of Part C's guard-rail): mass/hbar are now real,
+        honored parameters -- fillBandedMatrices' kinetic-energy term,
+        computeEAcc, and matchAsymptotic's k/eta/A_E all take them
+        explicitly. A non-unity mass no longer raises; it produces real
+        output."""
         with open(tmp_config) as f:
             cfg = yaml.safe_load(f)
         cfg["physics"]["mass"] = 2.0
-        bad_config = tmp_path / "config_non_unity_mass.yaml"
+        good_config = tmp_path / "config_non_unity_mass.yaml"
+        with open(good_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(good_config), tise_dir, binary=tise_solver_binary)
+
+        assert (tise_dir / "eigenvalues.dat").exists()
+
+    def test_non_positive_mass_raises_and_leaves_no_partial_files(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """physics.mass/physics.hbar generalization (ADR-0017): the old
+        guard-rail rejected anything but exactly 1.0; the new one only
+        rejects physically meaningless (non-positive) values, following
+        the same "no partial output" contract as the sibling tests above."""
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["physics"]["mass"] = -1.0
+        bad_config = tmp_path / "config_non_positive_mass.yaml"
+        with open(bad_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_tise_solver(str(bad_config), tise_dir, binary=tise_solver_binary)
+
+        assert "TISE solver" in str(excinfo.value)
+        assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
+    def test_non_positive_hbar_raises_and_leaves_no_partial_files(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """Same as above, for physics.hbar."""
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["physics"]["hbar"] = 0.0
+        bad_config = tmp_path / "config_non_positive_hbar.yaml"
         with open(bad_config, "w") as f:
             yaml.safe_dump(cfg, f)
 

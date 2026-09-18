@@ -148,26 +148,33 @@ int main(int argc, char *argv[])
         std::filesystem::create_directories(args.outputDir);
         const std::filesystem::path outputDir(args.outputDir);
 
-        // physics.mass/physics.hbar guard-rail: both fields are documented
-        // in config.yaml but consumed nowhere -- fillBandedMatrices
-        // hardcodes mass=1 internally (matching computeEAcc's own
-        // mass=1.0 call and k=sqrt(2*E) throughout), so a user setting
-        // either to anything else previously got silent wrong physics with
-        // no error. Guard-rail only, not full generalization (that would
-        // touch the kinetic-energy term/k=sqrt(2E)/computeEAcc throughout)
-        // -- an honest config error instead.
+        // physics.mass/physics.hbar: default to 1.0 (atomic units) if the
+        // block/field is absent -- preserves prior behavior for every
+        // config that never set physics: at all. Previously guard-railed
+        // to exactly 1.0 (ADR-0017 completes the deferred half of G12/
+        // docs/planning/tise-release-readiness-plan.md Part C): every
+        // formula that hardcoded atomic units now takes mass/hbar
+        // explicitly -- fillBandedMatrices' kinetic-energy term,
+        // computeEAcc, and matchAsymptotic's k=sqrt(2*mass*E)/hbar,
+        // eta=mass*C/(hbar^2*k), and energy-normalization amplitude. The
+        // only remaining requirement is physical sanity: zero or negative
+        // mass/hbar is not physically meaningful, unlike the old
+        // "must be exactly 1.0" restriction.
+        tise::Real mass = 1.0;
+        tise::Real hbar = 1.0;
         if (config["physics"])
         {
-            if (config["physics"]["mass"] && config["physics"]["mass"].as<tise::Real>() != 1.0)
-                throw std::runtime_error("physics.mass is fixed at 1.0 internally (fillBandedMatrices' "
-                                          "kinetic-energy term/computeEAcc/k=sqrt(2E) all hardcode it); "
-                                          "setting it to anything else is not yet supported -- remove the "
-                                          "field or set it to 1.0.");
-            if (config["physics"]["hbar"] && config["physics"]["hbar"].as<tise::Real>() != 1.0)
-                throw std::runtime_error("physics.hbar is fixed at 1.0 internally (atomic units throughout "
-                                          "this solver); setting it to anything else is not yet supported -- "
-                                          "remove the field or set it to 1.0.");
+            if (config["physics"]["mass"])
+                mass = config["physics"]["mass"].as<tise::Real>();
+            if (config["physics"]["hbar"])
+                hbar = config["physics"]["hbar"].as<tise::Real>();
         }
+        if (mass <= 0.0)
+            throw std::runtime_error("physics.mass must be positive (got " + std::to_string(mass) +
+                                      "); zero or negative mass is not physically meaningful.");
+        if (hbar <= 0.0)
+            throw std::runtime_error("physics.hbar must be positive (got " + std::to_string(hbar) +
+                                      "); zero or negative hbar is not physically meaningful.");
 
         // B-spline basis parameters.
         const int nNodes = config["bspline"]["n_nodes"].as<int>();
@@ -380,7 +387,7 @@ int main(int argc, char *argv[])
         // Delta (set above, nullopt for the common case) taper the
         // potential near the wall when Case 3 was detected.
         auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, /*L=*/0, potential, sgr.fillDropSet,
-                                                case3RightR, case3RightDelta);
+                                                case3RightR, case3RightDelta, mass, hbar);
 
         // Solve. H, S are passed by value -- solveGeneralizedEigenproblem's
         // internal LAPACK call overwrites its own copies, not these, so H/S
@@ -470,7 +477,7 @@ int main(int argc, char *argv[])
             // minimum inter-node gap, not an average across it -- see
             // minInterNodeGap's own doc comment.
             const tise::Real nodeSpacing = tise::minInterNodeGap(sgr.grid);
-            const tise::Real eAcc = tise::computeEAcc(nodeSpacing, /*mass=*/1.0);
+            const tise::Real eAcc = tise::computeEAcc(nodeSpacing, mass, hbar);
             {
                 std::ostringstream warnOut;
                 if (tise::warnIfContinuumExceedsEAcc(E_max, eAcc, warnOut))
@@ -544,7 +551,7 @@ int main(int argc, char *argv[])
             if (coulombZ)
                 coulombLC = std::make_pair(continuumL, *coulombZ);
             auto ar = tise::matchAsymptotic(bs, states, er, energyGrid, /*R=*/rMax, order, H, S, sgr.fillDropSet,
-                                             /*fineDE=*/1e-3, coulombLC);
+                                             /*fineDE=*/1e-3, coulombLC, 50.0, 0.1, mass, hbar);
 
             std::ofstream phaseShiftsOut(outputDir / "phase_shifts.dat");
             std::vector<std::ofstream> continuumStateFiles;

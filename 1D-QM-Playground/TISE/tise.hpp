@@ -271,12 +271,18 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
 // integrating the raw (possibly irregular/divergent) tail right up to the
 // wall. Left-side windowing is not supported (no current caller needs it).
 // Both nullopt (the default) reproduces plain evaluateFunction, unchanged.
+// `mass`/`hbar`: both default to 1.0 (atomic units); see physics.mass/
+// physics.hbar generalization, ADR-0017. Only the kinetic-energy term
+// (hbar^2/2*mass, replacing the old fixed 1/2 factor) depends on them --
+// `overlap` and `potentialTerm` are mass/hbar-independent.
 std::pair<std::vector<Real>, std::vector<Real>>
 fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                     std::map<std::string, std::string> potential,
                     std::optional<std::vector<int>> dropSet = std::nullopt,
                     std::optional<Real> case3RightR = std::nullopt,
-                    std::optional<Real> case3RightDelta = std::nullopt);
+                    std::optional<Real> case3RightDelta = std::nullopt,
+                    Real mass = 1.0,
+                    Real hbar = 1.0);
 
 // Given the set of BSplines, Hamiltonian, and eigenvectors, solve for:
 // < phi_n | H | B_N > and < phi_n | B_N >, for each eigenvector
@@ -427,13 +433,22 @@ CoulombWaveResult evaluateCoulombFunctions(int l, Real eta, Real rho,
 // R or more extreme l/eta than this project's own configs exercise -- can
 // reach them without recompiling; production callers (tise_solver_main.cpp)
 // currently always use the default.
+// `mass`/`hbar`: both default to 1.0 (atomic units); see physics.mass/
+// physics.hbar generalization, ADR-0017. Feed the continuum wavenumber
+// k=sqrt(2*mass*E)/hbar, the Sommerfeld parameter eta=mass*C/(hbar^2*k),
+// and the energy-normalization amplitude A_E (which picks up an overall
+// sqrt(mass)/hbar factor relative to the atomic-units formula, from the
+// dk/dE=mass/(hbar^2*k) Jacobian converting delta(k-k')- to
+// delta(E-E')-normalization).
 AsymptoticResult matchAsymptotic(const bspline::BSpline &bs, std::vector<std::vector<Real>> states, const EigenResult &eigen, std::vector<Real> grid, Real R,
                                   int order, const std::vector<Real> &Hmat, const std::vector<Real> &Smat,
                                   std::optional<std::vector<int>> dropSet = std::nullopt,
                                   Real fineDE = 1e-3,
                                   std::optional<std::pair<int, Real>> coulombLC = std::nullopt,
                                   Real coulombFarMultiplier = 50.0,
-                                  Real coulombStepSize = 0.1);
+                                  Real coulombStepSize = 0.1,
+                                  Real mass = 1.0,
+                                  Real hbar = 1.0);
 
 // Writes phase_shifts.dat-style output (epsilon_i, delta, dDeltaDE) to `out`,
 // and one continuum_state_NNN.dat-style block (x, psi_E(x)) per energy to
@@ -627,11 +642,13 @@ std::vector<Real> buildStrategicRadialGrid(int nNodes, Real rMin, Real rMax,
 // every one of them "touches" x by this closed-interval test, not just B_1.
 std::vector<int> bSplinesTouchingX(int nNodes, int order, const std::vector<Real> &grid, Real x);
 
-// Analytic hydrogenic energy: E = -1 / (2 * (n + L)^2).
-Real analyticHydrogenEnergy(int n, int L);
+// Analytic hydrogenic energy: E = -mass / (2 * hbar^2 * (n + L)^2). C=1
+// (V=-1/x) baked in, as before; mass/hbar default to 1.0 (atomic units) --
+// see physics.mass/physics.hbar generalization, ADR-0017.
+Real analyticHydrogenEnergy(int n, int L, Real mass = 1.0, Real hbar = 1.0);
 
 // Difference between computed eigenvalue and analytic energy for state n.
-Real eigenvalueError(Real computed, int n, int L);
+Real eigenvalueError(Real computed, int n, int L, Real mass = 1.0, Real hbar = 1.0);
 
 // Extract eigenvector column iEn (1-based) from the column-major evec array
 // and embed it into a zero-padded vector of length nBSplines. Physical
@@ -784,9 +801,14 @@ constexpr int kDefaultContinuumOutputPoints = 301;
 // continuum_state_NNN.dat block (passed through to writeContinuumInfo's
 // `npts`); see kDefaultContinuumOutputPoints above for why its default is
 // what it is.
+// `mass`/`hbar`: both default to 1.0 (atomic units); forwarded to
+// fillBandedMatrices/matchAsymptotic. See physics.mass/physics.hbar
+// generalization, ADR-0017.
 SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
                            Real E_threshold, Real E_max, int N_E,
-                           int continuumOutputPoints = kDefaultContinuumOutputPoints);
+                           int continuumOutputPoints = kDefaultContinuumOutputPoints,
+                           Real mass = 1.0,
+                           Real hbar = 1.0);
 
 // === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
 // Reduce a (possibly non-uniform, possibly containing degenerate/repeated
@@ -807,15 +829,16 @@ Real minInterNodeGap(const std::vector<Real> &grid, Real tol = 1e-12);
 // "Continuum range" entry; see also SDD Sec. 6.4, Sec. 8). States whose
 // half de Broglie wavelength is commensurate with or smaller than the
 // B-spline node spacing cannot be accurately represented:
-//   lambda/2 = pi/k <~ dx_node  ==>  k >~ pi/dx_node  ==>  E >~ pi^2 / (2 m dx_node^2)
+//   lambda/2 = pi/k <~ dx_node  ==>  k >~ pi/dx_node  ==>  E >~ hbar^2 pi^2 / (2 m dx_node^2)
 // The source relation is an asymptotic ("<~"/">~") scaling bound, not an
 // exact equality; this function takes its leading-order coefficient as
 // the concrete E_acc threshold, per this task's closed-form "Done when"
 // criterion -- treat the result as an order-of-magnitude ceiling, not a
 // razor-sharp cutoff. `nodeSpacing` is a single scalar spacing; for a
 // non-uniform grid (see A4's buildStrategicRadialGrid), pass
-// minInterNodeGap(grid) above, not an average.
-Real computeEAcc(Real nodeSpacing, Real mass);
+// minInterNodeGap(grid) above, not an average. `hbar` defaults to 1.0
+// (atomic units); see physics.hbar generalization, ADR-0017.
+Real computeEAcc(Real nodeSpacing, Real mass, Real hbar = 1.0);
 
 // Warns (to warnOut, default stderr -- SDD Sec. 8's "physics warning"
 // class: computation completed, but a result may be unreliable) iff the

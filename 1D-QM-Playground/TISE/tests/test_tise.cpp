@@ -660,6 +660,20 @@ TEST(AnalyticHydrogenEnergyTest, IncreaseWithN)
                   tise::analyticHydrogenEnergy(n,   0));
 }
 
+TEST(AnalyticHydrogenEnergyTest, ScalesWithMassAndInverseHbarSquared)
+{
+    // E = -mass / (2 * hbar^2 * n_eff^2); physics.mass/physics.hbar
+    // generalization, ADR-0017. mass/hbar default to 1.0, matching the
+    // atomic-units-only tests above.
+    double base = tise::analyticHydrogenEnergy(1, 0); // -0.5
+
+    // Doubling mass (hbar fixed): E ~ mass -> doubles (more negative).
+    EXPECT_NEAR(tise::analyticHydrogenEnergy(1, 0, 2.0), base * 2.0, 1e-15);
+
+    // Doubling hbar (mass fixed): E ~ 1/hbar^2 -> quarters (less negative).
+    EXPECT_NEAR(tise::analyticHydrogenEnergy(1, 0, 1.0, 2.0), base / 4.0, 1e-15);
+}
+
 // ---------------------------------------------------------------------------
 // eigenvalueError
 // ---------------------------------------------------------------------------
@@ -668,6 +682,13 @@ TEST(EigenvalueErrorTest, ExactValueGivesZero)
 {
     double exact = tise::analyticHydrogenEnergy(1, 0);
     EXPECT_NEAR(tise::eigenvalueError(exact, 1, 0), 0.0, 1e-15);
+}
+
+TEST(EigenvalueErrorTest, RespectsMassAndHbar)
+{
+    double exact = tise::analyticHydrogenEnergy(1, 0, 2.0, 0.5);
+    EXPECT_NEAR(tise::eigenvalueError(exact, 1, 0, 2.0, 0.5), 0.0, 1e-15);
+    EXPECT_GT(tise::eigenvalueError(exact + 0.001, 1, 0, 2.0, 0.5), 0.0);
 }
 
 TEST(EigenvalueErrorTest, PositiveForEnergyAboveExact)
@@ -815,6 +836,45 @@ TEST_F(FillBandedMatricesTest, OverlapMatchesDirectIntegral)
     // S(2,2) in 1-based B-spline is S(1,1) in 1-based nEn matrix (iBs=2)
     double direct = bs.integral(unity, 2, 2);
     EXPECT_NEAR(bandElem(Smat, 1, 1), direct, 1e-11);
+}
+
+TEST_F(FillBandedMatricesTest, KineticTermScalesWithMassAndHbarOverlapUnchanged)
+{
+    const double mass = 2.0, hbar = 0.5;
+    std::map<std::string, std::string> potential = {
+        {"[0.1, 5.0)",  "x"},
+        {"[5.0, 10.0]", "x * x - 20.0"}
+    };
+    auto [Hgen, Sgen] = tise::fillBandedMatrices(bs, nEn, order, L, potential,
+                                                  std::nullopt, std::nullopt, std::nullopt,
+                                                  mass, hbar);
+
+    // Overlap S is mass/hbar-independent.
+    for (int i = 1; i <= nEn; ++i)
+        for (int j = i; j <= std::min(i + order - 1, nEn); ++j)
+            EXPECT_NEAR(bandElem(Sgen, i, j), bandElem(Smat, i, j), 1e-12)
+                << "S changed with mass/hbar at (" << i << "," << j << ")";
+
+    // H's kinetic block scales as hbar^2/(2*mass); the potential block is
+    // unaffected. Isolate the kinetic integral directly (as
+    // FillBandedMatricesRadialPotentialTest does for the potential term)
+    // and cross-check against SetUp()'s atomic-units (mass=hbar=1) Hmat,
+    // whose kinetic factor is the fixed 1/2 from fillBandedMatrices' own
+    // formula before this generalization.
+    const double scale = (hbar * hbar) / (2.0 * mass);
+    auto fUni = [](double, const double *) { return 1.0; };
+    for (int i = 1; i <= nEn; ++i)
+    {
+        for (int j = i; j <= std::min(i + order - 1, nEn); ++j)
+        {
+            int iBs1 = i + 1, iBs2 = j + 1;
+            double kineticIntegral = bs.integral(fUni, iBs1, iBs2, 1, 1);
+            double potentialTerm   = bandElem(Hmat, i, j) - kineticIntegral / 2.0;
+            double expected        = scale * kineticIntegral + potentialTerm;
+            EXPECT_NEAR(bandElem(Hgen, i, j), expected, 1e-9)
+                << "H kinetic scaling wrong at (" << i << "," << j << ")";
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2483,6 +2543,17 @@ TEST(ComputeEAccTest, ScalesInverselyWithMassAndSpacingSquared)
     EXPECT_NEAR(tise::computeEAcc(0.5, 2.0), base / 2.0, 1e-12);
 }
 
+TEST(ComputeEAccTest, ScalesWithHbarSquared)
+{
+    double base = tise::computeEAcc(0.5, 1.0, 1.0);
+
+    // Doubling hbar (nodeSpacing/mass fixed): E_acc ~ hbar^2 -> quadruples.
+    EXPECT_NEAR(tise::computeEAcc(0.5, 1.0, 2.0), base * 4.0, 1e-12);
+
+    // hbar defaults to 1.0 when omitted, matching the two-arg tests above.
+    EXPECT_NEAR(tise::computeEAcc(0.5, 1.0), base, 1e-12);
+}
+
 // ---------------------------------------------------------------------------
 // warnIfContinuumExceedsEAcc
 // ---------------------------------------------------------------------------
@@ -2860,6 +2931,116 @@ TEST_F(FreeParticleContinuumTest, WavefunctionIsZeroAtLeftWall)
     in >> x >> psi;
     EXPECT_NEAR(x, rMin, 1e-9);
     EXPECT_NEAR(psi, 0.0, 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// matchAsymptotic at mass != 1 / hbar != 1 (physics.mass/physics.hbar
+// generalization, ADR-0017): same free-particle setup as
+// FreeParticleContinuumTest above, but built with a non-atomic-units
+// mass/hbar. The free particle's phase shift is delta=0 identically,
+// regardless of units -- a strong, cheap mass/hbar-independence anchor.
+// The bound spectrum and A_E amplitude both have known general-units
+// closed forms (derived from k=sqrt(2*mass*E)/hbar and the energy-
+// normalization Jacobian sqrt(dk/dE)=sqrt(mass/(hbar^2*k))), checked
+// directly rather than by comparison against a second atomic-units run.
+// ---------------------------------------------------------------------------
+
+class FreeParticleContinuumGeneralUnitsTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        std::vector<double> gridPts(nNodes);
+        for (int i = 0; i < nNodes; ++i)
+            gridPts[i] = rMin + (rMax - rMin) * i / (nNodes - 1);
+        ASSERT_EQ(bs.init(nNodes, order, gridPts), 0);
+        nBSplines = bs.getNBSplines();
+        nEn       = nBSplines - 2;
+
+        std::map<std::string, std::string> potential = {
+            {"[" + std::to_string(rMin) + ", " + std::to_string(rMax) + "]", "0"}
+        };
+        std::tie(H, S) = tise::fillBandedMatrices(bs, nEn + 1, order, L, potential, std::vector<int>{1},
+                                                   std::nullopt, std::nullopt, mass, hbar);
+        eigen  = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
+        states = tise::buildContinuumState(order, nEn, H, S, eigen, energyGrid);
+    }
+
+    bspline::BSpline bs;
+    int nNodes = 51, order = 12, L = 0;
+    double rMin = 0.0, rMax = 100.0;
+    double mass = 2.0, hbar = 0.5; // deliberately not a combination that
+                                    // cancels back to the atomic-units answer
+    int nBSplines = 0, nEn = 0;
+    tise::EigenResult eigen;
+    std::vector<double> energyGrid = {0.0125};
+    std::vector<std::vector<double>> states;
+    std::vector<double> H, S;
+};
+
+TEST_F(FreeParticleContinuumGeneralUnitsTest, EigenvaluesMatchGeneralBoxFormula)
+{
+    double boxLength = rMax - rMin;
+    for (int i = 0; i < nEn && i < 20; ++i)
+    {
+        int n = i + 1;
+        double expected = hbar * hbar * (n * n) * M_PI * M_PI / (2 * mass * boxLength * boxLength);
+        EXPECT_NEAR(eigen.values[i], expected, 1e-9);
+    }
+}
+
+TEST_F(FreeParticleContinuumGeneralUnitsTest, PhaseShiftMatchesZeroScatteringAtGeneralUnits)
+{
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax, order, H, S,
+                                     std::nullopt, 1e-3, std::nullopt, 50.0, 0.1, mass, hbar);
+    EXPECT_NEAR(wrapPhaseModPi(ar.delta[0]), 0.0, 1e-6);
+}
+
+// Mirrors FreeParticleContinuumTest.WrittenWavefunctionMatchesAnalyticSine,
+// generalized to mass != 1 / hbar != 1: ar.A_E[0] alone is NOT the closed-
+// form target amplitude (it also absorbs the resolvent construction's own
+// basis-dependent internal scale, fixed by B_N's coefficient being pinned
+// to 1, not by a unit-normalization step) -- only the WRITTEN wavefunction
+// A_E*psi_num(x), which the value+derivative match is designed to pin to
+// the target form by construction, is directly comparable to the closed
+// form sqrt(2*mass/(pi*hbar^2*k))*sin(kx).
+TEST_F(FreeParticleContinuumGeneralUnitsTest, WrittenWavefunctionMatchesGeneralAnalyticSine)
+{
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax, order, H, S,
+                                     std::nullopt, 1e-3, std::nullopt, 50.0, 0.1, mass, hbar);
+
+    std::ostringstream phaseOut;
+    std::ostringstream stateOut;
+    std::vector<std::ostream *> stateOutPtrs = {&stateOut};
+    const int npts = 200;
+    tise::writeContinuumInfo(phaseOut, bs, ar, energyGrid, states, stateOutPtrs, npts, rMin, rMax, eigen);
+
+    const double k = std::sqrt(2.0 * mass * energyGrid[0]) / hbar;
+    const double A = std::sqrt(2.0 * mass / (M_PI * hbar * hbar * k));
+
+    // Overall sign is not physically meaningful -- see the atomic-units
+    // version of this test for the same aggregate-correlation approach.
+    std::vector<double> xs, psis;
+    {
+        std::istringstream probe(stateOut.str());
+        double x, psi;
+        while (probe >> x >> psi) { xs.push_back(x); psis.push_back(psi); }
+    }
+    double correlation = 0.0;
+    for (std::size_t i = 0; i < xs.size(); ++i)
+        correlation += psis[i] * A * std::sin(k * xs[i]);
+    const double sign = correlation >= 0.0 ? 1.0 : -1.0;
+
+    std::istringstream in(stateOut.str());
+    double x, psi;
+    int count = 0;
+    while (in >> x >> psi)
+    {
+        double expected = sign * A * std::sin(k * x);
+        EXPECT_NEAR(psi, expected, 5e-3) << "at x=" << x;
+        ++count;
+    }
+    EXPECT_EQ(count, npts);
 }
 
 // A potential-agnostic self-consistency identity: writeContinuumInfo's
@@ -3241,6 +3422,26 @@ TEST(SolveTISETest, GroundStateStillMatchesAnalyticHydrogen)
     std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
     auto sol = tise::solveTISE(41, 8, 0.0, 40.0, 0, potential, 0.5, 1.0, 2);
     EXPECT_NEAR(sol.eigen.values[0], tise::analyticHydrogenEnergy(1, 0), 1e-4);
+}
+
+TEST(SolveTISETest, GroundStateMatchesAnalyticHydrogenAtNonUnitMassAndHbar)
+{
+    // physics.mass/physics.hbar generalization, ADR-0017: solveTISE is the
+    // all-in-one entry point used by unit tests and the legacy TISE/main.cpp
+    // driver -- confirm it threads mass/hbar through to fillBandedMatrices
+    // the same way tise_solver_main.cpp does. mass=0.5, hbar=1.5 (rather
+    // than e.g. mass=2, hbar=0.5) deliberately keeps the hydrogenic Bohr
+    // radius a0'=hbar^2/mass=4.5 >= the atomic-units a0=1, so the same
+    // 41-node grid tuned for the atomic-units case below stays at least as
+    // well-resolved -- a smaller a0' would shrink the true wavefunction
+    // well below this grid's resolution and fail on a basis-size artifact,
+    // not a formula bug (bound-state resolution needs match the physical
+    // length scale, unlike the free particle's purely geometric spectrum).
+    const tise::Real mass = 0.5, hbar = 1.5;
+    std::map<std::string, std::string> potential = {{"(0, 40]", "-1/x"}};
+    auto sol = tise::solveTISE(41, 8, 0.0, 40.0, 0, potential, 0.5, 1.0, 2,
+                                tise::kDefaultContinuumOutputPoints, mass, hbar);
+    EXPECT_NEAR(sol.eigen.values[0], tise::analyticHydrogenEnergy(1, 0, mass, hbar), 1e-4);
 }
 
 TEST(SolveTISETest, AllEigenvaluesFinite)

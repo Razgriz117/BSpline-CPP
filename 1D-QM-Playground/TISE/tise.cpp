@@ -559,7 +559,9 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                     std::map<std::string, std::string> potential,
                     std::optional<std::vector<int>> dropSet,
                     std::optional<Real> case3RightR,
-                    std::optional<Real> case3RightDelta)
+                    std::optional<Real> case3RightDelta,
+                    Real mass,
+                    Real hbar)
 {
     const int nBSplines = bs.getNBSplines();
     const ColumnMap map = resolveDropSet(nBSplines, nEn, dropSet);
@@ -613,7 +615,7 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                 continue;
 
             Real overlap       = bs.integral(fUni, iBs1, iBs2);
-            Real kinetic       = bs.integral(fUni, iBs1, iBs2, 1, 1) / 2.0;
+            Real kinetic       = (hbar * hbar / (2.0 * mass)) * bs.integral(fUni, iBs1, iBs2, 1, 1);
             Real potentialTerm = bs.integral(fPot, iBs1, iBs2, 0, 0, parvec);
 
             const int row = order + col1 - col2;
@@ -913,7 +915,9 @@ AsymptoticResult matchAsymptotic(
     Real fineDE,
     std::optional<std::pair<int, Real>> coulombLC,
     Real coulombFarMultiplier,
-    Real coulombStepSize
+    Real coulombStepSize,
+    Real mass,
+    Real hbar
 )
 {
     AsymptoticResult result;
@@ -950,26 +954,33 @@ AsymptoticResult matchAsymptotic(
     // branch's atan/sqrt formulas exactly at eta=0 (F_0(0,rho)=sin(rho),
     // G_0(0,rho)=cos(rho)), confirmed during implementation.
     //
-    // eta = C/k is recomputed fresh from k EVERY call (not hoisted/fixed
-    // once outside this lambda) -- eta genuinely depends on the energy via
-    // k=sqrt(2E), which varies across the energy grid this lambda is
-    // called once per point of.
+    // eta = mass*C/(hbar^2*k) is recomputed fresh from k EVERY call (not
+    // hoisted/fixed once outside this lambda) -- eta genuinely depends on
+    // the energy via k=sqrt(2*mass*E)/hbar, which varies across the energy
+    // grid this lambda is called once per point of. A_E's leading
+    // 2.0/M_PI (flat) / 2.0/(M_PI*k) (Coulomb) factor from the atomic-units
+    // (mass=hbar=1) formula becomes 2*mass/(M_PI*hbar^2) / 2*mass/(M_PI*hbar^2*k)
+    // in general -- the sqrt(mass)/hbar factor is exactly the
+    // sqrt(dk/dE)=sqrt(mass/(hbar^2*k)) Jacobian converting the
+    // delta(k-k')-normalized flat-tail form to delta(E-E')-normalization
+    // (docs/SDD.md's target formula, generalized; see ADR-0017).
     auto amplitudeAndDelta = [&](Real psi_R, Real psiPrime_R, Real k) -> std::pair<Real, Real> {
         if (!coulombLC)
         {
-            const Real A_E = std::sqrt((2.0 / M_PI) / (k * psi_R * psi_R + psiPrime_R * psiPrime_R / k));
+            const Real A_E = std::sqrt((2.0 * mass / (M_PI * hbar * hbar)) /
+                                        (k * psi_R * psi_R + psiPrime_R * psiPrime_R / k));
             const Real delta = std::atan(k * psi_R / psiPrime_R) - k * R;
             return {A_E, delta};
         }
         const auto [l, C] = *coulombLC;
-        const Real eta = C / k;
+        const Real eta = mass * C / (hbar * hbar * k);
         const CoulombWaveResult cw =
             evaluateCoulombFunctions(l, eta, k * R, coulombFarMultiplier, coulombStepSize);
         const Real psiPrimeOverK = psiPrime_R / k;
         const Real W = cw.F * cw.Gprime - cw.G * cw.Fprime; // ~1 by construction; computed, not assumed
         const Real alpha = (psi_R * cw.Gprime - psiPrimeOverK * cw.G) / W; // A_E*cos(delta)
         const Real beta = (psiPrimeOverK * cw.F - psi_R * cw.Fprime) / W; // A_E*sin(delta)
-        const Real A_E = std::sqrt((2.0 / (M_PI * k)) / (alpha * alpha + beta * beta));
+        const Real A_E = std::sqrt((2.0 * mass / (M_PI * hbar * hbar * k)) / (alpha * alpha + beta * beta));
         const Real delta = std::atan2(beta, alpha);
         return {A_E, delta};
     };
@@ -987,7 +998,7 @@ AsymptoticResult matchAsymptotic(
         Real psi_R = bs.eval(R, fc.data(), fc.size(), 0);
         Real psiPrime_R = bs.eval(R, fc.data(), fc.size(), 1);
 
-        Real k = sqrt(2 * grid[E_idx]);
+        Real k = std::sqrt(2.0 * mass * grid[E_idx]) / hbar;
 
         std::tie(result.A_E[E_idx], result.delta[E_idx]) = amplitudeAndDelta(psi_R, psiPrime_R, k);
     }
@@ -1011,7 +1022,7 @@ AsymptoticResult matchAsymptotic(
         std::vector<Real> fc = continuumStateToBSplineCoeffs(s, eigen, nBSplines, physicalOf);
         Real psi_R = bs.eval(R, fc.data(), fc.size(), 0);
         Real psiPrime_R = bs.eval(R, fc.data(), fc.size(), 1);
-        Real k = std::sqrt(2 * E);
+        Real k = std::sqrt(2.0 * mass * E) / hbar;
         return amplitudeAndDelta(psi_R, psiPrime_R, k).second;
     };
 
@@ -1430,15 +1441,15 @@ std::vector<int> bSplinesTouchingX(int nNodes, int order, const std::vector<Real
     return touching;
 }
 
-Real analyticHydrogenEnergy(int n, int L)
+Real analyticHydrogenEnergy(int n, int L, Real mass, Real hbar)
 {
     const double n_eff = static_cast<double>(n + L);
-    return -1.0 / (2.0 * n_eff * n_eff);
+    return -mass / (2.0 * hbar * hbar * n_eff * n_eff);
 }
 
-Real eigenvalueError(Real computed, int n, int L)
+Real eigenvalueError(Real computed, int n, int L, Real mass, Real hbar)
 {
-    return computed - analyticHydrogenEnergy(n, L);
+    return computed - analyticHydrogenEnergy(n, L, mass, hbar);
 }
 
 std::vector<Real> eigenstateCoefficients(const std::vector<Real> &evec,
@@ -1641,7 +1652,8 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
 }
 
 SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
-                           Real E_threshold, Real E_max, int N_E, int continuumOutputPoints)
+                           Real E_threshold, Real E_max, int N_E, int continuumOutputPoints,
+                           Real mass, Real hbar)
 {
     auto sgr = buildStrategicGridAndDropSet(nNodes, order, rMin, rMax, potential);
 
@@ -1652,13 +1664,15 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
 
     const int nEnFilled = sgr.nEnBound + 1;
 
-    auto [H, S] = fillBandedMatrices(sgr.bs, nEnFilled, order, L, potential, sgr.fillDropSet);
+    auto [H, S] = fillBandedMatrices(sgr.bs, nEnFilled, order, L, potential, sgr.fillDropSet,
+                                      std::nullopt, std::nullopt, mass, hbar);
     EigenResult er = solveGeneralizedEigenproblem(H, S, sgr.nEnBound, order);
 
     auto energyGrid = buildEnergyGrid(E_threshold, E_max, N_E);
     std::vector<std::vector<tise::Real>> states =
         buildContinuumState(order, sgr.nEnBound, H, S, er, energyGrid, sgr.nBSplines, sgr.fillDropSet);
-    AsymptoticResult ar = matchAsymptotic(sgr.bs, states, er, energyGrid, rMax, order, H, S, sgr.fillDropSet);
+    AsymptoticResult ar = matchAsymptotic(sgr.bs, states, er, energyGrid, rMax, order, H, S, sgr.fillDropSet,
+                                           1e-3, std::nullopt, 50.0, 0.1, mass, hbar);
 
     std::ofstream phaseShiftsOut("phase_shifts.dat");
     std::vector<std::ofstream> continuumStateFiles;
@@ -1702,15 +1716,16 @@ Real minInterNodeGap(const std::vector<Real> &grid, Real tol)
     return minGap;
 }
 
-Real computeEAcc(Real nodeSpacing, Real mass)
+Real computeEAcc(Real nodeSpacing, Real mass, Real hbar)
 {
-    // E = pi^2 / (2 * mass * nodeSpacing^2), straight from the derivation in
-    // this function's own tise.hpp doc comment (k >~ pi/dx_node, E = k^2/2m).
-    // The `2.0` here is the standard kinetic-energy mass factor from
-    // E = p^2/(2m) = (hbar*k)^2/(2m) in atomic units (hbar=1) -- a fixed
-    // term of the physics formula itself, not a tunable numerical knob, so
-    // it stays a literal rather than becoming a named constant/parameter.
-    return kPi * kPi / (2.0 * mass * nodeSpacing * nodeSpacing);
+    // E = hbar^2 * pi^2 / (2 * mass * nodeSpacing^2), straight from the
+    // derivation in this function's own tise.hpp doc comment
+    // (k >~ pi/dx_node, E = (hbar*k)^2/2m). The `2.0` here is the standard
+    // kinetic-energy mass factor from E = p^2/(2m) = (hbar*k)^2/(2m) -- a
+    // fixed term of the physics formula itself, not a tunable numerical
+    // knob, so it stays a literal rather than becoming a named
+    // constant/parameter.
+    return hbar * hbar * kPi * kPi / (2.0 * mass * nodeSpacing * nodeSpacing);
 }
 
 bool warnIfContinuumExceedsEAcc(Real eMax, Real eAcc, std::ostream &warnOut)

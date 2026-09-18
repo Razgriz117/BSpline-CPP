@@ -531,6 +531,79 @@ class TestKnownSolutionConfigFilesLoadAndRun:
             assert row.energy == pytest.approx(expected, abs=1e-3)
 
 
+class TestFreeParticleGeneralUnitsRealSubprocess:
+    """physics.mass/physics.hbar generalization (ADR-0017): same free
+    particle (V=0) as TestFreeParticleContinuumPhysics above, but loaded
+    from tests/free_particle_general_units.yaml, the first tests/*.yaml
+    reference config to ever set a non-default physics: block
+    (mass=2.0, hbar=0.5 -- deliberately not a combination that cancels
+    back to the atomic-units answer). E_max=0.0625 is rescaled by
+    hbar^2/mass=0.25 relative to free_particle.yaml's own E_max=0.5, so
+    the physical k-range (and therefore basis-resolution behavior) is
+    identical to that already-characterized run
+    (docs/tests/reports/f4e8359/free_particle.md).
+
+    Bound eigenvalues: E_n = hbar^2*n^2*pi^2/(2*mass*L^2). Continuum phase
+    shift: still delta=0 exactly (mass/hbar-independent invariant -- a
+    flat potential scatters nothing, regardless of units). Continuum
+    wavefunction amplitude: A = sqrt(2*mass/(pi*hbar^2*k)), the
+    generalized energy-normalization formula (derived from the
+    delta(k-k')->delta(E-E') Jacobian dk/dE=mass/(hbar^2*k))."""
+
+    MASS = 2.0
+    HBAR = 0.5
+
+    def test_bound_eigenvalues_match_general_box_formula(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("free_particle_general_units", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        L = 100.0  # bspline.domain width
+        for row in data.eigenvalues[:20]:
+            n = row.index + 1
+            expected = (self.HBAR**2) * (n**2) * (math.pi**2) / (2 * self.MASS * L**2)
+            assert row.energy == pytest.approx(expected, abs=1e-9)
+
+    def test_phase_shift_matches_zero_scattering_at_general_units(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("free_particle_general_units", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.phase_shifts) == 5  # free_particle_general_units.yaml's n_energies
+        for row in data.phase_shifts:
+            assert math.sin(row.delta) == pytest.approx(0.0, abs=1e-3)
+
+    def test_continuum_wavefunction_matches_general_analytic_sine(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("free_particle_general_units", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert len(data.continuum_states) == 5
+        for (index, points), phase_row in zip(data.continuum_states, data.phase_shifts):
+            E = phase_row.energy
+            k = math.sqrt(2 * self.MASS * E) / self.HBAR
+            amplitude = math.sqrt(2 * self.MASS / (math.pi * self.HBAR**2 * k))
+
+            correlation = sum(p.psi * amplitude * math.sin(k * p.x) for p in points)
+            sign = 1.0 if correlation >= 0 else -1.0
+
+            for point in points:
+                expected = sign * amplitude * math.sin(k * point.x)
+                assert point.psi == pytest.approx(expected, abs=5e-3), (
+                    f"continuum state {index} at x={point.x}: got {point.psi}, expected {expected}"
+                )
+            assert points[0].psi == pytest.approx(0.0, abs=1e-9)
+
+
 class TestFiniteSquareWellRealSubprocess:
     """finite_square_well.yaml had ZERO test coverage before this -- first
     real-subprocess physics validation. V0=1.0, a=10.0 attractive well;

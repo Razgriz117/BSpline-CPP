@@ -375,7 +375,7 @@ $$\rho(E) = \frac{r_\text{max}}{\pi\sqrt{2E}}$$
 
 and the highest continuum state reached is approximately $E_\text{max} \sim \frac{1}{2}\left(\frac{N_\text{cont}\pi}{r_\text{max}}\right)^2$ where $N_\text{cont}$ is the number of continuum pseudostates.
 
-For TDSE calculations the required continuum range is set by the laser field. For a monochromatic field of peak intensity $I$ and frequency $\omega$, the ponderomotive energy is $U_p = I/4\omega^2$ (atomic units), and the relevant energy ranges are:
+For TDSE calculations the required continuum range is set by the laser field. For a monochromatic field of peak intensity $I$ and frequency $\omega$, the ponderomotive energy is $U_p = I/4\omega^2$ (atomic units; this formula assumes $\hbar=m=1$ and is not re-derived here for general `physics.mass`/`physics.hbar`, ADR-0017 — TDSE-dependent, so out of scope for that work), and the relevant energy ranges are:
 
 - **Above-threshold ionization (ATI) cutoff:** $\approx 2U_p + I_p$ (direct electrons), $10U_p + I_p$ (rescattered)
 - **High-harmonic generation (HHG) cutoff:** $\approx 3.17U_p + I_p$

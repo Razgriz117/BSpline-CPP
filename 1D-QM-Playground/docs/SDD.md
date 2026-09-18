@@ -822,8 +822,8 @@ classDiagram
 
 | Field | Type | Description |
 |---|---|---|
-| `mass` | float | Particle mass (`1.0` for atomic units) |
-| `hbar` | float | Reduced Planck constant (`1.0` for atomic units) |
+| `mass` | float | Particle mass, must be positive (default `1.0`, atomic units; ADR-0017) |
+| `hbar` | float | Reduced Planck constant, must be positive (default `1.0`, atomic units; ADR-0017) |
 
 **`bspline`** (shared by all solvers)
 
@@ -1176,7 +1176,7 @@ Proposed fresh — no existing convention to migrate:
 | SDD | Software Design Document — this document |
 | REQ-F / REQ-NF | Functional / Non-Functional Requirement identifier ([§3](#3-requirements)) |
 | ADR | Architecture Decision Record; a recorded decision to defer a design alternative (`docs/adr/`) |
-| Atomic units | Unit system with $\hbar = m = 1$; used throughout (`physics.hbar`, `physics.mass`) |
+| Atomic units | Unit system with $\hbar = m = 1$; the default (`physics.hbar`, `physics.mass`), but any positive value is honored throughout the TISE solver (ADR-0017) |
 | B-spline | A piecewise polynomial basis function of order $k$, nonzero over exactly $k$ consecutive knot intervals |
 | Knot / breakpoint | A point in the spatial grid where B-spline pieces join; multiplicity controls continuity across it |
 | de Boor recursion | The recursive construction of order-$k$ B-splines from order-$(k-1)$ B-splines (Figure 10) |
@@ -1396,7 +1396,7 @@ $$\rho(E) = \frac{r_\text{max}}{\pi\sqrt{2E}}$$
 
 and the highest continuum state reached is approximately $E_\text{max} \sim \frac{1}{2}\left(\frac{N_\text{cont}\pi}{r_\text{max}}\right)^2$ where $N_\text{cont}$ is the number of continuum pseudostates.
 
-For TDSE calculations the required continuum range is set by the laser field. For a monochromatic field of peak intensity $I$ and frequency $\omega$, the ponderomotive energy is $U_p = I/4\omega^2$ (atomic units), and the relevant energy ranges are:
+For TDSE calculations the required continuum range is set by the laser field. For a monochromatic field of peak intensity $I$ and frequency $\omega$, the ponderomotive energy is $U_p = I/4\omega^2$ (atomic units; this formula assumes $\hbar=m=1$ and is not re-derived here for general `physics.mass`/`physics.hbar`, ADR-0017 — TDSE-dependent, so out of scope for that work), and the relevant energy ranges are:
 
 - **Above-threshold ionization (ATI) cutoff:** $\approx 2U_p + I_p$ (direct electrons), $10U_p + I_p$ (rescattered)
 - **High-harmonic generation (HHG) cutoff:** $\approx 3.17U_p + I_p$

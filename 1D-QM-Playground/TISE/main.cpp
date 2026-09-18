@@ -82,7 +82,8 @@ int main(int argc, char *argv[])
     try
     {
         sol = tise::solveTISE(BS_NNODS, BS_ORDER, BS_GRMIN, BS_GRMAX, L, potential,
-                              E_THRESHOLD, E_MAX, N_E);
+                              E_THRESHOLD, E_MAX, N_E, tise::kDefaultContinuumOutputPoints,
+                              PARTICLE_MASS, HBAR);
     }
     catch (const std::exception &e)
     {
@@ -108,7 +109,7 @@ int main(int argc, char *argv[])
     for (iEn = 1; iEn <= nEn; ++iEn)
     {
         double eig = sol.eigen.values[iEn - 1];
-        double err = tise::eigenvalueError(eig, iEn, L);
+        double err = tise::eigenvalueError(eig, iEn, L, PARTICLE_MASS, HBAR);
         if (err > ERROR_THRESHOLD) break;
 
         std::cout << std::setw(4) << iEn << "  "
