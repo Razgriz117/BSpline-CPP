@@ -134,9 +134,7 @@ That's the whole lesson for adding a piece: split the domain, give each sub-inte
 
 #### Domain interval syntax
 
-`[`/`]` = inclusive bound, `(`/`)` = exclusive bound, in any combination: `[a,b]`, `(a,b)`, `[a,b)`, `(a,b]`. `inf`/`infinity` (case-insensitive) is a valid bound, e.g. `(0, inf)`.
-
-> **Gotcha — write bounds as plain decimals, not scientific notation.** `python3 controller.py`'s config validation uses Python's `float()` for interval bounds, which happily accepts `"1e5"`. The C++ solver's interval parser does not — it only accepts plain decimal notation. A domain like `'[0, 1e5]'` **passes Python-side validation and then crashes the actual solve**: `tise_solver: Invalid interval: [0, 1e5]`. Write `100000` instead.
+`[`/`]` = inclusive bound, `(`/`)` = exclusive bound, in any combination: `[a,b]`, `(a,b)`, `[a,b)`, `(a,b]`. `inf`/`infinity` (case-insensitive) is a valid bound, e.g. `(0, inf)`. Numeric bounds accept scientific notation (e.g. `1e5`, `-1.5E-3`), matching what Python's `float()` accepts on the config-validation side.
 
 #### Tiling: pieces must exactly cover your `bspline.domain`
 
@@ -316,8 +314,7 @@ Quick task → section pointers, once you've already got a working file and want
 | `potential does not cover domain lower/upper bound ...` | A potential piece doesn't reach the box edge. | [§3.4](#34-potential) tiling |
 | `gap or overlap between potential pieces ...: ... does not meet ...` | Two adjacent pieces leave a gap. | [§3.4](#34-potential) tiling |
 | `gap or overlap between potential pieces ...: both are inclusive at shared boundary ...` | Two adjacent pieces overlap at a shared point (both inclusive). | [§3.4](#34-potential) tiling — use one inclusive, one exclusive |
-| `tise_solver: Function domain does not cover x = <x>` | A gap the Python-side check didn't catch (e.g. it slipped past because the C++ interval parser rejected a bound Python accepted — see the scientific-notation gotcha below). | [§3.4](#34-potential) |
-| `tise_solver: Invalid interval: [0, 1e5]` | Domain bound used scientific notation; Python's validator accepts it, the C++ parser doesn't. | [§3.4](#34-potential) — write plain decimals |
+| `tise_solver: Function domain does not cover x = <x>` | A gap the Python-side check didn't catch. | [§3.4](#34-potential) |
 | `overlapping potential piece domains: '<a>' and '<b>' both cover x=<x>` | The C++ solver's own independent overlap re-check caught something. | [§3.4](#34-potential) tiling |
 | `tise.continuum.n_energies must be a positive integer` | `n_energies` is missing, zero, or negative. | [§3.6](#36-tisecontinuum) |
 | `physics.mass/physics.hbar must be positive (got ...)` | `physics:` block present with a zero or negative value. | [§3.2](#32-physics) — use a positive value |

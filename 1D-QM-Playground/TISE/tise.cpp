@@ -80,7 +80,7 @@ struct ParsedInterval
 ParsedInterval parseInterval(const std::string& interval)
 {
     static const std::regex re(
-        R"(^\s*([\[\(])\s*(-?(?:\d+(?:\.\d+)?)|[+-]?(?:inf|infinity))\s*,\s*(-?(?:\d+(?:\.\d+)?)|[+-]?(?:inf|infinity))\s*([\]\)])\s*$)",
+        R"(^\s*([\[\(])\s*(-?(?:\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|[+-]?(?:inf|infinity))\s*,\s*(-?(?:\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|[+-]?(?:inf|infinity))\s*([\]\)])\s*$)",
         std::regex_constants::icase
     );
 

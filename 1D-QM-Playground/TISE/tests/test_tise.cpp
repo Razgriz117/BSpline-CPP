@@ -149,6 +149,15 @@ TEST(InIntervalTest, InfinityBounds)
     EXPECT_TRUE(tise::inInterval(1e10, "[0, infinity)"));
 }
 
+TEST(InIntervalTest, ScientificNotationBounds)
+{
+    EXPECT_TRUE(tise::inInterval(50000.0, "[0, 1e5]"));
+    EXPECT_FALSE(tise::inInterval(150000.0, "[0, 1e5]"));
+    EXPECT_TRUE(tise::inInterval(0.002, "(1.5e-3, 2E4)"));
+    EXPECT_FALSE(tise::inInterval(0.0015, "(1.5e-3, 2E4)"));
+    EXPECT_TRUE(tise::inInterval(-1e5, "[-1E5, 0]"));
+}
+
 TEST(InIntervalTest, ThrowsOnMalformedString)
 {
     EXPECT_THROW(tise::inInterval(1.0, "not an interval"), std::runtime_error);
