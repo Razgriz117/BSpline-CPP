@@ -233,6 +233,16 @@ int main(int argc, char *argv[])
             n_energies  = validateNEnergies(continuumNode);
             E_threshold = continuumNode["E_threshold"].as<tise::Real>();
             E_max       = continuumNode["E_max"].as<tise::Real>();
+            // buildEnergyGrid (tise.hpp) samples the ascending window
+            // [E_threshold, E_max]; E_max <= E_threshold would silently
+            // yield a degenerate (equal) or descending (reversed) grid
+            // instead of erroring -- and downstream code assumes ascending
+            // order (e.g. the flat-asymptote check below reads
+            // energyGrid.front() as the SMALLEST requested energy).
+            if (E_max <= E_threshold)
+                throw std::runtime_error(
+                    "tise.continuum.E_max must be greater than E_threshold (got E_threshold=" +
+                    std::to_string(E_threshold) + ", E_max=" + std::to_string(E_max) + ")");
             n_pts       = continuumNode["n_pts"].as<int>();
             // Angular momentum for Coulomb-tail continuum matching (ADR-0013,
             // supersedes ADR-0010). Defaults to 0 (s-wave) -- required

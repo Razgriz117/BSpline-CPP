@@ -184,7 +184,7 @@ tise:
 ```
 
 - `enabled` — if omitted or `false`, none of the rest of this block matters.
-- `E_threshold`/`E_max` — the energy range to sample. **Nothing checks that `E_max > E_threshold`** — get this backwards and you'll get a degenerate or empty energy grid with no diagnostic.
+- `E_threshold`/`E_max` — the energy range to sample. `E_max` must be strictly greater than `E_threshold`, or the solver refuses to run: `tise.continuum.E_max must be greater than E_threshold (got E_threshold=..., E_max=...)`.
 - `n_energies` — must be a positive integer, or the solver refuses to run: `tise.continuum.n_energies must be a positive integer`.
 - `n_pts` — spatial resolution of each `continuum_state_NNN.dat` output file.
 
@@ -317,6 +317,7 @@ Quick task → section pointers, once you've already got a working file and want
 | `tise_solver: Function domain does not cover x = <x>` | A gap the Python-side check didn't catch. | [§3.4](#34-potential) |
 | `overlapping potential piece domains: '<a>' and '<b>' both cover x=<x>` | The C++ solver's own independent overlap re-check caught something. | [§3.4](#34-potential) tiling |
 | `tise.continuum.n_energies must be a positive integer` | `n_energies` is missing, zero, or negative. | [§3.6](#36-tisecontinuum) |
+| `tise.continuum.E_max must be greater than E_threshold (got ...)` | `E_max` is equal to or less than `E_threshold`. | [§3.6](#36-tisecontinuum) |
 | `physics.mass/physics.hbar must be positive (got ...)` | `physics:` block present with a zero or negative value. | [§3.2](#32-physics) — use a positive value |
 | `terminate called after throwing an instance of 'mu::ParserError'` / `Aborted` | Malformed `function` expression — not caught cleanly. | [§3.4](#34-potential) — test the expression alone first |
 | `BSpline::init failed: n_nodes must be >= 2 ...` / `order must be >= 1 ...` | `n_nodes < 2` / `order < 1`. | [§3.3](#33-bspline) |

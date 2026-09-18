@@ -142,6 +142,33 @@ class TestRunTiseSolverRealSubprocess:
         # files, not 0) against the pre-fix binary.
         assert not tise_dir.exists() or not any(tise_dir.iterdir())
 
+    def test_continuum_E_max_not_greater_than_E_threshold_raises_and_leaves_no_partial_files(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """Regression guard: buildEnergyGrid's ascending [E_threshold, E_max]
+        window (tise.hpp) was never checked against the config's own values,
+        so E_max <= E_threshold silently produced a degenerate (or
+        descending, if E_max < E_threshold) energy grid instead of erroring.
+        Downstream code assumes ascending order -- e.g. the flat-asymptote
+        negligibility check reads energyGrid.front() as the smallest
+        requested energy -- so this must be a hard failure before any output
+        is written, same contract as the n_energies/mass/hbar guards above."""
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["tise"]["continuum"]["enabled"] = True
+        cfg["tise"]["continuum"]["E_max"] = cfg["tise"]["continuum"]["E_threshold"]
+        bad_config = tmp_path / "config_continuum_E_max_not_greater.yaml"
+        with open(bad_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_tise_solver(str(bad_config), tise_dir, binary=tise_solver_binary)
+
+        assert "TISE solver" in str(excinfo.value)
+        assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
     def test_overlapping_potential_pieces_raises_and_leaves_no_partial_files(
         self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
     ):
