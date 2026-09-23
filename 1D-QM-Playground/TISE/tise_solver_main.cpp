@@ -116,6 +116,46 @@ std::map<std::string, std::string> parsePotentialConfig(const YAML::Node &potent
     return potential;
 }
 
+// Parse config["potential_deltas"], an optional YAML sequence of mappings
+//
+//     potential_deltas:
+//       - {x: 0.0, strength: -1.0}
+//
+// meaning V(x) += strength * delta(x - x0). Absent means "no deltas", which
+// is the overwhelmingly common case and must stay byte-identical to a config
+// written before this field existed.
+//
+// A delta cannot be expressed as a piecewise `function` string, which is why
+// it is its own field rather than another potential piece: there is nothing
+// in an expression in x for the join classifier to detect.
+std::vector<tise::DeltaTerm> parseDeltaConfig(const YAML::Node &deltasNode)
+{
+    std::vector<tise::DeltaTerm> deltas;
+    if (!deltasNode)
+        return deltas;
+
+    if (!deltasNode.IsSequence())
+        throw std::runtime_error(
+            "'potential_deltas' must be a YAML list of {x: ..., strength: ...} mappings");
+
+    for (const auto &node : deltasNode)
+    {
+        if (!node.IsMap() || !node["x"] || !node["strength"])
+            throw std::runtime_error(
+                "each 'potential_deltas' entry must be a mapping with both "
+                "'x' and 'strength' keys, e.g. {x: 0.0, strength: -1.0}");
+
+        tise::DeltaTerm term;
+        // A non-numeric value throws YAML::TypedBadConversion, which derives
+        // from std::exception and is caught by main's handler alongside every
+        // other config error.
+        term.x        = node["x"].as<double>();
+        term.strength = node["strength"].as<double>();
+        deltas.push_back(term);
+    }
+    return deltas;
+}
+
 struct WarningEntry
 {
     std::string category;
@@ -205,6 +245,12 @@ int main(int argc, char *argv[])
         // function's own tise.cpp definition for why).
         tise::validatePotentialExpressionsParse(potential);
 
+        // Dirac delta terms. Validated here, before any solve work, so a
+        // delta placed outside the domain is a named configuration error
+        // rather than a knot insertion that silently does nothing.
+        const std::vector<tise::DeltaTerm> deltas = parseDeltaConfig(config["potential_deltas"]);
+        tise::validateDeltaTerms(deltas, rMin, rMax);
+
         // Construct the B-spline basis: automatically strategic per REQ-F-050
         // if the potential has detectable Step/StitchedKink/Singular
         // structure, with A4b interior-singular-B-spline removal applied --
@@ -214,7 +260,8 @@ int main(int argc, char *argv[])
         // see docs/planning/tise-release-readiness-plan.md Part A). A
         // potential with no detectable structure produces the same uniform
         // grid + {1} drop-set as before, byte-identical.
-        tise::StrategicGridResult sgr = tise::buildStrategicGridAndDropSet(nNodes, order, rMin, rMax, potential);
+        tise::StrategicGridResult sgr = tise::buildStrategicGridAndDropSet(
+            nNodes, order, rMin, rMax, potential, tise::kDefaultEdgeTolerance, deltas);
         bspline::BSpline &bs = sgr.bs;
         const int nBSplines = sgr.nBSplines;
         const int nEn       = sgr.nEnBound;
@@ -417,7 +464,7 @@ int main(int argc, char *argv[])
         // Delta (set above, nullopt for the common case) taper the
         // potential near the wall when Case 3 was detected.
         auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, /*L=*/0, potential, sgr.fillDropSet,
-                                                case3RightR, case3RightDelta, mass, hbar);
+                                                case3RightR, case3RightDelta, mass, hbar, deltas);
 
         // Solve. H, S are passed by value -- solveGeneralizedEigenproblem's
         // internal LAPACK call overwrites its own copies, not these, so H/S

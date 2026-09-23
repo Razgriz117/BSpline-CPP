@@ -1,0 +1,67 @@
+# ===========================================================================
+# TEMPLATE: Dirac delta potentials
+#
+#     python3 controller.py --config examples/delta-well.yaml
+#
+# As shipped this is the textbook single attractive delta well,
+#
+#       V(x) = -lambda * delta(x),      lambda = 1
+#
+# whose one bound state is known exactly:
+#
+#       E_0   = -lambda^2 / 2                       = -0.5
+#       psi_0 = sqrt(lambda) * exp(-lambda |x|)
+#
+# Deltas are declared in their own `potential_deltas` section rather than as
+# a `potential` piece, because a delta cannot be written as an expression in
+# x. The solver places the degenerate knots that let the basis represent the
+# kink in psi, and adds the term strength*B_i(x0)*B_j(x0) to the Hamiltonian.
+# You do not have to configure any of that.
+# ===========================================================================
+
+run:
+  run_tise:     true
+  run_tdse:     false
+  run_analysis: true
+  output_dir:   "./data/delta-well"
+
+physics:
+  mass: 1.0
+  hbar: 1.0
+
+# The box must be wide enough that exp(-lambda |x|) has died out at the walls.
+# At lambda = 1 and x = +/-20 it is 2e-9. A WEAKER delta binds more loosely and
+# needs a wider box: at lambda = 0.5 the same box leaves an error of 1e-9.
+bspline:
+  n_nodes: 81
+  order:   8
+  domain:  [-20.0, 20.0]
+
+# The smooth part of the potential. Free space here; it still has to tile the
+# whole domain, exactly as in any other run.
+potential:
+  - "{'domain': '[-20, 20]', 'function': '0'}"
+
+# One entry per delta: adds  strength * delta(x - x0),  x0 being the `x` field.
+# `strength` is negative for an attractive well. `x` must lie strictly inside
+# the domain -- a delta on a wall would contribute nothing, since psi is
+# already zero there, so the solver refuses it rather than ignoring it.
+potential_deltas:
+  - {x: 0.0, strength: -1.0}
+
+# Double delta well -- the standard two-site tunneling problem. Comment out
+# the single delta above and uncomment these two. The even/odd doublet
+# satisfies kappa = lambda(1 +/- exp(-2*kappa*a)), with the even state lower.
+# potential_deltas:
+#   - {x: -1.0, strength: -1.0}
+#   - {x:  1.0, strength: -1.0}
+
+tise:
+  n_pts_eigenstate: 1001
+  error_threshold:  1.0e-10
+  continuum:
+    enabled: false
+
+visualization:
+  spectrum_overview: true
+  eigenstates:       true

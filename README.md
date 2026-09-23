@@ -35,6 +35,11 @@ The B-spline method represents the radial wavefunction in a basis of piecewise p
 
 $$H \mathbf{c} = E\, S \mathbf{c}$$
 
-solved with LAPACK's `DSBGV` routine. The basis and method follow the approach described in:
+solved with Eigen's `GeneralizedSelfAdjointEigenSolver`. (The `student-base-code/`
+version calls LAPACK's banded `DSBGV` directly, since setting up that banded
+storage is part of what the project teaches; `1D-QM-Playground/` went through
+Eigen instead so that it builds on Windows with no Fortran toolchain — see
+[1D-QM-Playground/TISE/README.md](1D-QM-Playground/TISE/README.md#why-there-is-no-lapack-here).)
+The basis and method follow the approach described in:
 
 > H. Bachau *et al.*, *Rep. Prog. Phys.* **64**, 1815 (2001).

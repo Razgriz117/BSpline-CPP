@@ -1,6 +1,21 @@
 # ADR-0014: Defer Delta-Potential Join Detection in Strategic Node Placement
 
-- **Status:** Accepted (deferred)
+- **Status:** Superseded --- implemented 2026-09-21
+
+> **Implemented.** Delta potentials are now supported through a dedicated
+> `potential_deltas` config section rather than through join *detection*, which
+> is what this ADR had deferred. Detection turned out to be the wrong frame: a
+> delta can never appear in a piecewise `function` expression, so there is
+> nothing in `V(x)` for `detectPotentialStructure` to find and `JoinType` needs
+> no `Delta` case. The caller states each delta explicitly instead, and
+> `buildStrategicGridAndDropSet` places the `order-2` degenerate knots this ADR
+> had already derived, while `fillBandedMatrices` adds the point-evaluation
+> matrix element `strength * B_i(x0) * B_j(x0)`. Verified against
+> `E_0 = -lambda^2/2` (`TISETests`, `DeltaPotentialTest`). See
+> `docs/guides/input-file-authoring-guide.md` section 3.5. The context below is
+> retained as the record of why it was deferred.
+
+- **Original status:** Accepted (deferred)
 - **Date:** 2026-09-11 (formalized during a node-placement capability review
   against the original design docs, prompted by
   `docs/planning/engineer-a-plan-cleanup.md` item 8, "Verify node placement

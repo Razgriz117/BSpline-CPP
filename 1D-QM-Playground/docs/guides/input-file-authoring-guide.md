@@ -17,10 +17,11 @@ This guide walks you, step by step, through writing your own `config.yaml`-shape
    - [3.2 `physics:`](#32-physics)
    - [3.3 `bspline:`](#33-bspline)
    - [3.4 `potential:`](#34-potential)
-   - [3.5 `tise:`](#35-tise)
-   - [3.6 `tise.continuum:`](#36-tisecontinuum)
-   - [3.7 `tdse:`/`analysis:` (specified, not runnable)](#37-tdse-and-analysis-specified-not-runnable)
-   - [3.8 `visualization:`](#38-visualization)
+   - [3.5 `potential_deltas:` (optional)](#35-potential_deltas-optional)
+   - [3.6 `tise:`](#36-tise)
+   - [3.7 `tise.continuum:`](#37-tisecontinuum)
+   - [3.8 `tdse:`/`analysis:` (specified, not runnable)](#38-tdse-and-analysis-specified-not-runnable)
+   - [3.9 `visualization:`](#39-visualization)
 4. [Run it](#4-run-it)
 5. [Read your output](#5-read-your-output)
 6. [Iterating on a config you already have](#6-iterating-on-a-config-you-already-have)
@@ -39,7 +40,7 @@ Before opening a YAML file, answer these on paper:
 - **Do you need only bound states, or also continuum/scattering states?** Bound states ($E<0$-style, confined) always come out of a solve. Continuum (scattering) states are optional and cost extra config ([§3.6](#36-tisecontinuum)).
 - **What does $V(x)$ do beyond your box?** This determines whether you should declare your potential's domain as bounded (matching the box) or genuinely unbounded past it:
   - **Flat** (goes to 0, or a constant): declare it bounded, matching the box — this is the common case (e.g. a finite square well capped by hard walls).
-  - **Coulomb-like** ($V \sim C/x$, unbounded): declare the piece's domain as **genuinely unbounded** (e.g. `(0, inf)`), even though your box is finite — this is what lets the solver detect the true tail shape and match continuum states against Coulomb wave functions instead of the wrong (flat-asymptote) formula. See [§3.6.1](#361-the-l-field-and-coulomb-tail-matching), which also quotes the confirming console/`warnings.json` message you'll see once the match engages.
+  - **Coulomb-like** ($V \sim C/x$, unbounded): declare the piece's domain as **genuinely unbounded** (e.g. `(0, inf)`), even though your box is finite — this is what lets the solver detect the true tail shape and match continuum states against Coulomb wave functions instead of the wrong (flat-asymptote) formula. See [§3.6.1](#371-the-l-field-and-coulomb-tail-matching), which also quotes the confirming console/`warnings.json` message you'll see once the match engages.
   - **Irregular** (some other unbounded power law, e.g. $V\sim x^{-1.5}$): also declare it unbounded; the solver fits the tail's power-law exponent, and if it matches neither flat ($p\approx0$) nor Coulomb ($p\approx1$), classifies the tail "Case 3"/Irregular and warns rather than silently mismatching it — see [§3.6.2](#362-irregular-tails-case-3-and-tapering) for the actual message and what the solver does about it.
 
 **What "warns" actually means.** Both cases above can make `tise_solver` print a *warning* instead of failing outright: it appends a `{"category": "physics", "message": "..."}` entry to `<output_dir>/tise/warnings.json` and prints an identical `tise_solver: warning: ...` line to the console the instant it fires; `controller.py` then reprints every entry from that file a second time once the solve finishes ([§5](#5-read-your-output)). A warning means the result was still computed and written to disk, but should be treated with suspicion — usually because your grid is too coarse, your box is too small for the energies you asked for, or your physical setup is ambiguous in some specific, named way. This is categorically different from a **hard error** (a malformed config, a bad `function` expression, a domain that doesn't tile — the gotchas in [§3.2](#32-physics)/[§3.4](#34-potential)): errors abort the pipeline *before* `tise_solver` produces any output at all, so nothing under `<output_dir>/` gets written. Every warning message the solver can emit, with what it means and how to react, is catalogued in [§7](#7-troubleshooting-reference).
@@ -54,7 +55,7 @@ Before opening a YAML file, answer these on paper:
 | Same, but with a non-default `physics.mass`/`hbar` | [`tests/free_particle_general_units.yaml`](../../tests/free_particle_general_units.yaml) | **Tests: `physics.mass`/`physics.hbar` at non-default values** ([§3.2](#32-physics)). Identical $V=0$ box to `free_particle.yaml`, but `mass: 2.0, hbar: 0.5` — the first reference config to set a non-default `physics:` block. Checked against the general closed forms $E_n=\hbar^2n^2\pi^2/(2\,\text{mass}\,L^2)$ and $k=\sqrt{2\,\text{mass}\,E}/\hbar$; `E_max` is rescaled by $\hbar^2/\text{mass}$ relative to `free_particle.yaml` to keep the same physical $k$-range. $\delta\equiv0$ still holds exactly — a flat potential scatters nothing regardless of units. |
 | A well or barrier with a genuine jump in $V$ | [`tests/finite_square_well.yaml`](../../tests/finite_square_well.yaml) | **Tests: a real step discontinuity → nonzero, energy-dependent phase shifts.** Two pieces — $V=-1$ on $[0,10)$, $V=0$ on $[10,100]$ — otherwise identical `bspline:`/`tise:` blocks to `free_particle.yaml` so [§3.4](#34-potential) can diff the two directly. Checked against the transcendental bound-state condition $K\cot(Ka)=-\kappa$ (4 bound states) and the closed-form phase shift $\delta(E)=\arctan(\tfrac{k}{K}\tan Ka)-ka$ — unlike `free_particle`'s trivial $\delta\equiv0$, this is genuinely energy-dependent. |
 | A smooth, confining potential (e.g. $x^2$) | [`tests/harmonic_oscillator.yaml`](../../tests/harmonic_oscillator.yaml) | **Tests: pure grid-resolution accuracy, no confounds.** A single smooth piece, no continuum (bound-only); box walls at $\pm20$ stay well outside every relevant turning point through $n\approx200$, so there's no box-edge, discontinuity, or singularity to muddy the error — checked against $E_n=n+\tfrac12$ (Hermite-function eigenstates). This is the cleanest file for reasoning about `n_nodes`/`order` accuracy, and is the source of [§3.3](#33-bspline)'s own "~3.3 nodes per de Broglie wavelength for $10^{-6}$ accuracy" rule. |
-| A Coulomb-tailed / hydrogenic potential | [`tests/hydrogen.yaml`](../../tests/hydrogen.yaml) | **Tests: Coulomb-tail continuum matching, and the `tise.continuum.l` field.** Single piece on $(0,\infty)$, $V=-1/x+1/x^2$ — Coulomb plus an $\ell(\ell+1)/x^2$ centrifugal term baked into the expression for $\ell=1$, matched by `l: 1`; the only one of these files that uses `l`, and a mismatch between it and the baked-in centrifugal term is a silent-wrong-answer trap ([§3.6.1](#361-the-l-field-and-coulomb-tail-matching)). Checked against $E_n=-1/2n^2$ ($n\ge2$; $\ell=1$ excludes 1s); because the tail is declared genuinely unbounded, continuum states are matched against real Coulomb functions $F_1,G_1$ instead of plane waves, so — like `free_particle` — the target is $\delta\equiv0$, but this time testing the Coulomb-matching machinery specifically. |
+| A Coulomb-tailed / hydrogenic potential | [`tests/hydrogen.yaml`](../../tests/hydrogen.yaml) | **Tests: Coulomb-tail continuum matching, and the `tise.continuum.l` field.** Single piece on $(0,\infty)$, $V=-1/x+1/x^2$ — Coulomb plus an $\ell(\ell+1)/x^2$ centrifugal term baked into the expression for $\ell=1$, matched by `l: 1`; the only one of these files that uses `l`, and a mismatch between it and the baked-in centrifugal term is a silent-wrong-answer trap ([§3.6.1](#371-the-l-field-and-coulomb-tail-matching)). Checked against $E_n=-1/2n^2$ ($n\ge2$; $\ell=1$ excludes 1s); because the tail is declared genuinely unbounded, continuum states are matched against real Coulomb functions $F_1,G_1$ instead of plane waves, so — like `free_particle` — the target is $\delta\equiv0$, but this time testing the Coulomb-matching machinery specifically. |
 | A genuine singularity **inside** your domain | [`tests/interior_singularity.yaml`](../../tests/interior_singularity.yaml) | **Tests: excluding an interior singularity, and why continuum can't be matched across a split domain.** Two half-open pieces around $x=20$ — the "double-open-interval idiom" — split $[0,40]$ into two physically decoupled regions (a field-free box, and a repulsive-Coulomb-in-a-box); automatic strategic node placement at the join handles the rest. Bound states on both sides check out against box-state energies / zeros of $F_0$, but continuum construction is refused — for a structurally different reason than the row below: here the domain itself splits into two regions that share no physical continuum, not a singularity sitting exactly at the matching edge. |
 | A singularity **exactly at** your box wall | [`tests/right_edge_singularity.yaml`](../../tests/right_edge_singularity.yaml) | **Tests: a singularity exactly at the box wall → continuum refused outright.** Single piece with a repulsive-Coulomb-like singularity placed exactly at `bspline.domain`'s right edge, where continuum phase-shift matching would need to evaluate. Bound states check out against zeros of $F_0(1/k,100k)$ and are completely unaffected; continuum refuses outright instead of degrading — no `phase_shifts.dat`/`continuum_state_*.dat` at all ([§7](#7-troubleshooting-reference)). |
 | An unbounded tail that's neither flat nor Coulomb | [`tests/case3_irregular_tail.yaml`](../../tests/case3_irregular_tail.yaml) | **Tests: the Irregular/"Case 3" tail classification and taper warning** ([§3.6.2](#362-irregular-tails-case-3-and-tapering)). Domain genuinely unbounded but starting at `bspline.domain: [0.1, 50.0]` — just short of the true origin singularity in $V=1/x^{1.5}$ — a different idiom from `interior_singularity.yaml`'s double-open-interval (this one keeps the box away from an edge singularity rather than excluding an interior point). The tail's fitted exponent ($p\approx1.5$) is neither flat nor Coulomb; continuum is disabled here, so the taper is correctly skipped for the bound-state solve. No closed form — checked against Richardson-extrapolated finite-difference eigenvalues. |
@@ -150,7 +151,7 @@ The pieces together must tile `bspline.domain` with no gaps and no overlaps. `co
 
 **Exception, and the idiom for excluding a singular point:** a shared boundary where **both** sides are *exclusive* (e.g. `[0,20)` next to `(20,40]`) is tolerated as a measure-zero gap — this is exactly how you exclude a single point your potential is singular at. See [`tests/interior_singularity.yaml`](../../tests/interior_singularity.yaml), which uses `[0,20)` + `(20,40]` to exclude $x=20$, where its potential has a genuine `1/(x-20)` singularity.
 
-**A piece's domain may (and for Coulomb-tail matching, must) extend past `bspline.domain`.** `tests/hydrogen.yaml` declares its single piece on `(0, inf)` even though the box is `[0.0, 100.0]` — see [§3.6.1](#361-the-l-field-and-coulomb-tail-matching) for why this matters.
+**A piece's domain may (and for Coulomb-tail matching, must) extend past `bspline.domain`.** `tests/hydrogen.yaml` declares its single piece on `(0, inf)` even though the box is `[0.0, 100.0]` — see [§3.6.1](#371-the-l-field-and-coulomb-tail-matching) for why this matters.
 
 If the C++ solver is run directly (bypassing `controller.py`'s pre-check) and a gap exists, it surfaces lazily, the first time a grid point lands in it: `tise_solver: Function domain does not cover x = 10.625`.
 
@@ -162,7 +163,52 @@ Supported operators: `+ - * / ^`, comparisons `< <= > >= == !=`, logical `&& ||`
 
 A syntax error in `function` (unbalanced parens, a stray operator, an undefined identifier, etc.) is caught eagerly, right after the config is loaded — before the solver does any other work — and reported cleanly: `tise_solver: malformed potential expression in domain '<domain>': '<function>': <muParser's own message>` (e.g. `Unexpected end of expression at position 5`).
 
-### 3.5 `tise:`
+### 3.5 `potential_deltas:` (optional)
+
+Dirac delta terms, which cannot be expressed in the `function` DSL and so get
+their own section:
+
+```yaml
+potential_deltas:
+  - {x: 0.0, strength: -1.0}
+```
+
+Each entry adds `strength * delta(x - x0)` to the potential, `x0` being the
+entry's `x`. Negative `strength` is attractive. Omitting the section entirely
+(the default) means no deltas and leaves a run byte-identical to one written
+before this field existed.
+
+| Field | Meaning |
+|---|---|
+| `x` | location of the delta; must lie **strictly inside** `bspline.domain` |
+| `strength` | coefficient; negative binds |
+
+Deltas accumulate, so a double well is simply two entries. They combine freely
+with the smooth `potential`, and they are *not* part of the tiling check —
+`validate_potential_tiling` covers the piecewise `V(x)` only, which deltas
+neither extend nor puncture.
+
+**What the solver does automatically.** A delta leaves `psi` continuous but
+makes `psi'` jump, so the basis must be exactly `C^0` at `x0`. Since an order-`k`
+B-spline basis is `C^(k-1-m)` at a knot of multiplicity `m`, `x0` is given
+multiplicity `k-1` — `k-2` degenerate knots beyond the ordinary node, spliced in
+if `x0` was not already a grid point. The matrix element is then the point
+evaluation `strength * B_i(x0) * B_j(x0)`. Nothing evaluates `psi''`: the
+kinetic term is the weak form `(hbar^2/2m) * integral B_i' B_j'`, so the delta
+that the kink puts into `psi''` never has to be represented.
+
+Verified against `E_0 = -lambda^2/2` for `V = -lambda*delta(x)`: errors of
+2e-14 at `lambda=1` and 8e-12 at `lambda=2` on `[-20, 20]` with `n_nodes: 81`,
+`order: 8`. A *weakly* bound delta needs a wider box — at `lambda=0.5` the same
+box gives 1e-9, because `exp(-0.5*20)` is no longer negligible at the wall.
+
+**Errors.** A delta on or outside a domain wall is rejected rather than
+silently ignored (`psi` is already zero there, so it would contribute nothing):
+`potential_deltas[0] x=5.0 lies outside the open domain (0.0, 5.0)`.
+
+See `examples/delta-well.yaml` for a runnable single and double delta well.
+
+### 3.6 `tise:`
 
 ```yaml
 tise:
@@ -173,7 +219,7 @@ tise:
 - `n_pts_eigenstate` — spatial resolution (grid points) of each `eigenstate_NNN.dat` output file.
 - `error_threshold` — required by the schema, but **not actually consumed by `tise_solver`** today (only the separate, older `H-BoundStates` demo binary reads it). Include it for schema-completeness; it has no effect on a real run.
 
-### 3.6 `tise.continuum:`
+### 3.7 `tise.continuum:`
 
 Only needed if you want scattering/continuum states, not just bound states.
 
@@ -206,7 +252,7 @@ smallest requested continuum energy E=0.1 (ratio 0.2 exceeds 0.01); matchAsympto
 matching assumes V(rMax) is approximately zero, so the resulting phase shifts may be inaccurate --
 consider enlarging bspline.domain.
 ```
-(Illustrative numbers, same convention as the warning above — none of the 7 reference configs are misconfigured enough to trigger this one.) Only fires for a **flat** right asymptote with continuum enabled, and checks against the *smallest* requested energy, not `E_max` (the relative distortion from a fixed leftover $V(r_\text{max})$ is worst at the smallest energy). A genuine Coulomb tail is exempt — its nonzero $V(r_\text{max})$ is expected and handled by its own matching path instead ([§3.6.1](#361-the-l-field-and-coulomb-tail-matching)). Fix by enlarging `bspline.domain`.
+(Illustrative numbers, same convention as the warning above — none of the 7 reference configs are misconfigured enough to trigger this one.) Only fires for a **flat** right asymptote with continuum enabled, and checks against the *smallest* requested energy, not `E_max` (the relative distortion from a fixed leftover $V(r_\text{max})$ is worst at the smallest energy). A genuine Coulomb tail is exempt — its nonzero $V(r_\text{max})$ is expected and handled by its own matching path instead ([§3.6.1](#371-the-l-field-and-coulomb-tail-matching)). Fix by enlarging `bspline.domain`.
 
 **A specific continuum energy can also land suspiciously close to one of your bound eigenvalues** — a finite-box discretization artifact, not real physics:
 ```
@@ -216,7 +262,7 @@ physical feature -- treat with suspicion.
 ```
 Nothing needs fixing — just distrust that one energy's row, or nudge `E_threshold`/`E_max`/`n_energies` so grid points don't land there.
 
-#### 3.6.1 The `l` field and Coulomb-tail matching
+#### 3.7.1 The `l` field and Coulomb-tail matching
 
 ```yaml
 tise:
@@ -260,11 +306,11 @@ Second, a summary that actually decides what happens to your bound-state solve, 
 
 **Read the second message, not just the first.** The first message always says the potential "will be smoothly tapered" — that's the classifier's own recommendation, made before it even knows whether continuum is enabled. Whether a taper is actually applied to your solve is decided by the second message: if continuum is disabled, no taper touches your bound-state solve and the first message's wording is stale in that context, not a bug in your config.
 
-### 3.7 `tdse:` and `analysis:` (specified, not runnable)
+### 3.8 `tdse:` and `analysis:` (specified, not runnable)
 
 `config.yaml`'s `tdse:` (initial state, gauge, driving field, time step) and `analysis:` (populations, expectation values) blocks are fully specified in the schema — you'll see them in `config.yaml`'s own shipped example — but **nothing consumes them yet**. There is no `tdse_solver` binary. Setting `run.run_tdse: true` aborts the pipeline immediately ([§3.1](#31-run)). Leave these blocks out, or leave them as shipped with `run.run_tdse: false` — either way they have zero effect on a TISE-only run.
 
-### 3.8 `visualization:`
+### 3.9 `visualization:`
 
 ```yaml
 visualization:
@@ -305,7 +351,7 @@ Quick task → section pointers, once you've already got a working file and want
 - *"A bound state is colliding with the wall"* → enlarge `bspline.domain` ([§3.3](#33-bspline)).
 - *"My `E_max` exceeds the accuracy ceiling"* → raise `n_nodes` or lower `E_max` ([§3.3](#33-bspline)/[§3.6](#36-tisecontinuum)).
 - *"I need to add a piece to my potential"* → [§3.4](#34-potential) (tiling rules + the `free_particle`→`finite_square_well` diff).
-- *"I want to turn on continuum for an existing bound-only config"* → [§3.6](#36-tisecontinuum), and check whether your tail is flat or Coulomb ([§3.6.1](#361-the-l-field-and-coulomb-tail-matching)) before you do.
+- *"I want to turn on continuum for an existing bound-only config"* → [§3.6](#36-tisecontinuum), and check whether your tail is flat or Coulomb ([§3.6.1](#371-the-l-field-and-coulomb-tail-matching)) before you do.
 - *"An 'Irregular'/'Case 3' warning showed up"* → [§3.6.2](#362-irregular-tails-case-3-and-tapering).
 - *"A 'V(rMax) not negligible' warning showed up"* → [§3.6](#36-tisecontinuum).
 - *"`tise_solver` failed with a `malformed potential expression` message"* → a syntax error in a `function` string; the message itself names the offending domain and expression ([§3.4](#34-potential)).
@@ -339,7 +385,6 @@ Quick task → section pointers, once you've already got a working file and want
 Things you cannot configure your way around today — see the linked ADRs for the full reasoning:
 
 - **Node/knot placement is fully automatic** (uniform grid + auto-detected structural knots at potential discontinuities/singularities). There's no config field to manually place nodes, choose a placement formula, or pick a density scheme — `n_nodes`/`order` are your only levers ([ADR-0002](../adr/0002-defer-wkb-collocation.md), [ADR-0015](../adr/0015-defer-user-supplied-node-placement-formula.md)).
-- **Delta-function potentials can't be written in the `potential` DSL at all** — there's no distributional-function support, only closed-form expressions. The closest approximation is a narrow, tall rectangular barrier via `Step`-style pieces, which is not equivalent physics ([ADR-0014](../adr/0014-defer-delta-potential-join-detection.md)).
 - **No resonance, ionization-rate, or complex-eigenvalue calculations.** The solver is real-valued only; a confining box plus discretized continuum is the only option for anything resonance-adjacent ([ADR-0011](../adr/0011-defer-cap-outgoing-wave-ecs-boundary-conditions.md)).
 
 ## 9. Further reading

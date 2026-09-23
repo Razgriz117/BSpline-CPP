@@ -3760,3 +3760,189 @@ TEST(SolveTISETest, StepPotentialActuallyUsesAStrategicNonUniformGrid)
     auto sol = tise::solveTISE(41, 8, 0.0, 40.0, 0, potential, 0.5, 1.0, 2);
     EXPECT_GT(static_cast<int>(sol.grid.size()), 41);
 }
+
+// ---------------------------------------------------------------------------
+// Dirac delta terms in the potential (DeltaTerm / potential_deltas)
+//
+// The reference problem throughout is the single attractive delta well on the
+// line, which has exactly one bound state with a closed-form energy:
+//
+//     V(x) = -lambda * delta(x)   ->   E_0 = -lambda^2 / 2,
+//     psi_0(x) = sqrt(lambda) * exp(-lambda |x|)     (hbar = m = 1)
+//
+// The box [-L, L] truncates that exponential, so L must be large enough that
+// exp(-lambda L) is negligible; at lambda = 1 and L = 20 it is 2e-9.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+// Ground-state energy of V = -lambda*delta(x) on [-L, L], solved exactly the
+// way tise_solver does: strategic grid (which places the delta's degenerate
+// knots) followed by a matrix fill carrying the delta term.
+double deltaWellGroundState(double lambda, int order, int nNodes, double L)
+{
+    const std::map<std::string, std::string> freeSpace = {{"[-999,999]", "0"}};
+    const std::vector<tise::DeltaTerm> deltas = {{0.0, -lambda}};
+
+    auto sgr = tise::buildStrategicGridAndDropSet(nNodes, order, -L, L, freeSpace,
+                                                  tise::kDefaultEdgeTolerance, deltas);
+    auto [H, S] = tise::fillBandedMatrices(sgr.bs, sgr.nEnBound + 1, order, 0, freeSpace,
+                                           sgr.fillDropSet, std::nullopt, std::nullopt,
+                                           1.0, 1.0, deltas);
+    auto er = tise::solveGeneralizedEigenproblem(std::move(H), std::move(S),
+                                                 sgr.nEnBound, order);
+    return er.values[0];
+}
+} // namespace
+
+TEST(DeltaPotentialTest, GroundStateMatchesClosedForm)
+{
+    // n_nodes is odd so that x = 0 is already a grid point; the knot
+    // insertion must work either way, which the next test checks.
+    for (double lambda : {1.0, 2.0})
+    {
+        const double E0 = deltaWellGroundState(lambda, 8, 81, 20.0);
+        EXPECT_NEAR(E0, -0.5 * lambda * lambda, 1e-10)
+            << "lambda = " << lambda;
+    }
+}
+
+TEST(DeltaPotentialTest, WorksWhenDeltaIsNotOnAGridPoint)
+{
+    // 80 nodes over [-20, 20] puts grid points at -20 + 40k/79, none of which
+    // is 0. buildStrategicRadialGrid must splice x=0 in as a new base point
+    // before stacking the degenerate copies on it.
+    const double E0 = deltaWellGroundState(1.0, 8, 80, 20.0);
+    EXPECT_NEAR(E0, -0.5, 1e-9);
+}
+
+TEST(DeltaPotentialTest, KnotMultiplicityIsWhatMakesItExact)
+{
+    // The whole reason the delta needs its own grid treatment: with an
+    // ordinary simple knot the basis is C^(k-2) at x=0, far too smooth to
+    // represent the kink psi' jump, and the energy is badly wrong. This is a
+    // regression guard on the order-2 rule in buildStrategicGridAndDropSet --
+    // if that rule is ever weakened, this test fails loudly rather than the
+    // solver quietly returning a 15%-high ground state.
+    const std::map<std::string, std::string> freeSpace = {{"[-999,999]", "0"}};
+    const std::vector<tise::DeltaTerm> deltas = {{0.0, -1.0}};
+    const int order = 8, nNodes = 81;
+    const double L = 20.0;
+
+    // Deliberately plain uniform grid: no degenerate knots at x = 0.
+    auto grid = tise::buildUniformRadialGrid(nNodes, -L, L);
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    const int nEn = bs.getNBSplines() - 2;
+    auto [H, S] = tise::fillBandedMatrices(bs, nEn, order, 0, freeSpace, std::nullopt,
+                                           std::nullopt, std::nullopt, 1.0, 1.0, deltas);
+    auto er = tise::solveGeneralizedEigenproblem(std::move(H), std::move(S), nEn, order);
+    const double tooSmooth = er.values[0];
+
+    const double correct = deltaWellGroundState(1.0, order, nNodes, L);
+
+    EXPECT_NEAR(correct, -0.5, 1e-10);
+    EXPECT_GT(std::abs(tooSmooth + 0.5), 1e-3)
+        << "a simple knot should NOT reproduce the delta well; if it now does, "
+           "the basis or the test setup changed";
+    EXPECT_LT(std::abs(correct + 0.5), std::abs(tooSmooth + 0.5));
+}
+
+TEST(DeltaPotentialTest, EigenfunctionDecaysAtTheRightRate)
+{
+    // psi ~ exp(-lambda |x|) away from the origin, which also pins the kink
+    // psi'(0+) - psi'(0-) = -2*lambda*psi(0) without differencing across it.
+    const std::map<std::string, std::string> freeSpace = {{"[-999,999]", "0"}};
+    const double lambda = 1.0;
+    const std::vector<tise::DeltaTerm> deltas = {{0.0, -lambda}};
+    const int order = 8, nNodes = 81;
+    const double L = 20.0;
+
+    auto sgr = tise::buildStrategicGridAndDropSet(nNodes, order, -L, L, freeSpace,
+                                                  tise::kDefaultEdgeTolerance, deltas);
+    auto [H, S] = tise::fillBandedMatrices(sgr.bs, sgr.nEnBound + 1, order, 0, freeSpace,
+                                           sgr.fillDropSet, std::nullopt, std::nullopt,
+                                           1.0, 1.0, deltas);
+    auto er = tise::solveGeneralizedEigenproblem(H, S, sgr.nEnBound, order);
+
+    // eigenstateCoefficients zero-pads a BOUND eigenvector, so it needs the
+    // full exclusion set including B_N (which fillDropSet deliberately omits,
+    // since the continuum path wants B_N's raw column). Its state index is
+    // 1-based, so the ground state is 1.
+    std::vector<int> fullDropSet = sgr.fillDropSet;
+    fullDropSet.push_back(sgr.nBSplines);
+    std::sort(fullDropSet.begin(), fullDropSet.end());
+    auto coeffs = tise::eigenstateCoefficients(er.vectors, 1, sgr.nEnBound,
+                                               sgr.nBSplines, fullDropSet);
+
+    const double psi0 = sgr.bs.eval(0.0, coeffs.data(), coeffs.size(), 0);
+    ASSERT_GT(std::abs(psi0), 1e-6);
+    for (double x : {1.0, 2.0, 4.0})
+    {
+        const double ratio = sgr.bs.eval(x, coeffs.data(), coeffs.size(), 0) / psi0;
+        EXPECT_NEAR(std::abs(ratio), std::exp(-lambda * x), 1e-6) << "x = " << x;
+    }
+}
+
+TEST(DeltaPotentialTest, TwoDeltasGiveTheSymmetricDoublet)
+{
+    // Double delta well, V = -lambda[delta(x+a) + delta(x-a)]. The even and
+    // odd states satisfy kappa = lambda(1 +/- exp(-2 kappa a)), so two deltas
+    // must be accumulated independently rather than one overwriting the other.
+    const std::map<std::string, std::string> freeSpace = {{"[-999,999]", "0"}};
+    const double lambda = 1.0, a = 1.0, L = 20.0;
+    const int order = 8, nNodes = 161;
+    const std::vector<tise::DeltaTerm> deltas = {{-a, -lambda}, {a, -lambda}};
+
+    auto sgr = tise::buildStrategicGridAndDropSet(nNodes, order, -L, L, freeSpace,
+                                                  tise::kDefaultEdgeTolerance, deltas);
+    auto [H, S] = tise::fillBandedMatrices(sgr.bs, sgr.nEnBound + 1, order, 0, freeSpace,
+                                           sgr.fillDropSet, std::nullopt, std::nullopt,
+                                           1.0, 1.0, deltas);
+    auto er = tise::solveGeneralizedEigenproblem(std::move(H), std::move(S),
+                                                 sgr.nEnBound, order);
+
+    // Solve kappa = lambda(1 + s*exp(-2 kappa a)) by fixed-point iteration.
+    auto kappaFor = [&](double sign) {
+        double k = lambda;
+        for (int i = 0; i < 500; ++i)
+            k = lambda * (1.0 + sign * std::exp(-2.0 * k * a));
+        return k;
+    };
+    const double kEven = kappaFor(+1.0);
+    const double kOdd  = kappaFor(-1.0);
+
+    EXPECT_NEAR(er.values[0], -0.5 * kEven * kEven, 1e-9);
+    EXPECT_NEAR(er.values[1], -0.5 * kOdd  * kOdd,  1e-9);
+    EXPECT_LT(er.values[0], er.values[1]);  // even state lies lower
+}
+
+TEST(DeltaPotentialTest, NoDeltasLeavesMatricesUnchanged)
+{
+    // The default must be bit-identical to the pre-feature behaviour, so that
+    // every existing config keeps producing exactly the numbers it did.
+    const std::map<std::string, std::string> potential = {{"[0,10]", "0.5*x^2"}};
+    const int order = 8, nNodes = 41;
+    auto grid = tise::buildUniformRadialGrid(nNodes, 0.0, 10.0);
+    bspline::BSpline bs;
+    ASSERT_EQ(bs.init(nNodes, order, grid), 0);
+    const int nEn = bs.getNBSplines() - 2;
+
+    auto [Href, Sref] = tise::fillBandedMatrices(bs, nEn, order, 0, potential);
+    auto [Hnew, Snew] = tise::fillBandedMatrices(bs, nEn, order, 0, potential,
+                                                 std::nullopt, std::nullopt, std::nullopt,
+                                                 1.0, 1.0, std::vector<tise::DeltaTerm>{});
+    EXPECT_EQ(Href, Hnew);
+    EXPECT_EQ(Sref, Snew);
+}
+
+TEST(DeltaPotentialTest, RejectsDeltaOutsideTheDomain)
+{
+    // A delta on or beyond a wall contributes nothing, because psi is already
+    // zero there. Refusing is better than silently doing nothing.
+    EXPECT_THROW(tise::validateDeltaTerms({{5.0, -1.0}}, 0.0, 5.0), std::runtime_error);
+    EXPECT_THROW(tise::validateDeltaTerms({{0.0, -1.0}}, 0.0, 5.0), std::runtime_error);
+    EXPECT_THROW(tise::validateDeltaTerms({{7.5, -1.0}}, 0.0, 5.0), std::runtime_error);
+    EXPECT_NO_THROW(tise::validateDeltaTerms({{2.5, -1.0}}, 0.0, 5.0));
+    EXPECT_NO_THROW(tise::validateDeltaTerms({}, 0.0, 5.0));
+}

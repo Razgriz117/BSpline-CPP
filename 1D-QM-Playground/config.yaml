@@ -41,6 +41,29 @@ bspline:
 potential:
   - "{'domain': '(0, inf)', 'function': '-1/x + 1/x^2'}"
 
+# ─── Dirac delta terms (optional) ─────────────────────────────────────────────
+# Each entry adds  strength * delta(x - x0)  to the potential, where x0 is the
+# entry's `x`. Negative strength is attractive. Omit the section entirely (the
+# default) for no deltas.
+#
+# Deltas live here rather than in `potential` above because a delta cannot be
+# written as an expression in x. The solver handles the two consequences on its
+# own: it gives x0 the knot multiplicity that lets the basis be C^0 there (the
+# kink a delta forces in psi), and it adds the matrix element
+# strength*B_i(x0)*B_j(x0) to the Hamiltonian.
+#
+# x0 must lie strictly inside `bspline.domain` -- a delta on a wall is rejected,
+# since psi is already zero there and it would contribute nothing.
+#
+# Example (a unit attractive well at the origin, exact E_0 = -0.5):
+#   potential_deltas:
+#     - {x: 0.0, strength: -1.0}
+#
+# Example (double delta well, the two-site tunneling problem):
+#   potential_deltas:
+#     - {x: -1.0, strength: -1.0}
+#     - {x:  1.0, strength: -1.0}
+
 # ─── TISE solver ──────────────────────────────────────────────────────────────
 tise:
   n_pts_eigenstate: 301       # spatial grid points for eigenstate output

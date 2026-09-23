@@ -8,6 +8,7 @@
 - [Code Structure](#code-structure)
 - [Specifying the Potential](#specifying-the-potential)
 - [Dependencies](#dependencies)
+- [Why there is no LAPACK here](#why-there-is-no-lapack-here)
 - [Building with CMake](#building-with-cmake)
 - [Building and Running Tests](#building-and-running-tests)
 - [Building with `g++` (manual build)](#building-with-g-manual-build)
@@ -19,11 +20,14 @@
 
 ```bash
 # From the project root (one level above this TISE/ directory):
-cmake -S TISE -B TISE/build -DBUILD_TESTING=ON
-cmake --build TISE/build
+cmake -S TISE -B TISE/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build TISE/build --config Release
 ```
 
-This builds both `H-BoundStates` and `tise_solver`. A missing `yaml-cpp` is a **hard configure error** (`find_package(yaml-cpp REQUIRED)`) rather than a warning, because `tise_solver` is the binary `controller.py` drives — install it with e.g. `sudo apt-get install libyaml-cpp-dev`. If you genuinely want `H-BoundStates` alone, pass `-DBUILD_TISE_SOLVER=OFF`. `tise_solver` additionally needs [nlohmann-json](https://github.com/nlohmann/json) (also required by `H-BoundStates`, see [Dependencies](#dependencies) below) for its `warnings.json` sidecar.
+This builds both `H-BoundStates` and `tise_solver`. You do not need to install
+any C++ libraries first: anything missing is downloaded and built by CMake (see
+[Dependencies](#dependencies)). If you want `H-BoundStates` alone, pass
+`-DBUILD_TISE_SOLVER=OFF`.
 
 Run it directly against any `config.yaml` (see the top-level README's "Quick start" and `config.yaml`'s own inline comments for the schema):
 
@@ -58,7 +62,7 @@ The code constructs a B-spline basis on a radial grid, builds the Hamiltonian an
 H \mathbf{c} = E\, S \mathbf{c}
 \]
 
-using LAPACK’s `DSBGV` (symmetric banded generalized eigenproblem). If the potential you supply matches the hydrogenic form \(V_\ell(r) = \ell(\ell+1)/2r^2 - 1/r\) for the angular momentum \(\ell\) set at compile time (see [Specifying the Potential](#specifying-the-potential)), the resulting eigenvalues are also compared to the analytic hydrogenic energies
+using Eigen's `GeneralizedSelfAdjointEigenSolver` (see [Why there is no LAPACK here](#why-there-is-no-lapack-here)). If the potential you supply matches the hydrogenic form \(V_\ell(r) = \ell(\ell+1)/2r^2 - 1/r\) for the angular momentum \(\ell\) set at compile time (see [Specifying the Potential](#specifying-the-potential)), the resulting eigenvalues are also compared to the analytic hydrogenic energies
 
 \[
 E_n^{(\ell)} = -\frac{1}{2(n_{\text{eff}})^2}, \quad n_{\text{eff}} = n + \ell,
@@ -128,17 +132,88 @@ Unlike in earlier versions of this project, `L` no longer shapes the potential i
 
 ## Dependencies
 
-* A C++ compiler with C++17 support (e.g. `g++ >= 7`)
-* [nlohmann's C++ JSON library](https://github.com/nlohmann/json#quick-reference)
-* [muparser](https://beltoforion.de/en/muparser/) — expression parser used to evaluate each potential piece's `function` string
-* LAPACK and BLAS libraries (for `dsbgv_`)
-* Eigen C++ library.
+**What you need to install yourself:**
 
-On many Linux systems these can be installed with your package manager, e.g.:
+* A C++17 compiler — `g++ >= 7`, Clang, or MSVC (Visual Studio 2019 or newer)
+* CMake >= 3.16
+* Git
+* Python 3.9+ (only for `controller.py`/`analysis.py`, not for the C++ build)
+
+That is the whole list, on macOS, Linux and Windows alike.
+
+**What CMake handles for you:** every C++ library below is looked for on your
+system first and, if absent, downloaded and built automatically as part of the
+configure step. No package manager, no admin rights, no platform-specific
+instructions.
+
+| Library | Used for |
+|---|---|
+| [Eigen](https://eigen.tuxfamily.org) | the generalized eigensolver, and time evolution |
+| [nlohmann/json](https://github.com/nlohmann/json) | the JSON-encoded piecewise potential, and the `warnings.json` sidecar |
+| [muparser](https://beltoforion.de/en/muparser/) | evaluating each potential piece's `function` expression at runtime |
+| [yaml-cpp](https://github.com/jbeder/yaml-cpp) | parsing `config.yaml` (`tise_solver` only) |
+| [GoogleTest](https://github.com/google/googletest) | the test suite (`-DBUILD_TESTING=ON` only) |
+
+The first configure therefore needs a network connection and takes a couple of
+minutes; later ones reuse what was fetched into the build directory.
+
+If you would rather use system packages — they build faster, and this is what
+CI's `playground-system-deps` job does — install them and CMake will prefer them:
 
 ```bash
-sudo apt-get install liblapack-dev libblas-dev libeigen3-dev nlohmann-json3-dev libmuparser-dev
+# Debian/Ubuntu
+sudo apt-get install libeigen3-dev nlohmann-json3-dev libmuparser-dev \
+     libyaml-cpp-dev libgtest-dev
+
+# macOS (Homebrew)
+brew install eigen nlohmann-json muparser yaml-cpp googletest
 ```
+
+Add `-DTISE_FETCH_DEPENDENCIES=OFF` to make a missing system package a hard
+error instead of silently downloading it.
+
+### Why there is no LAPACK here
+
+The generalized eigenproblem `H c = E S c` is solved by Eigen's
+`GeneralizedSelfAdjointEigenSolver`, in `tise.cpp`'s
+`solveGeneralizedEigenproblem`. It used to be a call to LAPACK's banded
+`dsbgv`, and the matrices are still assembled in LAPACK's upper banded layout.
+
+LAPACK was dropped because it is Fortran: every route to it from source needs a
+Fortran toolchain, which is exactly the barrier that made this project
+unbuildable on Windows. Since that is the only place LAPACK was used, removing
+it makes every remaining dependency header-only or a small CMake project.
+
+The obvious objection is that Eigen has no *banded* generalized eigensolver, so
+this throws away the band structure. Measured, that costs nothing here, because
+the solver asks for **all** eigenvectors:
+
+| N (basis size) | LAPACK `dsbgv`, banded | Eigen, dense |
+|---:|---:|---:|
+| 61 (default `config.yaml`) | 0.79 ms | 0.35 ms |
+| 250 | 12.7 ms | 10.6 ms |
+| 1000 | 549 ms | 577 ms |
+| 2000 | 4986 ms | 4790 ms |
+
+LAPACK does exploit the band, but only in the reduction to tridiagonal form.
+Accumulating the full N x N eigenvector matrix afterwards is O(N^3) regardless
+of how the input was stored, and that dominates. The same routine asked for
+eigenvalues *only* (`jobz='N'`) takes 184 ms at N=2000 rather than 4986 ms --
+i.e. 96% of its time is the band-agnostic part.
+
+Where the band would genuinely win, and where this decision would need
+revisiting: **memory** (dense is O(N^2), so N=20000 would need 3.2 GB per
+matrix against 3 MB banded), and any future need for eigenvalues only or for a
+subset of the spectrum (`dsbgvx`). Neither applies at the sizes this code is
+used at, and `solveGeneralizedEigenproblem` is the single function that would
+have to change.
+
+Note that eigenvectors are sign-normalized by `solveGeneralizedEigenproblem`
+itself rather than left as whichever sign the solver happened to produce (each
+state is scaled so its first significant B-spline coefficient is positive, i.e.
+psi_n > 0 just inside the left boundary). An eigenvector is only defined up to
+a sign, and without pinning it the same `config.yaml` can plot some states
+upside down on one machine versus another.
 
 ---
 
@@ -149,11 +224,27 @@ From this `TISE/` directory (there is no CMakeLists.txt one level up, so
 is the equivalent invocation from the project root):
 
 ```bash
-cmake -S . -B build
-cmake --build build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
-This will create the `H-BoundStates` executable inside the `build` directory.
+This creates the `H-BoundStates` and `tise_solver` executables in `build/`
+(`build/Release/` if your generator is a multi-config one, which is the default
+for Visual Studio and Xcode).
+
+`--config Release` and `-DCMAKE_BUILD_TYPE=Release` are both given because
+different generators honour different ones: single-config generators (Unix
+Makefiles, Ninja) read `CMAKE_BUILD_TYPE` at configure time and ignore
+`--config`, multi-config generators do the reverse. Passing both means the same
+two commands work everywhere. Without them, a Visual Studio build silently
+produces an unoptimized Debug binary.
+
+### Windows
+
+Nothing platform-specific is needed. The two commands above work in a
+"Developer Command Prompt for VS" or any shell where MSVC is on `PATH`, and
+CMake fetches and builds the C++ dependencies itself. Building inside WSL works
+too, and is then just the Linux instructions.
 
 ### Running the executable
 
@@ -211,20 +302,25 @@ From the project root directory (`TISE/`). This mirrors what `CMakeLists.txt` do
 1. Compile each translation unit `H-BoundStates` actually links (note `-std=c++17`, not `-std=cpp17`):
 
    ```bash
+   # $EIGEN is Eigen's include root: /usr/include/eigen3 on Debian/Ubuntu,
+   # /opt/homebrew/include/eigen3 with Homebrew, /opt/local/include/eigen3 with
+   # MacPorts. The CMake build finds this for you via find_package(Eigen3), and
+   # downloads Eigen if it is not installed at all -- this manual recipe
+   # assumes you have it.
+   EIGEN=/usr/include/eigen3
+
    g++ -O2 -std=c++17 -c BSpline.cpp
-   g++ -O2 -std=c++17 -c tise.cpp $(pkg-config --cflags muparser)
-   # -I path is Eigen's; /usr/include/eigen3 is the Debian/Ubuntu location.
-   # Homebrew: /opt/homebrew/include/eigen3, MacPorts: /opt/local/include/eigen3.
-   # The CMake build finds this for you via find_package(Eigen3).
-   g++ -O2 -std=c++17 -I/usr/include/eigen3 -c time_evolution.cpp
-   g++ -O2 -std=c++17 -I/usr/include/eigen3 -c main.cpp
+   g++ -O2 -std=c++17 -I$EIGEN -c tise.cpp $(pkg-config --cflags muparser)
+   g++ -O2 -std=c++17 -I$EIGEN -c time_evolution.cpp
+   g++ -O2 -std=c++17 -I$EIGEN -c main.cpp
    ```
 
-2. Link them with LAPACK, BLAS, and muparser:
+2. Link them with muparser (Eigen is header-only, and there is no LAPACK to
+   link -- see [Why there is no LAPACK here](#why-there-is-no-lapack-here)):
 
    ```bash
    g++ -O2 -std=c++17 -o H-BoundStates main.o tise.o time_evolution.o BSpline.o \
-       -llapack -lblas $(pkg-config --libs muparser)
+       $(pkg-config --libs muparser)
    ```
 
 3. Create the `timesteps` output directory. `main.cpp` runs time evolution after the bound-state solve and writes per-step output under a directory named by the `TIMESTEPS_DIR` macro; the CMake build defines this to an absolute path and creates it via a custom target automatically, but this manual recipe doesn't define the macro, so `main.cpp` falls back to the relative path `./timesteps`, which must exist beforehand:

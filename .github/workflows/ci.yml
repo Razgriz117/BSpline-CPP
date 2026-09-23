@@ -1,38 +1,106 @@
 name: CI
 
-# Release-readiness gap G6 (docs/planning/tise-release-readiness-plan.md,
-# BSpline-CPP/1D-QM-Playground/): the repo previously had zero automated
-# test gate of any kind. This runs both suites -- the C++ GoogleTest suite
-# (BSpline/Utils/TISE/TimeEvolution) and the Python pytest suite (unit +
-# real-subprocess integration, the latter building/exercising the actual
-# tise_solver binary) -- on every push and pull request.
+# Four things are being proved here, deliberately as separate jobs.
+#
+#  1. playground-portable -- the student path for 1D-QM-Playground. Nothing is
+#     installed beyond a compiler, CMake and Python; every C++ dependency is
+#     fetched and built by CMake. Run on all three platforms a student might
+#     show up with, because "it builds on Ubuntu" was previously the only
+#     thing anyone knew.
+#  2. playground-system-deps -- the packaged path. Confirms the find_package()
+#     branches still work when the libraries really are installed, which would
+#     otherwise silently rot now that a fetch fallback can mask it.
+#  3. student-base-code -- the PHY5606 base code. Unlike the playground it
+#     genuinely requires LAPACK (main.cpp calls DSBGV directly, as the project
+#     intends), so it is built where LAPACK is available rather than on
+#     Windows.
+#  4. No LAPACK anywhere in job 1: the playground's eigensolver goes through
+#     Eigen, and job 1 failing to configure would be the signal that some
+#     LAPACK dependency has crept back in.
 
 on:
   push:
   pull_request:
 
-defaults:
-  run:
-    working-directory: 1D-QM-Playground
+env:
+  # analysis.py plots to files on a headless runner; without this, matplotlib
+  # can pick an interactive backend and fail.
+  MPLBACKEND: Agg
 
 jobs:
-  build-and-test:
-    runs-on: ubuntu-latest
+  playground-portable:
+    name: Playground, portable build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: 1D-QM-Playground
+    strategy:
+      # One platform failing should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
     steps:
       - uses: actions/checkout@v4
 
+      # No dependency-installation step at all. That is the point of this job:
+      # if it needs one, the portability contract at the top of
+      # TISE/CMakeLists.txt is false.
+      - name: Configure (fetching every missing dependency)
+        run: cmake -S TISE -B TISE/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+
+      # --config Release matters on Windows and macOS/Xcode, where the
+      # generator is multi-config and ignores CMAKE_BUILD_TYPE; it is a no-op
+      # for Makefiles/Ninja.
+      - name: Build
+        run: cmake --build TISE/build --config Release --parallel
+
+      - name: Run C++ test suite
+        run: ctest --test-dir TISE/build --build-config Release --output-on-failure
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Python test suite
+        # The real-subprocess integration tests locate the binary built above
+        # via controller.find_tise_solver, which handles both the .exe suffix
+        # and the Release/ subdirectory a multi-config generator produces.
+        run: pytest tests/
+
+  playground-system-deps:
+    name: Playground, system packages (ubuntu-latest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 1D-QM-Playground
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # No LAPACK/BLAS here on purpose: the playground no longer uses them, and
+      # installing them anyway would hide a reintroduced dependency.
       - name: Install C++ dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            liblapack-dev libblas-dev libeigen3-dev \
-            nlohmann-json3-dev libmuparser-dev \
+            libeigen3-dev nlohmann-json3-dev libmuparser-dev \
             libyaml-cpp-dev libgtest-dev
 
-      - name: Configure and build (with tests)
+      # TISE_FETCH_DEPENDENCIES=OFF turns a dependency that failed to resolve
+      # from the system into a hard error instead of a silent download, which
+      # is what makes this job a real test of the find_package() paths.
+      - name: Configure (system packages only)
         run: |
-          cmake -S TISE -B TISE/build -DBUILD_TESTING=ON
-          cmake --build TISE/build -j
+          cmake -S TISE -B TISE/build -DBUILD_TESTING=ON \
+                -DTISE_FETCH_DEPENDENCIES=OFF
+
+      - name: Build
+        run: cmake --build TISE/build --parallel
 
       - name: Run C++ test suite
         run: ctest --test-dir TISE/build --output-on-failure
@@ -46,7 +114,38 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run Python test suite
-        # Real-subprocess integration tests reuse TISE/build/tise_solver
-        # (already built above) via the session-scoped tise_solver_binary
-        # fixture -- no rebuild needed here.
         run: pytest tests/
+
+  student-base-code:
+    name: Student base code (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: student-base-code
+    strategy:
+      fail-fast: false
+      # Windows is absent by design: this code calls LAPACK's DSBGV directly,
+      # and there is no Fortran-free way to supply LAPACK there. See the
+      # FATAL_ERROR message in student-base-code/CMakeLists.txt for the options
+      # a Windows student has.
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # macOS gets LAPACK from Apple's Accelerate framework, already present.
+      - name: Install LAPACK (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liblapack-dev libblas-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run test suite
+        run: ctest --test-dir build --build-config Release --output-on-failure

@@ -28,13 +28,37 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 @pytest.fixture(scope="session")
 def tise_solver_binary() -> Path:
-    """Build the real tise_solver binary via CMake if not already present, return its path."""
+    """Build the real tise_solver binary via CMake if not already present, return its path.
+
+    Both the build invocation and the path lookup have to be
+    platform-agnostic. `--config Release` is passed because multi-config
+    generators (Visual Studio, Xcode) otherwise build Debug, which on MSVC is
+    both slow enough to matter for the continuum sweeps these tests run and
+    placed in a different directory; single-config generators (Unix Makefiles,
+    Ninja) ignore the flag. The resulting path is then resolved by
+    controller.find_tise_solver rather than assembled here, so there is one
+    place that knows about .exe suffixes and per-config subdirectories.
+    """
     tise_dir = PROJECT_ROOT / "TISE"
     build_dir = tise_dir / "build"
-    binary = build_dir / "tise_solver"
+
+    # Imported here rather than at module scope: the sys.path insertion above
+    # is what makes `controller` importable at all.
+    from controller import find_tise_solver
+
+    binary = find_tise_solver(build_dir)
     if not binary.exists():
-        subprocess.run(["cmake", "-S", str(tise_dir), "-B", str(build_dir)], check=True)
-        subprocess.run(["cmake", "--build", str(build_dir), "--target", "tise_solver"], check=True)
+        subprocess.run(
+            ["cmake", "-S", str(tise_dir), "-B", str(build_dir),
+             "-DCMAKE_BUILD_TYPE=Release"],
+            check=True,
+        )
+        subprocess.run(
+            ["cmake", "--build", str(build_dir),
+             "--target", "tise_solver", "--config", "Release"],
+            check=True,
+        )
+        binary = find_tise_solver(build_dir)
     return binary
 
 

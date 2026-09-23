@@ -13,12 +13,19 @@ The long-term goal is a publication-quality solver suitable for submission to th
 
 The actual, current pipeline is `config.yaml` → `controller.py` → the compiled `tise_solver` binary → `analysis.py`. Build the C++ solver once, then drive everything through `controller.py`:
 
+You need a C++17 compiler, CMake >= 3.16, Git and Python 3.9+ — and nothing
+else. Every C++ library the solver uses is found on your system or, failing
+that, downloaded and built by CMake during the configure step. This works the
+same way on macOS, Linux and Windows; see
+[TISE/README.md](TISE/README.md#dependencies) for the details.
+
 ```bash
-# 1. Build the C++ TISE solver (produces TISE/build/tise_solver, requires
-#    yaml-cpp in addition to H-BoundStates' own dependencies -- see
-#    TISE/README.md for the full dependency list and manual g++ fallback).
-cmake -S TISE -B TISE/build -DBUILD_TESTING=ON
-cmake --build TISE/build
+# 1. Build the C++ TISE solver (produces TISE/build/tise_solver, or
+#    TISE/build/Release/tise_solver.exe with a Visual Studio generator).
+#    The first configure downloads the missing dependencies, so it needs a
+#    network connection and takes a couple of minutes.
+cmake -S TISE -B TISE/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build TISE/build --config Release
 
 # 2. Install the Python dependencies (pyyaml, matplotlib, pytest).
 pip install -r requirements.txt
@@ -43,7 +50,18 @@ python3 controller.py --config tests/free_particle.yaml
 
 produces `./data/free_particle/tise/continuum_*.png` etc. — see each file's own settings for what it's checking (e.g. `finite_square_well.yaml`'s genuinely energy-dependent phase shift vs. `free_particle.yaml`'s flat `delta=0`). These same configs are also exercised by the automated suite in `tests/test_analysis_integration.py`.
 
-For a full step-by-step walkthrough of writing your own input file — choosing `bspline`/`potential`/`continuum` settings for your own physics problem, common mistakes, and what the output means — see [`docs/guides/input-file-authoring-guide.md`](docs/guides/input-file-authoring-guide.md).
+### Guides
+
+- [**The B-Spline TISE Solver**](docs/guides/student-guide.pdf)
+  (PDF, source: [`student-guide.tex`](docs/guides/student-guide.tex)) — **start
+  here.** A guide to the program: building it on any platform, describing a
+  potential in the input file, reading the output, choosing the basis and the
+  box, evolving a state in time from the eigenstates, worked potentials
+  (harmonic, double well, Morse, avoided crossing, hydrogen), potentials with
+  steps and kinks, Dirac delta terms, and continuum states and phase shifts.
+  Rebuild with `pdflatex student-guide.tex` (twice, for the table of contents).
+- [Input-file authoring guide](docs/guides/input-file-authoring-guide.md) — the
+  full reference on input syntax, tiling rules and every validation error.
 
 ---
 
@@ -63,6 +81,7 @@ For a full step-by-step walkthrough of writing your own input file — choosing 
 │   ├── utils/                #   Utility functions
 │   ├── tests/                #   GoogleTest suite (BSpline, utils, TISE)
 │   └── CMakeLists.txt
+├── examples/               # Annotated starting-point configs (see the guides above)
 ├── tests/                  # Python test suite (pytest) + known-solution reference configs
 ├── docs/                   # SDD, ADRs, planning docs
 ├── moduleBspline.f90         # Original Fortran B-spline module (Argenti) -- historical

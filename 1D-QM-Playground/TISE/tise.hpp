@@ -13,6 +13,33 @@ namespace tise
 using Real = bspline::Real;
 
 // Holds the output of solveGeneralizedEigenproblem.
+// A Dirac delta term in the potential: V(x) += strength * delta(x - x0).
+//
+// Deltas are a separate input from the piecewise `potential` rather than
+// another JoinType, because a delta cannot be written as an expression in x
+// -- there is nothing in a piecewise V(x) for the join classifier to detect.
+// The caller states them explicitly instead.
+//
+// Two things follow from a delta, and both are handled automatically:
+//
+//   * psi is continuous at x0 but psi' jumps, so the basis must be only C^0
+//     there. An order-k B-spline basis with a knot of multiplicity m is
+//     C^(k-1-m), so x0 needs multiplicity k-1 -- that is, order-2 extra
+//     degenerate knots beyond the ordinary node. buildStrategicGridAndDropSet
+//     inserts them.
+//
+//   * The matrix element is a point evaluation,
+//     <B_i| strength*delta(x-x0) |B_j> = strength * B_i(x0) * B_j(x0),
+//     added to H by fillBandedMatrices. No quadrature is involved, and the
+//     delta that a kink puts into psi'' is never evaluated: the kinetic term
+//     is the weak form (hbar^2/2m) integral B_i' B_j', so only first
+//     derivatives appear and those are well defined for a C^0 function.
+struct DeltaTerm
+{
+    Real x;         // location x0, which must lie inside the domain
+    Real strength;  // lambda; negative is attractive
+};
+
 struct EigenResult
 {
     std::vector<Real> values;  // eigenvalues, ascending, size dim
@@ -304,6 +331,8 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
 // physics.hbar generalization, ADR-0017. Only the kinetic-energy term
 // (hbar^2/2*mass, replacing the old fixed 1/2 factor) depends on them --
 // `overlap` and `potentialTerm` are mass/hbar-independent.
+// `deltas`: Dirac delta terms added to H as strength*B_i(x0)*B_j(x0) (see
+// DeltaTerm). Empty (the default) leaves H bit-identical to before.
 std::pair<std::vector<Real>, std::vector<Real>>
 fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                     std::map<std::string, std::string> potential,
@@ -311,7 +340,8 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                     std::optional<Real> case3RightR = std::nullopt,
                     std::optional<Real> case3RightDelta = std::nullopt,
                     Real mass = 1.0,
-                    Real hbar = 1.0);
+                    Real hbar = 1.0,
+                    const std::vector<DeltaTerm> &deltas = {});
 
 // Given the set of BSplines, Hamiltonian, and eigenvectors, solve for:
 // < phi_n | H | B_N > and < phi_n | B_N >, for each eigenvector
@@ -845,9 +875,19 @@ constexpr Real kDefaultEdgeTolerance = 1e-9;
 // see the "Gap 2" comment in this function's tise.cpp definition) rather
 // than a genuine interior singularity. Defaults to the value this function
 // has always used.
+// `deltas`: each one contributes order-2 extra degenerate knots at its x, so
+// the basis is C^0 there and can represent the kink the delta forces in psi.
+// Empty (the default) leaves the grid bit-identical to before.
 StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMin, Real rMax,
                                                    const std::map<std::string, std::string> &potential,
-                                                   Real edgeTolerance = kDefaultEdgeTolerance);
+                                                   Real edgeTolerance = kDefaultEdgeTolerance,
+                                                   const std::vector<DeltaTerm> &deltas = {});
+
+// Throw std::runtime_error if any delta sits outside (rMin, rMax) or on the
+// domain boundary. A delta exactly at a wall is meaningless -- psi is already
+// forced to zero there, so the term contributes nothing and silently doing
+// nothing would be worse than refusing.
+void validateDeltaTerms(const std::vector<DeltaTerm> &deltas, Real rMin, Real rMax);
 
 struct SolveTISEResult
 {
@@ -893,7 +933,8 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
                            Real E_threshold, Real E_max, int N_E,
                            int continuumOutputPoints = kDefaultContinuumOutputPoints,
                            Real mass = 1.0,
-                           Real hbar = 1.0);
+                           Real hbar = 1.0,
+                           const std::vector<DeltaTerm> &deltas = {});
 
 // === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
 // Reduce a (possibly non-uniform, possibly containing degenerate/repeated
