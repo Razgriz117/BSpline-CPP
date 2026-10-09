@@ -50,6 +50,7 @@ from controller import (
     run_analysis_stage,
     run_tise_solver,
     validate_config,
+    validate_potential_deltas,
     validate_potential_tiling,
 )
 
@@ -246,6 +247,39 @@ class TestValidatePotentialTiling:
             validate_potential_tiling([], (0.0, 10.0))
 
 
+# ─── validate_potential_deltas ──────────────────────────────────────────────
+
+
+class TestValidatePotentialDeltas:
+    """PR #18 review, finding 3.2 (duplicate-x) and the kDeltaCollisionTolerance
+    this mirrors on the C++ side (tise.cpp's validateDeltaTerms). Cannot
+    check delta-vs-join collisions -- join locations are a C++-only
+    construct, never exposed to controller.py."""
+
+    def test_no_deltas_passes(self):
+        validate_potential_deltas(None, (0.0, 10.0))  # must not raise
+
+    def test_single_delta_passes(self):
+        validate_potential_deltas([{"x": 5.0, "strength": -1.0}], (0.0, 10.0))
+
+    def test_duplicate_x_raises(self):
+        deltas = [{"x": 5.0, "strength": -1.0}, {"x": 5.0, "strength": -1.0}]
+        with pytest.raises(ConfigValidationError):
+            validate_potential_deltas(deltas, (0.0, 10.0))
+
+    def test_near_duplicate_x_raises(self):
+        # 1e-9 apart: per docs/tests/reports/pr-18-433e11a/, this already
+        # corrupts the real solve by orders of magnitude -- must be
+        # rejected, not just a bit-for-bit duplicate.
+        deltas = [{"x": 5.0, "strength": -1.0}, {"x": 5.0 + 1e-9, "strength": -1.0}]
+        with pytest.raises(ConfigValidationError):
+            validate_potential_deltas(deltas, (0.0, 10.0))
+
+    def test_deltas_farther_apart_than_tolerance_pass(self):
+        deltas = [{"x": 4.0, "strength": -1.0}, {"x": 6.0, "strength": -1.0}]
+        validate_potential_deltas(deltas, (0.0, 10.0))  # must not raise
+
+
 # ─── load_config ────────────────────────────────────────────────────────────
 
 
@@ -324,6 +358,51 @@ class TestValidateConfig:
         cfg["potential"] = ["{'domain': '[0, 5]', 'function': '0'}"]
         with pytest.raises(ConfigValidationError):
             validate_config(cfg)
+
+    def test_explicit_null_potential_deltas_raises(self):
+        # PR #18 review, finding 3.5: 'potential_deltas:' (present, no
+        # value) and 'potential_deltas: null' both parse to the same Python
+        # None as an absent key, but the C++ solver's yaml-cpp sees a
+        # *defined* null node and rejects it -- "C++ is authoritative" means
+        # the Python pre-flight check must reject this input too, not treat
+        # it the same as the key being absent entirely.
+        cfg = _minimal_cfg()
+        cfg["potential_deltas"] = None
+        with pytest.raises(ConfigValidationError, match="potential_deltas"):
+            validate_config(cfg)
+
+    def test_absent_potential_deltas_still_passes(self):
+        # The key being absent entirely (not present-as-null) is the
+        # ordinary "no deltas" case and must keep validating unchanged.
+        cfg = _minimal_cfg()
+        assert "potential_deltas" not in cfg
+        validate_config(cfg)  # must not raise
+
+    def test_n_pts_eigenstate_below_2_raises(self):
+        # PR #18 review, finding 3.3.
+        cfg = _minimal_cfg()
+        cfg["tise"] = {"n_pts_eigenstate": 1}
+        with pytest.raises(ConfigValidationError, match="n_pts_eigenstate"):
+            validate_config(cfg)
+
+    def test_n_pts_eigenstate_absent_still_passes(self):
+        # Narrowly scoped fix: only validates the field WHEN present.
+        # controller.py does not otherwise require a 'tise' section today,
+        # and this fix isn't meant to introduce that separate requirement.
+        cfg = _minimal_cfg()
+        assert "tise" not in cfg
+        validate_config(cfg)  # must not raise
+
+    def test_continuum_n_pts_below_2_raises(self):
+        cfg = _minimal_cfg()
+        cfg["tise"] = {"continuum": {"n_pts": 1}}
+        with pytest.raises(ConfigValidationError, match="n_pts"):
+            validate_config(cfg)
+
+    def test_continuum_n_pts_absent_still_passes(self):
+        cfg = _minimal_cfg()
+        cfg["tise"] = {"continuum": {}}
+        validate_config(cfg)  # must not raise
 
     def test_missing_run_section_raises(self):
         # Regression test: run() indexes cfg["run"] directly (raw `[...]`,

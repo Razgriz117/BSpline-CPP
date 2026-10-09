@@ -59,6 +59,15 @@ struct AsymptoticResult
 // Build a uniform radial grid of nNodes points on [rMin, rMax].
 std::vector<Real> buildUniformRadialGrid(int nNodes, Real rMin, Real rMax);
 
+// The ix-th (1-based, ix in [1, npts]) point of a uniform grid of npts
+// points spanning [rMin, rMax]: rMin + (rMax-rMin)*(ix-1)/(npts-1). Shared
+// by the per-point table writers (writeEigenstate, writeEigenstateTable,
+// writeContinuumInfo, writeContinuumTable, writePotential), which were
+// each independently computing this inline. Callers must ensure npts >= 2
+// (division by npts-1); the config-validation layer is where that is
+// actually enforced, not here.
+Real linspacePoint(Real rMin, Real rMax, int ix, int npts);
+
 // Build a uniform energy grid epsilon_i = E_threshold + (E_max - E_threshold)/N_E * i,
 // for i = 1..N_E. Sampling starts at i=1 (never i=0) to avoid the k=0 (E=E_threshold=0)
 // singularity in matchAsymptotic's matching formulas; this lets a caller pick
@@ -537,8 +546,19 @@ void writeContinuumInfo(std::ostream &out,
                      const EigenResult &eigen,
                      std::optional<std::vector<int>> dropSet = std::nullopt);
 
-// Solve H c = E S c via LAPACK DSBGV.
-// H and S are consumed (overwritten); pass by value intentionally.
+// Threshold for solveGeneralizedEigenproblem's overlap-matrix conditioning
+// guard: the generalized eigenproblem is refused if S's own condition
+// number (lambda_max/lambda_min, computed directly via a plain symmetric
+// eigensolve of S) exceeds this. Chosen from measured data
+// (docs/tests/reports/pr-18-433e11a/): real near-duplicate-delta configs
+// give cond(S) ~1e7-1e10 with correct answers, and ~1e13-1e17 with answers
+// wrong by 4-12 orders of magnitude -- 1e12 sits cleanly between the two.
+constexpr Real kMaxOverlapConditionNumber = 1e12;
+
+// Solve H c = E S c. Builds dense A/B from the banded H/S and diagonalizes
+// with Eigen::GeneralizedSelfAdjointEigenSolver -- H and S are passed by
+// value but never modified; the dense matrices are separate copies, so the
+// original banded arrays remain valid for the caller after this returns.
 EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
                                          std::vector<Real> S,
                                          int nEn,
@@ -869,6 +889,26 @@ struct StrategicGridResult
 // physically meaningful distance between a join and the box wall.
 constexpr Real kDefaultEdgeTolerance = 1e-9;
 
+// How close two knot-vector entries must be (in x) to be treated as "the
+// same point" when buildStrategicRadialGrid decides whether to splice in a
+// new base point or stack onto an existing one. Named here so the grid-
+// construction code and anything reasoning about its output (e.g. the
+// knot-multiplicity invariant below) share one definition.
+constexpr Real kKnotMergeTolerance = 1e-12;
+
+// How close two deltas (or a delta and a detected potential join) may be
+// before validateDeltaTerms refuses the config outright. This is NOT the
+// same tolerance as kKnotMergeTolerance above: that one detects exact (to
+// float round-off) duplicate grid points during knot insertion, while this
+// one protects against deltas close enough to numerically degrade the
+// overlap matrix without ever triggering exact knot-merge. Measured
+// empirically (docs/tests/reports/pr-18-433e11a/): two deltas 1e-9 to 1e-13
+// apart already corrupt the ground-state energy by 4-12 orders of
+// magnitude while S remains positive definite to Cholesky throughout (the
+// damage is cond(S) blowing up, not indefiniteness) -- 1e-6 and below is
+// already physically indistinguishable from a single merged delta.
+constexpr Real kDeltaCollisionTolerance = 1e-6;
+
 // `edgeTolerance`: how close a detected Singular join's x must be to rMin/
 // rMax to be treated as "at the domain edge" (already regularized by the
 // classic wall exclusion, so no extra B-spline removal is applied there --
@@ -887,7 +927,29 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
 // domain boundary. A delta exactly at a wall is meaningless -- psi is already
 // forced to zero there, so the term contributes nothing and silently doing
 // nothing would be worse than refusing.
-void validateDeltaTerms(const std::vector<DeltaTerm> &deltas, Real rMin, Real rMax);
+//
+// Also throws if two deltas, or a delta and an entry of `existingKnots`
+// (the join-derived knots already assembled by the time
+// buildStrategicGridAndDropSet calls this), fall within
+// kDeltaCollisionTolerance of each other. `existingKnots` defaults to empty
+// so callers that only care about the domain-bounds check (e.g. existing
+// tests) are unaffected.
+void validateDeltaTerms(const std::vector<DeltaTerm> &deltas, Real rMin, Real rMax,
+                        const std::vector<StrategicKnot> &existingKnots = {});
+
+// Throw std::runtime_error if any value in `grid` has multiplicity >= order
+// (i.e. `order` or more mutually-within-kKnotMergeTolerance entries). A
+// valid B-spline knot vector never does this -- it is what guarantees a
+// linearly independent basis and therefore a positive-definite overlap
+// matrix by construction. This is the structural invariant: it fires
+// regardless of *why* a knot over-stacked (colliding deltas, a delta on a
+// join, or any future source), not just the specific cases
+// validateDeltaTerms' pairwise check happens to catch pre-emptively. Note
+// it does NOT catch two knots that are merely *close* without ever
+// reaching multiplicity order -- that failure mode (a degenerate basis
+// without any excess multiplicity) is what solveGeneralizedEigenproblem's
+// conditioning guard exists for instead.
+void validateKnotMultiplicities(const std::vector<Real> &grid, int order);
 
 struct SolveTISEResult
 {

@@ -240,6 +240,54 @@ TEST_F(BSplineTest, FunctionEvalMatchesExplicitLinearCombination)
     }
 }
 
+TEST_F(BSplineTest, EvalBasisWindowMatchesSingleBasisEval)
+{
+    // PR #18 review, finding 4.5: evalBasisWindow factors out the window +
+    // per-basis evaluation the no-skipFirst/Bsmin/Bsmax eval() overload
+    // does internally, so a caller can share it across several coefficient
+    // vectors at the same x. Must agree with evalSingle exactly.
+    std::vector<double> xs = {0.1, 0.33, 0.57, 0.9};
+    for (double x : xs)
+    {
+        int Bsmin = 0, Bsmax = 0;
+        auto window = spline.evalBasisWindow(x, /*derivativeOrder=*/0, Bsmin, Bsmax);
+        ASSERT_EQ(static_cast<int>(window.size()), Bsmax - Bsmin + 1) << "x=" << x;
+        for (int Bs = Bsmin; Bs <= Bsmax; ++Bs)
+            EXPECT_DOUBLE_EQ(window[Bs - Bsmin], evalSingle(x, Bs))
+                << "x=" << x << " Bs=" << Bs;
+    }
+}
+
+TEST_F(BSplineTest, EvalBasisWindowDotProductMatchesVectorEval)
+{
+    std::vector<double> coeffs(nBSplines);
+    for (int i = 0; i < nBSplines; ++i)
+        coeffs[i] = (i + 1) * 0.1;
+
+    std::vector<double> xs = {0.1, 0.33, 0.57, 0.9};
+    for (double x : xs)
+    {
+        int Bsmin = 0, Bsmax = 0;
+        auto window = spline.evalBasisWindow(x, 0, Bsmin, Bsmax);
+        double dot = 0.0;
+        for (int Bs = Bsmin; Bs <= Bsmax; ++Bs)
+        {
+            const int idxCoeff = Bs - 1;
+            if (idxCoeff >= 0 && idxCoeff < nBSplines)
+                dot += coeffs[idxCoeff] * window[Bs - Bsmin];
+        }
+        EXPECT_NEAR(dot, spline.eval(x, coeffs.data(), nBSplines), 1e-11) << "x=" << x;
+    }
+}
+
+TEST_F(BSplineTest, EvalBasisWindowOutsideGridIsEmpty)
+{
+    int Bsmin = 0, Bsmax = 0;
+    auto window = spline.evalBasisWindow(gridMax + 1.0, 0, Bsmin, Bsmax);
+    EXPECT_TRUE(window.empty());
+    EXPECT_LT(Bsmax, Bsmin);
+}
+
 TEST_F(BSplineTest, SingleBasisEvalAndCoeffEvalAgree)
 {
     std::vector<double> xs = {0.05, 0.4, 0.6, 0.95};

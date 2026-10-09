@@ -270,6 +270,14 @@ int main(int argc, char *argv[])
         // below regardless of tise.continuum.enabled -- previously read by
         // nothing in this file.
         const int nPtsEigenstate = config["tise"]["n_pts_eigenstate"].as<int>();
+        // writeEigenstateTable/writeEigenstate/writePotential (tise.cpp) all
+        // compute x = rMin + (rMax-rMin)*(ix-1)/(npts-1) over ix in [1,npts];
+        // npts <= 1 divides by zero, writing an all-NaN row/file while this
+        // process still exits 0.
+        if (nPtsEigenstate < 2)
+            throw std::runtime_error(
+                "tise.n_pts_eigenstate must be >= 2 (got " +
+                std::to_string(nPtsEigenstate) + ")");
 
         // Continuum settings. yaml-cpp idiom: an undefined/missing Node
         // converts to false without throwing, so configs that omit
@@ -311,6 +319,12 @@ int main(int argc, char *argv[])
                     "tise.continuum.E_max must be greater than E_threshold (got E_threshold=" +
                     std::to_string(E_threshold) + ", E_max=" + std::to_string(E_max) + ")");
             n_pts       = continuumNode["n_pts"].as<int>();
+            // Same npts<=1 divide-by-zero as tise.n_pts_eigenstate above,
+            // at writeContinuumTable/writeContinuumInfo's identical formula.
+            if (n_pts < 2)
+                throw std::runtime_error(
+                    "tise.continuum.n_pts must be >= 2 (got " +
+                    std::to_string(n_pts) + ")");
             // Angular momentum for Coulomb-tail continuum matching (ADR-0013,
             // supersedes ADR-0010). Defaults to 0 (s-wave) -- required
             // because a centrifugal term l(l+1)/2x^2, if present, is baked
@@ -466,10 +480,10 @@ int main(int argc, char *argv[])
         auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, /*L=*/0, potential, sgr.fillDropSet,
                                                 case3RightR, case3RightDelta, mass, hbar, deltas);
 
-        // Solve. H, S are passed by value -- solveGeneralizedEigenproblem's
-        // internal LAPACK call overwrites its own copies, not these, so H/S
-        // remain valid below for hamiltonian.dat/overlap.dat and the
-        // continuum path.
+        // Solve. H, S are passed by value and never modified --
+        // solveGeneralizedEigenproblem builds separate dense A/B matrices
+        // from them and never touches the originals -- so H/S remain valid
+        // below for hamiltonian.dat/overlap.dat and the continuum path.
         tise::EigenResult er = tise::solveGeneralizedEigenproblem(H, S, nEn, order);
 
         // classifyBoundStates (REQ-F-020): informational count of how many

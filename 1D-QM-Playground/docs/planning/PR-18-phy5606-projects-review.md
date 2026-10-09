@@ -4,6 +4,15 @@
 **PR:** [Razgriz117/BSpline-CPP#18](https://github.com/Razgriz117/BSpline-CPP/pull/18), head `PHY5606_Projects` @ `433e11a`, base `main` @ `73229c8`
 **Scope:** 6 commits, 29 files changed, +2820 / -197 lines. Not yet merged as of this review.
 
+**Update:** an independent second verification pass
+(`docs/tests/reports/pr-18-433e11a/README.md`) re-derived every finding
+below against a clean build and measured several claims this document only
+reasoned about. It confirms all six correctness findings but corrects two
+specifics (noted inline at Sections 2 and 4.6) and, most importantly, shows
+the fix plan's tolerance/guard choices below (as originally written) would
+not have caught the real near-duplicate-delta corruption — see that
+report's Section 7 and the implementation that followed.
+
 ## 1. Summary / Verdict
 
 **Do not merge as-is.** Two independently-reproduced correctness regressions sit in the solver's physics core, not its edges: the generalized eigensolver that replaced the old LAPACK `DSBGV` call does not reliably detect a degenerate overlap matrix the way `DSBGV` did, and the new delta-potential feature has no guard against the one input shape (colliding/duplicate delta positions) that produces exactly that degeneracy. Four smaller, also-reproduced bugs sit around them: an unguarded division that turns `n_pts_eigenstate: 1` into a silently-all-`NaN` "successful" run, two Python crashes in the new plotting code reachable from ordinary config typos, and a validation gap where a config that passes the Python pre-flight check is rejected by the C++ solver anyway. None of the six have test coverage, so CI would not catch any of them today.
@@ -64,7 +73,7 @@ The comment immediately above this code (`tise.cpp:1256-1258`) explicitly assert
 |---|---|---|---|
 | 1. Indefinite | `diag(1, -1, 1)` | **true** | `1 1 1` — wrong |
 | 2. Exactly singular | `diag(1, 0, 1)` | false (caught) | `-nan -nan -nan` |
-| 3. Near-singular, still PD | `diag(1, 1e-14, 1)` | **true** | `1 1 1e+14` — spurious |
+| 3. Near-singular, still PD | `diag(1, 1e-14, 1)` | **true** | `1 1 1e+14` — see correction below |
 | 4. Tiny negative (roundoff-scale) | `diag(1, -1e-10, 1)` | **true** | `1 1 1e+20` — spurious |
 | 5. Rank-deficient (duplicate row) | `[[1,1,0],[1,1,0],[0,0,1]]` | **true** | `0.38 1 2.62` — plausible-looking, still wrong |
 | 6. Same, with fp-scale noise | as above + `1e-16` noise | **true** | `0.38 1 2.62` — plausible-looking, still wrong |
@@ -72,6 +81,8 @@ The comment immediately above this code (`tise.cpp:1256-1258`) explicitly assert
 A direct `Eigen::LLT` Cholesky factorization of the same indefinite matrix from case 1 correctly reports `info() == NumericalIssue`, confirming the information needed is computed somewhere in Eigen's call graph — `GeneralizedSelfAdjointEigenSolver` simply never surfaces it.
 
 The most consequential row is **5/6**: a rank-deficient `B` arising from two linearly dependent basis functions (physically, the situation Finding 3.2 below can create) passes the check and returns finite, unremarkable-looking numbers — not `NaN`, not a crash, not even an unusually large value. There is nothing a caller or a human skimming output could use to notice anything went wrong.
+
+**Correction (caught by an independent second verification pass,** `docs/tests/reports/pr-18-433e11a/`**, and confirmed against the math):** row 3 above is *not* a detection failure. `B = diag(1, 1e-14, 1)` is genuinely positive-definite, and for `Ax = λBx` with `A = I`, `λ = 1/λ_min(B) = 1/10^{-14} = 10^{14}` is the exact, correct generalized eigenvalue — not a wrong answer Eigen happened to produce. Calling this "spurious" (as an earlier version of this table did) conflates ill-conditioning with indefiniteness, which turns out to be the crux of Finding 3.2 below: the real near-duplicate-delta corruption also stays positive-definite to direct Cholesky throughout, so the fix cannot be "detect indefiniteness" — it has to be a genuine conditioning check. Rows 1, 4, 5, and 6 remain the valid demonstrations: each is independently confirmed against the removed LAPACK `dsbgv_` call, which correctly reports `info=5` ("not positive definite") for all four, while Eigen's `info()` reports `Success` for all four.
 
 **Why this matters now, specifically.** This PR's own `eigenstates.dat`/`eigenvalues.dat` are, per the PR's own `TISE/README.md` update, "the ones to reach for if you are writing your own analysis." There is no `isfinite`/sanity check anywhere downstream in `tise.cpp`/`tise_solver_main.cpp` on the solve results before they are written to those files.
 
@@ -250,7 +261,7 @@ The `setprecision(16)`/`setw(24)` output idiom and the `(rMax-rMin)*(ix-1)/(npts
 
 Neither is a correctness bug; both are cheap, mechanical hoisting fixes if addressed.
 
-### 4.6 No test exercises any of the bugs in Section 3
+### 4.6 No test exercises any of the *failure modes* in Section 3
 
 ```
 $ grep -c "potential_deltas\|DeltaTerm" tests/test_controller_unit.py tests/test_controller_integration.py
@@ -258,7 +269,7 @@ tests/test_controller_unit.py:0
 tests/test_controller_integration.py:0
 ```
 
-Confirmed: zero references. Equally, no C++ `SolveEigenTest` constructs a non-PD/singular `S`, no test sets `n_pts_eigenstate <= 1`, and `plot_spectrum_overview` has no dedicated test at all. None of Section 3's findings would be caught by the existing CI (`.github/workflows/ci.yml` runs the same `ctest`/`pytest` suites).
+**Correction (caught by an independent second verification pass):** this is zero coverage of `potential_deltas` on the **Python** side, not zero coverage of the delta feature overall — `TISE/tests/test_tise.cpp`'s `DeltaPotentialTest` suite has seven cases covering the feature's happy path (closed-form ground state, the double-delta doublet to `1e-9`, rejection of an out-of-domain delta, and more). The accurate statement: no test, in either language, covers any of the six *failure modes* in Section 3 — duplicate or near-duplicate deltas, an indefinite or ill-conditioned `S`, `n_pts <= 1`, an empty state in `plot_spectrum_overview`, `potential_deltas: null`, or `visualization: null`. None of those six would be caught by the existing CI (`.github/workflows/ci.yml` runs the same `ctest`/`pytest` suites) as the PR stood at `433e11a`.
 
 ## 5. Reproduction
 

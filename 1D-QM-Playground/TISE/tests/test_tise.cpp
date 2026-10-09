@@ -3159,6 +3159,51 @@ TEST_F(FreeParticleContinuumTest, WrittenWavefunctionMatchesAnalyticSine)
     EXPECT_EQ(count, npts);
 }
 
+TEST_F(FreeParticleContinuumTest, WriteContinuumTableColumnMatchesWriteContinuumInfo)
+{
+    // Regression guard for the basis-window sharing refactor in
+    // writeContinuumTable (PR #18 review, finding 4.5): its psi_eps_1
+    // column must stay bit-identical to what the pre-existing per-state
+    // writeContinuumInfo emits on the same grid, same as
+    // WriteEigenstateTableTest.ColumnsMatchPerStateWriteEigenstate already
+    // guards for the bound-state table.
+    auto ar = tise::matchAsymptotic(bs, states, eigen, energyGrid, rMax, order, H, S);
+    const int npts = 37;
+
+    std::ostringstream phaseOut, stateOut;
+    std::vector<std::ostream *> stateOutPtrs = {&stateOut};
+    tise::writeContinuumInfo(phaseOut, bs, ar, energyGrid, states, stateOutPtrs, npts, rMin, rMax, eigen);
+
+    std::ostringstream tableOut;
+    tise::writeContinuumTable(tableOut, bs, ar, energyGrid, states, eigen, npts, rMin, rMax);
+
+    std::vector<double> infoPsi;
+    {
+        std::istringstream in(stateOut.str());
+        double x, psi;
+        while (in >> x >> psi)
+            infoPsi.push_back(psi);
+    }
+    ASSERT_EQ(static_cast<int>(infoPsi.size()), npts);
+
+    std::istringstream tableIn(tableOut.str());
+    std::string line;
+    std::vector<double> tablePsi;
+    while (std::getline(tableIn, line))
+    {
+        if (line.empty() || line[0] == '#')
+            continue;
+        std::istringstream ls(line);
+        double x, psi;
+        ls >> x >> psi;
+        tablePsi.push_back(psi);
+    }
+    ASSERT_EQ(static_cast<int>(tablePsi.size()), npts);
+
+    for (int i = 0; i < npts; ++i)
+        EXPECT_DOUBLE_EQ(tablePsi[i], infoPsi[i]) << "mismatch at row " << i;
+}
+
 TEST_F(FreeParticleContinuumTest, WavefunctionIsZeroAtLeftWall)
 {
     // Structural Dirichlet condition (physical B-spline #1 excluded from
@@ -3945,4 +3990,204 @@ TEST(DeltaPotentialTest, RejectsDeltaOutsideTheDomain)
     EXPECT_THROW(tise::validateDeltaTerms({{7.5, -1.0}}, 0.0, 5.0), std::runtime_error);
     EXPECT_NO_THROW(tise::validateDeltaTerms({{2.5, -1.0}}, 0.0, 5.0));
     EXPECT_NO_THROW(tise::validateDeltaTerms({}, 0.0, 5.0));
+}
+
+// ---------------------------------------------------------------------------
+// validateDeltaTerms -- collision detection (PR #18 review, finding 3.2)
+//
+// Colliding delta positions degenerate the B-spline basis with no
+// validation prior to this fix. Verified empirically
+// (docs/tests/reports/pr-18-433e11a/) that the real failure extends well
+// past exact duplicates: two deltas 1e-9 apart already corrupt the ground
+// state by four orders of magnitude while exiting 0. kDeltaCollisionTolerance
+// (1e-6) is chosen from that data, not from kKnotMergeTolerance (1e-12),
+// which serves an unrelated, much narrower purpose in knot insertion.
+// ---------------------------------------------------------------------------
+
+TEST(ValidateDeltaTermsCollisionTest, RejectsExactDuplicateDeltas)
+{
+    EXPECT_THROW(tise::validateDeltaTerms({{0.0, -1.0}, {0.0, -1.0}}, -5.0, 5.0),
+                std::runtime_error);
+}
+
+TEST(ValidateDeltaTermsCollisionTest, RejectsNearDuplicateDeltas)
+{
+    // 1e-9 apart: per the measurement above, this is squarely in the
+    // "exit 0, answer wrong by 4+ orders of magnitude" range -- the
+    // tolerance must be loose enough to catch this, not just an exact
+    // bit-for-bit duplicate.
+    EXPECT_THROW(tise::validateDeltaTerms({{0.0, -1.0}, {1e-9, -1.0}}, -5.0, 5.0),
+                std::runtime_error);
+}
+
+TEST(ValidateDeltaTermsCollisionTest, RejectsDeltasAtTheToleranceBoundary)
+{
+    // Just inside kDeltaCollisionTolerance (1e-6): still rejected.
+    EXPECT_THROW(tise::validateDeltaTerms({{0.0, -1.0}, {5e-7, -1.0}}, -5.0, 5.0),
+                std::runtime_error);
+}
+
+TEST(ValidateDeltaTermsCollisionTest, AcceptsDeltasFartherApartThanTheTolerance)
+{
+    // The measured "fine" end of the same curve: 1e-3 apart gives a
+    // correct answer (E0 matching the two-separate-deltas closed form, not
+    // the merged-delta one), so validation must not reject it.
+    EXPECT_NO_THROW(tise::validateDeltaTerms({{0.0, -1.0}, {1e-3, -1.0}}, -5.0, 5.0));
+    EXPECT_NO_THROW(tise::validateDeltaTerms({{-1.0, -1.0}, {1.0, -1.0}}, -5.0, 5.0));
+}
+
+TEST(ValidateDeltaTermsCollisionTest, RejectsDeltaCollidingWithAnExistingKnot)
+{
+    // A delta landing on (or within tolerance of) a join-derived knot --
+    // e.g. a Step boundary -- degenerates the basis exactly the same way
+    // two colliding deltas do.
+    const std::vector<tise::StrategicKnot> joinKnots = {{2.0, 6}};
+    EXPECT_THROW(
+        tise::validateDeltaTerms({{2.0 + 1e-9, -1.0}}, -5.0, 5.0, joinKnots),
+        std::runtime_error);
+    EXPECT_NO_THROW(
+        tise::validateDeltaTerms({{2.0 + 1e-3, -1.0}}, -5.0, 5.0, joinKnots));
+}
+
+// ---------------------------------------------------------------------------
+// validateKnotMultiplicities -- the structural invariant (PR #18 review,
+// finding 3.2's recommended root-cause fix). A valid knot vector never has
+// an interior value repeated order-or-more times; this is what actually
+// guarantees a linearly independent basis, independent of *why* a knot
+// over-stacked.
+// ---------------------------------------------------------------------------
+
+TEST(ValidateKnotMultiplicitiesTest, AcceptsAnOrdinaryGrid)
+{
+    auto grid = tise::buildUniformRadialGrid(21, -10.0, 10.0);
+    EXPECT_NO_THROW(tise::validateKnotMultiplicities(grid, 8));
+}
+
+TEST(ValidateKnotMultiplicitiesTest, AcceptsMultiplicityOneLessThanOrder)
+{
+    std::vector<double> grid = {0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0};
+    EXPECT_NO_THROW(tise::validateKnotMultiplicities(grid, 8));  // 7 copies, order 8
+}
+
+TEST(ValidateKnotMultiplicitiesTest, RejectsMultiplicityEqualToOrder)
+{
+    std::vector<double> grid = {0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0};
+    EXPECT_THROW(tise::validateKnotMultiplicities(grid, 8), std::runtime_error);  // 8 copies
+}
+
+TEST(ValidateKnotMultiplicitiesTest, RejectsMultiplicityStackedFromDistinctSources)
+{
+    // Mirrors what buildStrategicRadialGrid actually produces when two
+    // StrategicKnot entries (e.g. two colliding deltas) land on the same x:
+    // each contributes its own run of copies, and they land adjacent to
+    // each other in the sorted grid without being literally "the same
+    // insertion call".
+    std::vector<double> grid = {0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0};
+    EXPECT_THROW(tise::validateKnotMultiplicities(grid, 8), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// solveGeneralizedEigenproblem -- overlap-matrix conditioning guard (PR #18
+// review, finding 3.1, revised after independent verification). Eigen's
+// GeneralizedSelfAdjointEigenSolver::info() reports only whether the
+// *separate* tridiagonal QR step converged -- confirmed empirically to
+// report Success for every one of the indefinite/rank-deficient matrices
+// below, which is the actual regression relative to the removed LAPACK
+// dsbgv_ call (whose info code distinguished this). An isfinite check on
+// the output also cannot tell a legitimate answer from a wrong one here,
+// since the corrupted answers are large but finite. A direct check of B's
+// own conditioning is the only thing in evidence that catches this.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+// Builds (H, S) in the banded storage solveGeneralizedEigenproblem expects
+// for a 3x3 problem with order=3 (so every entry of a 3x3 matrix is within
+// the "band" -- nothing is actually banded at this size). H encodes A = I;
+// S encodes the symmetric B under test. This drives the same kind of
+// direct, synthetic (A, B) pair used to characterize Eigen's API in
+// isolation through the public tise:: entry point instead.
+std::pair<std::vector<double>, std::vector<double>>
+identityAndSymmetric3x3(double b00, double b11, double b22,
+                        double b01, double b02, double b12)
+{
+    const int order = 3, ldab = 3;
+    std::vector<double> H(9, 0.0), S(9, 0.0);
+    auto idx = [&](int i, int j) { return j * ldab + (order - 1 + i - j); };
+    H[idx(0, 0)] = 1.0; H[idx(1, 1)] = 1.0; H[idx(2, 2)] = 1.0;  // A = I
+    S[idx(0, 0)] = b00; S[idx(1, 1)] = b11; S[idx(2, 2)] = b22;
+    S[idx(0, 1)] = b01; S[idx(0, 2)] = b02; S[idx(1, 2)] = b12;
+    return {H, S};
+}
+} // namespace
+
+TEST(SolveEigenConditioningTest, RejectsIndefiniteOverlap)
+{
+    // B = diag(1, -1, 1). The removed dsbgv_ call reported info=5 (not
+    // positive definite) for this exact matrix; GeneralizedSelfAdjointEigenSolver
+    // reports Success and returns {1,1,1} -- finite and wrong.
+    auto [H, S] = identityAndSymmetric3x3(1.0, -1.0, 1.0, 0.0, 0.0, 0.0);
+    EXPECT_THROW(tise::solveGeneralizedEigenproblem(H, S, 3, 3), std::runtime_error);
+}
+
+TEST(SolveEigenConditioningTest, RejectsTinyNegativeOverlapEigenvalue)
+{
+    // B = diag(1, -1e-10, 1): indefinite at roundoff scale, same
+    // Success-but-wrong behaviour.
+    auto [H, S] = identityAndSymmetric3x3(1.0, -1e-10, 1.0, 0.0, 0.0, 0.0);
+    EXPECT_THROW(tise::solveGeneralizedEigenproblem(H, S, 3, 3), std::runtime_error);
+}
+
+TEST(SolveEigenConditioningTest, RejectsExactlySingularOverlap)
+{
+    auto [H, S] = identityAndSymmetric3x3(1.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+    EXPECT_THROW(tise::solveGeneralizedEigenproblem(H, S, 3, 3), std::runtime_error);
+}
+
+TEST(SolveEigenConditioningTest, RejectsRankDeficientOverlap)
+{
+    // Two identical rows/columns (0 and 1) -- the shape two coincident or
+    // near-coincident basis functions actually produce.
+    auto [H, S] = identityAndSymmetric3x3(1.0, 1.0, 1.0, 1.0, 0.0, 0.0);
+    EXPECT_THROW(tise::solveGeneralizedEigenproblem(H, S, 3, 3), std::runtime_error);
+}
+
+TEST(SolveEigenConditioningTest, AcceptsAWellConditionedOverlap)
+{
+    auto [H, S] = identityAndSymmetric3x3(1.0, 1.0, 1.0, 0.0, 0.0, 0.0);
+    EXPECT_NO_THROW(tise::solveGeneralizedEigenproblem(H, S, 3, 3));
+}
+
+// ---------------------------------------------------------------------------
+// linspacePoint -- shared 1-based grid-point formula (PR #18 review,
+// finding 4.4: the formula x = rMin + (rMax-rMin)*(ix-1)/(npts-1) was
+// independently copy-pasted at 5 sites in tise.cpp).
+// ---------------------------------------------------------------------------
+
+TEST(LinspacePointTest, FirstAndLastPointsAreTheEndpoints)
+{
+    EXPECT_DOUBLE_EQ(tise::linspacePoint(-20.0, 20.0, 1, 81), -20.0);
+    EXPECT_DOUBLE_EQ(tise::linspacePoint(-20.0, 20.0, 81, 81), 20.0);
+}
+
+TEST(LinspacePointTest, MidpointForOddCount)
+{
+    EXPECT_DOUBLE_EQ(tise::linspacePoint(-20.0, 20.0, 41, 81), 0.0);
+}
+
+TEST(LinspacePointTest, MatchesBuildUniformRadialGridAtEveryPoint)
+{
+    const int npts = 11;
+    auto grid = tise::buildUniformRadialGrid(npts, 0.0, 10.0);
+    for (int ix = 1; ix <= npts; ++ix)
+        EXPECT_DOUBLE_EQ(tise::linspacePoint(0.0, 10.0, ix, npts), grid[ix - 1]) << "ix=" << ix;
+}
+
+TEST(SolveEigenConditioningTest, AcceptsAModeratelyIllConditionedButCorrectOverlap)
+{
+    // cond(B) ~ 1e4 here (far below the 1e12 threshold); analogous to
+    // Fable's measured Delta-x = 1e-3/1e-6 real-solver cases (cond 1e7-1e10),
+    // which give correct answers and must not be rejected.
+    auto [H, S] = identityAndSymmetric3x3(1.0, 1e-4, 1.0, 0.0, 0.0, 0.0);
+    EXPECT_NO_THROW(tise::solveGeneralizedEigenproblem(H, S, 3, 3));
 }

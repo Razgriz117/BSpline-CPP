@@ -92,6 +92,24 @@ namespace bspline
                     int Bsmin = -1,
                     int Bsmax = -1) const;
 
+          // The basis-function window the no-skipFirst/no-Bsmin/Bsmax form of
+          // the vector eval() above uses internally -- factored out, without
+          // weighting by any coefficient array, for a caller that needs to
+          // evaluate several different coefficient vectors at the SAME x
+          // (e.g. one per eigenstate). That overload redoes whichInterval(x)
+          // plus one eval(x, Bs, derivativeOrder) call per active Bs on every
+          // call; this lets a caller do that once per x and then just dot
+          // each coefficient vector against the shared result.
+          //
+          // On return, [BsminOut, BsmaxOut] (both 1-based, inclusive) is the
+          // range of basis-function indices active at x, and the returned
+          // vector holds B_Bs(x) (or its derivativeOrder-th derivative) for
+          // Bs = BsminOut..BsmaxOut, in order. Empty (with BsmaxOut <
+          // BsminOut) if x is outside the grid, mirroring eval()'s own
+          // "returns 0" convention for an out-of-range point.
+          std::vector<Real> evalBasisWindow(Real x, int derivativeOrder,
+                                            int &BsminOut, int &BsmaxOut) const;
+
           // Compute the integral
           //
           //   ∫_a^b [ d^{n1} Bs_i(r)/dr^{n1} ] * f(r) *

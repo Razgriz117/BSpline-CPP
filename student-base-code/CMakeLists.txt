@@ -47,24 +47,8 @@ endif()
 # --- GoogleTest -------------------------------------------------------------
 if(BUILD_TESTING)
     enable_testing()
-    find_package(GTest QUIET)
-    if(NOT GTest_FOUND)
-        if(NOT FETCH_DEPENDENCIES)
-            message(FATAL_ERROR
-                "GTest not found and FETCH_DEPENDENCIES=OFF. Install it "
-                "(apt: libgtest-dev, brew: googletest) or allow fetching.")
-        endif()
-        message(STATUS "GTest not found on system -- fetching source")
-        # Without this, GoogleTest links the static CRT on MSVC while this
-        # project links the dynamic one, and the test binaries fail to link.
-        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-        set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-        FetchContent_Declare(googletest
-            GIT_REPOSITORY https://github.com/google/googletest.git
-            GIT_TAG        v1.14.0
-            GIT_SHALLOW    TRUE)
-        FetchContent_MakeAvailable(googletest)
-    endif()
+    include("${CMAKE_CURRENT_LIST_DIR}/../cmake/FetchGoogleTest.cmake")
+    tise_fetch_or_find_gtest(ALLOW_FETCH ${FETCH_DEPENDENCIES})
     add_subdirectory(tests)
 endif()
 

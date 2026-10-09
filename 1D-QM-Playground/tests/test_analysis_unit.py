@@ -50,6 +50,7 @@ from analysis import (
     main,
     plot_eigenstates,
     plot_phase_shifts,
+    plot_spectrum_overview,
     read_continuum_states,
     read_eigenstates,
     read_eigenvalues,
@@ -865,6 +866,35 @@ class TestPlotEigenstates:
         mock_plot.assert_called_once_with([0.0], [4.0])
 
 
+# ─── plot_spectrum_overview ─────────────────────────────────────────────────
+
+
+class TestPlotSpectrumOverview:
+    def test_eigenstate_with_no_points_does_not_raise(self, tmp_path):
+        # PR #18 review, finding 3.4: the inner max(abs(p.phi) for p in st)
+        # has no `default=`, unlike the outer max() wrapping it -- an
+        # eigenstate with zero sample points (e.g. from
+        # n_pts_eigenstate <= 0) raised a bare ValueError instead of a
+        # clean AnalysisError.
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, -1.0)],
+            eigenstates=[(1, [])],
+        )
+        plot_spectrum_overview(data, [], str(tmp_path))  # must not raise
+
+    def test_no_eigenstates_writes_no_file(self, tmp_path):
+        plot_spectrum_overview(_empty_tise_data(), [], str(tmp_path))
+        assert not (tmp_path / "spectrum_overview.png").exists()
+
+    def test_normal_eigenstate_writes_one_png(self, tmp_path):
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, -1.0)],
+            eigenstates=[(1, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, 0.5)])],
+        )
+        plot_spectrum_overview(data, [], str(tmp_path))
+        assert (tmp_path / "spectrum_overview.png").is_file()
+
+
 # ─── plot_phase_shifts ──────────────────────────────────────────────────────
 #
 # visualization.phase_shifts (config.yaml:96) is documented TISE-only, NOT
@@ -1080,6 +1110,21 @@ class TestRun:
         run(str(config_path), str(tise_dir), str(tdse_dir))
 
         assert not (tise_dir / "eigenstate_1.png").exists()
+
+    def test_visualization_present_but_null_does_not_raise(self, tmp_path):
+        # PR #18 review, finding 3.6: 'visualization:' with no value parses
+        # to None, not an absent key -- cfg.get("visualization", {}) then
+        # returns None (the key WAS found), and .get(...) on it raised
+        # AttributeError. Pre-existing for the other three toggles; this
+        # new line runs first and defaults True (opt-out), so it's the
+        # first to trip.
+        config_path = _write_yaml(tmp_path / "config.yaml", {"visualization": None})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        run(str(config_path), str(tise_dir), str(tdse_dir))  # must not raise
 
     def test_visualization_bound_states_squared_true_threads_flag_into_plot_eigenstates(self, tmp_path):
         # Wiring test (mirrors TestMain's own "mock the callee, check call

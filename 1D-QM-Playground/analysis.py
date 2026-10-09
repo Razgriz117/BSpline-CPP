@@ -588,6 +588,10 @@ def plot_spectrum_overview(tise_data: TiseData, potential: list[tuple[float, flo
         if not no_continuum and energy >= 0.0:
             continue
         drawn.append((idx, energy, eigenstate))
+    # An eigenstate with zero sample points (e.g. from n_pts_eigenstate <= 0)
+    # has nothing to plot, annotate, or set an xlim from -- drop it here,
+    # once, rather than guarding each of those sites separately below.
+    drawn = [(idx, energy, st) for idx, energy, st in drawn if st]
     if not drawn:
         return
 
@@ -673,14 +677,19 @@ def run(config_path: str, tise_dir: str, tdse_dir: str) -> None:
     tise_output = read_tise_output(Path(tise_dir))
 
     plot_tise(tise_output, tise_dir)
-    if cfg.get("visualization", {}).get("spectrum_overview", True):
+    # cfg.get("visualization", {})'s default only applies when the key is
+    # ABSENT -- 'visualization:' with no value parses to a present key
+    # whose value is None, which .get() happily returns, and .get() on
+    # None raises. `or {}` catches both shapes.
+    visualization_cfg = cfg.get("visualization") or {}
+    if visualization_cfg.get("spectrum_overview", True):
         plot_spectrum_overview(tise_output, read_potential(Path(tise_dir)), tise_dir)
-    if cfg.get("visualization", {}).get("eigenstates", False):
+    if visualization_cfg.get("eigenstates", False):
         plot_eigenstates(
             tise_output, tise_dir,
-            square_bound_states=cfg.get("visualization", {}).get("bound_states_squared", False),
+            square_bound_states=visualization_cfg.get("bound_states_squared", False),
         )
-    if cfg.get("visualization", {}).get("phase_shifts", False):
+    if visualization_cfg.get("phase_shifts", False):
         plot_phase_shifts(tise_output, tise_dir)
 
     if not Path(tdse_dir).is_dir():

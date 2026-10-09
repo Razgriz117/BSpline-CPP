@@ -27,6 +27,16 @@ import yaml
 # to the bspline domain edges (see validate_potential_tiling).
 EPS = 1e-9
 
+# How close two deltas may be (in x) before validate_potential_deltas
+# refuses the config. Mirrors tise.hpp's kDeltaCollisionTolerance on the
+# C++ side -- NOT the same concern as EPS above. Measured empirically
+# (docs/tests/reports/pr-18-433e11a/): two deltas 1e-9 to 1e-13 apart
+# already corrupt the ground-state energy by 4-12 orders of magnitude
+# while the overlap matrix stays positive definite to Cholesky throughout;
+# 1e-6 and below is already physically indistinguishable from one merged
+# delta.
+DELTA_COLLISION_TOLERANCE = 1e-6
+
 # TISE/build/ resolved relative to this file's OWN location (not the current
 # working directory), so controller.py is runnable from any directory. This
 # deliberately points at the real, current build location (TISE/build/) rather
@@ -178,7 +188,35 @@ def validate_config(cfg: dict) -> None:
 
     validate_potential_tiling(pieces, domain_tuple)
 
+    # 'potential_deltas: null' and 'potential_deltas:' (present, no value)
+    # both parse to the same Python None as the key being absent entirely
+    # -- but the C++ solver's yaml-cpp sees a *defined* null node for the
+    # first two and throws. "C++ is authoritative" means this pre-flight
+    # check must reject what the solver will reject, not silently narrow
+    # its own promise ("catching them here gives the error before a
+    # subprocess is launched") for this one input shape.
+    if "potential_deltas" in cfg and cfg["potential_deltas"] is None:
+        raise ConfigValidationError(
+            "'potential_deltas' must be a list of {x: ..., strength: ...} "
+            "mappings, not null"
+        )
     validate_potential_deltas(cfg.get("potential_deltas"), domain_tuple)
+
+    # Mirrors tise_solver_main.cpp's own validation of these two fields
+    # (PR #18 review, finding 3.3) -- deliberately scoped to only fire when
+    # the field is present, since controller.py does not otherwise require
+    # a 'tise' section at all.
+    tise_cfg = cfg.get("tise") or {}
+    if "n_pts_eigenstate" in tise_cfg and tise_cfg["n_pts_eigenstate"] < 2:
+        raise ConfigValidationError(
+            f"'tise.n_pts_eigenstate' must be >= 2 (got "
+            f"{tise_cfg['n_pts_eigenstate']})"
+        )
+    continuum_cfg = tise_cfg.get("continuum") or {}
+    if "n_pts" in continuum_cfg and continuum_cfg["n_pts"] < 2:
+        raise ConfigValidationError(
+            f"'tise.continuum.n_pts' must be >= 2 (got {continuum_cfg['n_pts']})"
+        )
 
 
 def validate_potential_deltas(deltas_cfg, domain: tuple[float, float]) -> None:
@@ -198,6 +236,14 @@ def validate_potential_deltas(deltas_cfg, domain: tuple[float, float]) -> None:
     The solver performs the same checks independently (it is separately
     invocable), but catching them here gives the error before a subprocess
     is launched.
+
+    Also rejects two deltas within DELTA_COLLISION_TOLERANCE of each other
+    (they degenerate the B-spline basis the solver builds). This does NOT
+    catch a delta colliding with a potential *join* (a Step/kink the
+    solver detects from the piecewise V(x) expressions) -- join locations
+    are a C++-only construct (tise.hpp's JoinType/detectPotentialStructure)
+    never exposed to this module; that collision is caught only by the
+    solver subprocess itself.
     """
     if deltas_cfg is None:
         return
@@ -209,6 +255,7 @@ def validate_potential_deltas(deltas_cfg, domain: tuple[float, float]) -> None:
         )
 
     lo, hi = domain
+    xs: list[float] = []
     for i, entry in enumerate(deltas_cfg):
         if not isinstance(entry, dict):
             raise ConfigValidationError(
@@ -238,6 +285,17 @@ def validate_potential_deltas(deltas_cfg, domain: tuple[float, float]) -> None:
                 f"({lo}, {hi}); a delta on the boundary has no effect because "
                 f"psi is already zero there"
             )
+
+        for j, other_x in enumerate(xs):
+            if abs(x - other_x) < DELTA_COLLISION_TOLERANCE:
+                raise ConfigValidationError(
+                    f"potential_deltas[{j}] (x={other_x}) and potential_deltas[{i}] "
+                    f"(x={x}) are within {DELTA_COLLISION_TOLERANCE} of each other; "
+                    f"deltas this close degenerate the B-spline basis -- move them "
+                    f"farther apart, or combine them into a single delta of summed "
+                    f"strength if a single merged site was intended"
+                )
+        xs.append(x)
 
 
 # ─── Interval / potential-piece parsing ────────────────────────────────────
