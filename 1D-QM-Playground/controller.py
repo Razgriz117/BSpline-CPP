@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -26,13 +27,49 @@ import yaml
 # to the bspline domain edges (see validate_potential_tiling).
 EPS = 1e-9
 
-# TISE/build/tise_solver resolved relative to this file's OWN location (not
-# the current working directory), so controller.py is runnable from any
-# directory. This deliberately points at the real, current build location
-# (TISE/build/tise_solver) rather than the SDD Sec 11.2 "target" unified
-# ./build/tise_solver layout -- that directory-layout migration is a
-# separate, out-of-scope concern.
-DEFAULT_TISE_SOLVER = Path(__file__).resolve().parent / "TISE" / "build" / "tise_solver"
+# TISE/build/ resolved relative to this file's OWN location (not the current
+# working directory), so controller.py is runnable from any directory. This
+# deliberately points at the real, current build location (TISE/build/) rather
+# than the SDD Sec 11.2 "target" unified ./build/ layout -- that
+# directory-layout migration is a separate, out-of-scope concern.
+TISE_BUILD_DIR = Path(__file__).resolve().parent / "TISE" / "build"
+
+# The executable's name and exact location are not the same on every platform,
+# so they are searched for rather than hardcoded:
+#
+#   - Windows appends .exe.
+#   - Multi-config CMake generators (Visual Studio, Xcode) put the binary in a
+#     per-configuration subdirectory -- build/Release/ or build/Debug/ -- while
+#     single-config generators (Unix Makefiles, Ninja) put it directly in
+#     build/. Release is checked before Debug because a plain
+#     `cmake --build build` with no --config produces Debug on MSVC, and if a
+#     student has both, the optimized one is the one they want.
+_SOLVER_EXE = "tise_solver.exe" if os.name == "nt" else "tise_solver"
+
+
+def find_tise_solver(build_dir: Path = TISE_BUILD_DIR) -> Path:
+    """Locate the built tise_solver binary across platforms and CMake generators.
+
+    Returns the first candidate that exists. If none does, returns the
+    single-config path anyway so the caller's "could not execute" error names
+    the location a student is most likely to have expected.
+    """
+    candidates = [
+        build_dir / _SOLVER_EXE,
+        build_dir / "Release" / _SOLVER_EXE,
+        build_dir / "Debug" / _SOLVER_EXE,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+# Resolved once at import for callers that want the path without running
+# anything. run_tise_solver deliberately does NOT use this: it re-resolves at
+# call time, because the binary may be built after this module is imported
+# (the pytest integration suite does exactly that).
+DEFAULT_TISE_SOLVER = find_tise_solver()
 
 # analysis.py resolved the same way, for the same reason (see above).
 DEFAULT_ANALYSIS_SCRIPT = Path(__file__).resolve().parent / "analysis.py"
@@ -140,6 +177,67 @@ def validate_config(cfg: dict) -> None:
         raise ConfigValidationError(f"'bspline.domain' must be a [lo, hi] pair: {domain!r}") from e
 
     validate_potential_tiling(pieces, domain_tuple)
+
+    validate_potential_deltas(cfg.get("potential_deltas"), domain_tuple)
+
+
+def validate_potential_deltas(deltas_cfg, domain: tuple[float, float]) -> None:
+    """Validate the optional 'potential_deltas' section.
+
+    Each entry is a mapping {x: <float>, strength: <float>} meaning
+    V(x) += strength * delta(x - x0). Absent or None means no deltas, which
+    is the common case; every config written before this section existed
+    must keep validating unchanged.
+
+    A delta cannot be written as an expression in x, which is why it is a
+    separate section rather than another `potential` piece -- and why it is
+    excluded from validate_potential_tiling, whose job is to check that the
+    piecewise V(x) covers the domain. Deltas neither extend nor puncture
+    that tiling.
+
+    The solver performs the same checks independently (it is separately
+    invocable), but catching them here gives the error before a subprocess
+    is launched.
+    """
+    if deltas_cfg is None:
+        return
+
+    if not isinstance(deltas_cfg, list):
+        raise ConfigValidationError(
+            f"'potential_deltas' must be a list of "
+            f"{{x: ..., strength: ...}} mappings, got {type(deltas_cfg).__name__}"
+        )
+
+    lo, hi = domain
+    for i, entry in enumerate(deltas_cfg):
+        if not isinstance(entry, dict):
+            raise ConfigValidationError(
+                f"potential_deltas[{i}] must be a mapping with 'x' and "
+                f"'strength' keys, got {type(entry).__name__}: {entry!r}"
+            )
+        missing = [k for k in ("x", "strength") if k not in entry]
+        if missing:
+            raise ConfigValidationError(
+                f"potential_deltas[{i}] missing required key(s) "
+                f"{', '.join(missing)}: {entry!r}"
+            )
+        try:
+            x = float(entry["x"])
+            float(entry["strength"])
+        except (TypeError, ValueError) as e:
+            raise ConfigValidationError(
+                f"potential_deltas[{i}] 'x' and 'strength' must be numbers: {entry!r}"
+            ) from e
+
+        # Strictly inside: psi is already forced to zero at both walls, so a
+        # delta sitting on one contributes nothing at all. Silently ignoring
+        # it would be worse than refusing.
+        if not (lo < x < hi):
+            raise ConfigValidationError(
+                f"potential_deltas[{i}] x={x} lies outside the open domain "
+                f"({lo}, {hi}); a delta on the boundary has no effect because "
+                f"psi is already zero there"
+            )
 
 
 # ─── Interval / potential-piece parsing ────────────────────────────────────
@@ -283,8 +381,15 @@ def _run_stage(stage_name: str, cmd: list[str]) -> subprocess.CompletedProcess:
         raise SolverStageError(f"{stage_name}: could not execute {cmd[0]}: {e}") from e
 
 
-def run_tise_solver(config_path: str, tise_output_dir: Path, binary: Path = DEFAULT_TISE_SOLVER) -> None:
-    """Invoke the TISE solver subprocess per docs/SDD.md Sec 7.2.1."""
+def run_tise_solver(config_path: str, tise_output_dir: Path, binary: Path | None = None) -> None:
+    """Invoke the TISE solver subprocess per docs/SDD.md Sec 7.2.1.
+
+    `binary` defaults to find_tise_solver()'s result, resolved at call time
+    rather than import time so that a binary built after this module was
+    imported is still found.
+    """
+    if binary is None:
+        binary = find_tise_solver()
     try:
         tise_output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:

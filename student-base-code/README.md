@@ -60,7 +60,7 @@ In `main.cpp`, there is a compile-time constant:
 
 ```cpp
 // Select orbital angular momentum l (integer >= 0).
-constexpr int L = 0;  // set to 0, 1, 2, ...
+constexpr int L = 1; // <-- change this integer to 0, 1, 2, ...
 ```
 
 Set `L` to the desired (\ell) value and rebuild. Both the potential and the analytic comparison used for the eigenvalue error will update accordingly.
@@ -71,7 +71,6 @@ Set `L` to the desired (\ell) value and rebuild. Both the potential and the anal
 
 * A C++ compiler with C++17 support (e.g. `g++ >= 7`)
 * LAPACK and BLAS libraries (for `dsbgv_`)
-* Eigen C++ library.
 
 On many Linux systems these can be installed with your package manager, e.g.:
 
@@ -188,14 +187,14 @@ From the project root directory:
 1. Compile the source files:
 
    ```bash
-   g++ -O2 -std=cpp17 -c BSpline.cpp
-   g++ -O2 -std=cpp17 -c main.cpp
+   g++ -O2 -std=c++17 -c BSpline.cpp
+   g++ -O2 -std=c++17 -c main.cpp
    ```
 
 2. Link them with LAPACK and BLAS:
 
    ```bash
-   g++ -O2 -std=cpp17 -o H-BoundStates main.o BSpline.o -llapack -lblas
+   g++ -O2 -std=c++17 -o H-BoundStates main.o BSpline.o -llapack -lblas
    ```
 
 3. Run the executable **from the project directory (or wherever `H-BoundStates` resides)**:

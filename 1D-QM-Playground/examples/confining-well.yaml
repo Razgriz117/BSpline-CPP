@@ -1,0 +1,80 @@
+# ===========================================================================
+# TEMPLATE: bound + continuum states of a confining potential
+#
+# Copy this file, change the marked sections, run:
+#
+#     python3 controller.py --config examples/confining-well.yaml
+#
+# As shipped it solves a finite square well of depth 1 and width 10 with a
+# hard wall at the origin:
+#
+#       V(x) = -1      0 <= x < 10          (the well)
+#       V(x) =  0     10 <= x <= 100        (the flat asymptotic region)
+#       psi(0) = psi(100) = 0               (imposed by the basis, always)
+#
+# It has 4 bound states and a continuum above E = 0, and every number it
+# produces can be checked against the closed-form transcendental solution --
+# which is why it is the template. See
+# docs/guides/student-guide.pdf for the walkthrough.
+# ===========================================================================
+
+run:
+  run_tise:     true
+  run_tdse:     false      # TDSE is not implemented; leave false
+  run_analysis: true       # produce the plots as well as the .dat files
+  output_dir:   "./data/confining-well"
+
+physics:
+  mass: 1.0                # <-- CHANGE for a different particle
+  hbar: 1.0
+
+# --- The basis ------------------------------------------------------------
+# domain  : [xMin, xMax]. psi is forced to 0 at BOTH ends, so xMax must be
+#           far enough out that every bound state you care about has decayed.
+# n_nodes : resolution. This is the knob to turn for convergence.
+# order   : B-spline order k (polynomial degree k-1). 8-12 is a good range;
+#           higher order buys accuracy per node but widens the matrix band.
+bspline:
+  n_nodes: 201             # <-- CHANGE (and re-run) to check convergence
+  order:   12
+  domain:  [0.0, 100.0]    # <-- CHANGE: xMax must contain the whole bound state
+
+# --- The potential --------------------------------------------------------
+# One entry per piece. 'domain' is interval notation ([ ] closed, ( ) open);
+# 'function' is an expression in x with LITERAL numeric constants only -- you
+# cannot refer to mass, hbar, or any other config field, so bake the numbers in.
+#
+# The pieces must tile the bspline domain. A jump in V between pieces (a step)
+# or a jump in V' (a kink) is detected automatically, and degenerate knots are
+# inserted at the join so the basis can represent the reduced smoothness that
+# the true wavefunction has there. You do not need to do anything for that.
+potential:                                            # <-- CHANGE THIS BLOCK
+  - "{'domain': '[0, 10)',   'function': '-1.0'}"
+  - "{'domain': '[10, 100]', 'function': '0'}"
+
+tise:
+  n_pts_eigenstate: 301    # points at which each eigenstate is tabulated
+  error_threshold:  1.0e-10
+
+  # --- The continuum ------------------------------------------------------
+  # Scattering states and phase shifts, obtained by matching to the
+  # asymptotic form at xMax. This requires the potential to be FLAT (or a
+  # pure Coulomb tail, see `l`) near xMax -- it is the one place the box is
+  # treated as open rather than as a wall.
+  #
+  # Phase shifts need a finer basis than bound states do: the error grows
+  # sharply once the de Broglie wavelength at E_max stops being resolved by
+  # the node spacing. Raise n_nodes until delta(E) stops moving.
+  continuum:
+    enabled:     true
+    E_threshold: 0.0       # bottom of the continuum (V at infinity)
+    E_max:       0.5       # <-- CHANGE: top of the scanned range
+    n_energies:  50
+    n_pts:       500
+    # l: 1                 # only for a genuine 1/x Coulomb tail; must match
+                           # the l(l+1)/2x^2 term baked into `function` above
+
+visualization:
+  spectrum_overview: true  # V(x) with each psi_n drawn on its level E_n
+  eigenstates:       true
+  phase_shifts:      true

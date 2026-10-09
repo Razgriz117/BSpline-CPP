@@ -32,6 +32,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import math
+
 import pytest
 import yaml
 
@@ -55,6 +57,7 @@ from analysis import (
     read_hamiltonian,
     read_overlap,
     read_phase_shifts,
+    read_potential,
     read_tise_output,
     run,
 )
@@ -475,6 +478,43 @@ class TestReadContinuumStates:
 
 
 # ─── read_eigenstates ───────────────────────────────────────────────────────
+
+
+class TestReadPotential:
+    """potential.dat is optional, and NaN in it is meaningful, not malformed."""
+
+    def test_missing_file_returns_empty_not_error(self, tmp_path):
+        # A run produced before tise_solver emitted this file has none; that
+        # is normal, unlike the Sec 7.2.2 required files.
+        assert read_potential(tmp_path) == []
+
+    def test_reads_two_columns(self, tmp_path):
+        (tmp_path / "potential.dat").write_text(
+            "# potential.dat\n# col 1 = x, col 2 = V(x)\n"
+            " 0.0 1.0\n 1.0 2.5\n"
+        )
+        assert read_potential(tmp_path) == [(0.0, 1.0), (1.0, 2.5)]
+
+    def test_nan_is_preserved_not_rejected(self, tmp_path):
+        # tise_solver writes NaN wherever no potential piece covers x -- the
+        # measure-zero-gap idiom for excising a singularity, or an endpoint an
+        # open interval excludes (hydrogen's '(0, inf)' omits x=0, where -1/x
+        # diverges). Rejecting it would make the file unreadable for exactly
+        # the potentials most worth plotting; dropping the row would
+        # desynchronize this grid from eigenstates.dat's.
+        (tmp_path / "potential.dat").write_text(
+            "# potential.dat\n 0.0 nan\n 1.0 -1.0\n"
+        )
+        rows = read_potential(tmp_path)
+        assert len(rows) == 2
+        assert math.isnan(rows[0][1])
+        assert rows[1] == (1.0, -1.0)
+
+    def test_required_files_still_reject_non_finite(self, tmp_path):
+        # The allow_non_finite opt-out must not have leaked to other readers.
+        (tmp_path / "eigenvalues.dat").write_text("# eigenvalues.dat\n 0 nan\n")
+        with pytest.raises(TiseOutputError, match="non-finite"):
+            read_eigenvalues(tmp_path / "eigenvalues.dat")
 
 
 class TestReadEigenstates:

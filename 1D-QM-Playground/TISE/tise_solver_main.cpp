@@ -116,6 +116,46 @@ std::map<std::string, std::string> parsePotentialConfig(const YAML::Node &potent
     return potential;
 }
 
+// Parse config["potential_deltas"], an optional YAML sequence of mappings
+//
+//     potential_deltas:
+//       - {x: 0.0, strength: -1.0}
+//
+// meaning V(x) += strength * delta(x - x0). Absent means "no deltas", which
+// is the overwhelmingly common case and must stay byte-identical to a config
+// written before this field existed.
+//
+// A delta cannot be expressed as a piecewise `function` string, which is why
+// it is its own field rather than another potential piece: there is nothing
+// in an expression in x for the join classifier to detect.
+std::vector<tise::DeltaTerm> parseDeltaConfig(const YAML::Node &deltasNode)
+{
+    std::vector<tise::DeltaTerm> deltas;
+    if (!deltasNode)
+        return deltas;
+
+    if (!deltasNode.IsSequence())
+        throw std::runtime_error(
+            "'potential_deltas' must be a YAML list of {x: ..., strength: ...} mappings");
+
+    for (const auto &node : deltasNode)
+    {
+        if (!node.IsMap() || !node["x"] || !node["strength"])
+            throw std::runtime_error(
+                "each 'potential_deltas' entry must be a mapping with both "
+                "'x' and 'strength' keys, e.g. {x: 0.0, strength: -1.0}");
+
+        tise::DeltaTerm term;
+        // A non-numeric value throws YAML::TypedBadConversion, which derives
+        // from std::exception and is caught by main's handler alongside every
+        // other config error.
+        term.x        = node["x"].as<double>();
+        term.strength = node["strength"].as<double>();
+        deltas.push_back(term);
+    }
+    return deltas;
+}
+
 struct WarningEntry
 {
     std::string category;
@@ -205,6 +245,12 @@ int main(int argc, char *argv[])
         // function's own tise.cpp definition for why).
         tise::validatePotentialExpressionsParse(potential);
 
+        // Dirac delta terms. Validated here, before any solve work, so a
+        // delta placed outside the domain is a named configuration error
+        // rather than a knot insertion that silently does nothing.
+        const std::vector<tise::DeltaTerm> deltas = parseDeltaConfig(config["potential_deltas"]);
+        tise::validateDeltaTerms(deltas, rMin, rMax);
+
         // Construct the B-spline basis: automatically strategic per REQ-F-050
         // if the potential has detectable Step/StitchedKink/Singular
         // structure, with A4b interior-singular-B-spline removal applied --
@@ -214,7 +260,8 @@ int main(int argc, char *argv[])
         // see docs/planning/tise-release-readiness-plan.md Part A). A
         // potential with no detectable structure produces the same uniform
         // grid + {1} drop-set as before, byte-identical.
-        tise::StrategicGridResult sgr = tise::buildStrategicGridAndDropSet(nNodes, order, rMin, rMax, potential);
+        tise::StrategicGridResult sgr = tise::buildStrategicGridAndDropSet(
+            nNodes, order, rMin, rMax, potential, tise::kDefaultEdgeTolerance, deltas);
         bspline::BSpline &bs = sgr.bs;
         const int nBSplines = sgr.nBSplines;
         const int nEn       = sgr.nEnBound;
@@ -417,7 +464,7 @@ int main(int argc, char *argv[])
         // Delta (set above, nullopt for the common case) taper the
         // potential near the wall when Case 3 was detected.
         auto [H, S] = tise::fillBandedMatrices(bs, nEn + 1, order, /*L=*/0, potential, sgr.fillDropSet,
-                                                case3RightR, case3RightDelta, mass, hbar);
+                                                case3RightR, case3RightDelta, mass, hbar, deltas);
 
         // Solve. H, S are passed by value -- solveGeneralizedEigenproblem's
         // internal LAPACK call overwrites its own copies, not these, so H/S
@@ -496,11 +543,9 @@ int main(int argc, char *argv[])
         // happily draw.
         if (continuumEnabled && !sgr.rightEdgeSingular && !sgr.interiorSingularSplit)
         {
-            // mass=1.0 hardcoded, matching fillBandedMatrices' own
-            // internal kinetic-energy term (which already hardcodes /2.0,
-            // i.e. mass=1 baked into the matrix fill itself) -- reading
-            // config["physics"]["mass"] only here would suggest it's
-            // configurable when the core solve ignores it entirely.
+            // mass/hbar come from config["physics"] (ADR-0017); fillBandedMatrices'
+            // kinetic term is hbar^2/(2*mass), so this ceiling is computed in the
+            // same units the matrix fill actually used.
             // minInterNodeGap (not a flat (rMax-rMin)/(nNodes-1) average):
             // sgr.grid may now be a non-uniform strategic grid, and the
             // physically-correct nodeSpacing for a non-uniform grid is its
@@ -596,6 +641,13 @@ int main(int argc, char *argv[])
             }
             tise::writeContinuumInfo(phaseShiftsOut, bs, ar, energyGrid, states, continuumStateOut,
                                       n_pts, rMin, rMax, er, sgr.fillDropSet);
+            {
+                // Continuum counterpart of eigenstates.dat -- see there.
+                std::ofstream ctOut(outputDir / "continuum_states.dat");
+                tise::writeContinuumTable(ctOut, bs, ar, energyGrid, states, er,
+                                           n_pts, rMin, rMax, sgr.fillDropSet,
+                                           mass, hbar);
+            }
         }
 
         // er.vectors are nEn(=nEnBound)-dimensional -- excluded from them is
@@ -619,6 +671,25 @@ int main(int argc, char *argv[])
         {
             std::ofstream out(outputDir / "eigenvalues.dat");
             tise::writeEigenvalues(out, er, er.dim);
+        }
+        {
+            // V(x) as data, on the same grid as eigenstates.dat: the potential
+            // is a set of muparser expressions only this binary can evaluate,
+            // so emitting it here is what lets any downstream script draw V(x)
+            // under the wavefunctions without reimplementing the parser.
+            std::ofstream out(outputDir / "potential.dat");
+            tise::writePotential(out, potential, nPtsEigenstate, rMin, rMax);
+        }
+        {
+            // One consolidated, directly-loadable table of every eigenstate,
+            // alongside (not instead of) the per-state eigenstate_NNN.dat
+            // files: column 1 is x, column n+1 is psi_n, energies in the
+            // header. Removes the glob + index-join + 0-vs-1-based off-by-one
+            // a caller would otherwise need to plot psi_n at its own E_n.
+            std::ofstream out(outputDir / "eigenstates.dat");
+            tise::writeEigenstateTable(out, bs, er, er.dim, nBSplines,
+                                        nPtsEigenstate, rMin, rMax, fullDropSet,
+                                        mass, hbar);
         }
         {
             std::ofstream out(outputDir / "eigenvectors.dat");

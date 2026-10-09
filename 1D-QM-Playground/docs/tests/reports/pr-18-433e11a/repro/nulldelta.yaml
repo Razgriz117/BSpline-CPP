@@ -1,0 +1,5 @@
+run: {run_tise: true, run_tdse: false, run_analysis: false, output_dir: "./out-nulldelta"}
+bspline: {n_nodes: 81, order: 8, domain: [-20.0, 20.0]}
+potential: [ "{'domain': '[-20, 20]', 'function': '0'}" ]
+potential_deltas:
+tise: {n_pts_eigenstate: 1001, error_threshold: 1.0e-10, continuum: {enabled: false}}

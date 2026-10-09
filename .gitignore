@@ -7,3 +7,11 @@ __pycache__/
 *.pyc
 .coverage
 .worktrees/
+
+# LaTeX build artifacts (the generated PDF itself is committed, so students
+# do not need a TeX installation to read the guide).
+*.aux
+*.toc
+*.out
+*.synctex.gz
+docs/**/*.log
