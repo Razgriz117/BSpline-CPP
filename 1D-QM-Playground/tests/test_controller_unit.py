@@ -393,6 +393,44 @@ class TestValidateConfig:
         assert "tise" not in cfg
         validate_config(cfg)  # must not raise
 
+    @pytest.mark.parametrize("bad", [1, 0, -4])
+    def test_n_nodes_below_2_raises(self, bad):
+        cfg = _minimal_cfg()
+        cfg["bspline"]["n_nodes"] = bad
+        with pytest.raises(ConfigValidationError, match="n_nodes"):
+            validate_config(cfg)
+
+    def test_n_nodes_exactly_2_passes(self):
+        # 2 is the minimum list length; the rule is "< 2 is rejected".
+        cfg = _minimal_cfg()
+        cfg["bspline"]["n_nodes"] = 2
+        validate_config(cfg)  # must not raise
+
+    @pytest.mark.parametrize("bad", [None, "81", 81.0, True, [81]])
+    def test_n_nodes_wrong_type_raises_config_error_not_a_raw_exception(self, bad):
+        cfg = _minimal_cfg()
+        cfg["bspline"]["n_nodes"] = bad
+        with pytest.raises(ConfigValidationError, match="n_nodes"):
+            validate_config(cfg)
+
+    @pytest.mark.parametrize("bad", [None, "5", 5.0, True, [5]])
+    def test_n_pts_wrong_type_raises_config_error_not_a_raw_exception(self, bad):
+        # The n_pts >= 2 comparison itself used to raise TypeError for
+        # null / string values -- the same class of "config typo -> raw
+        # traceback" this validation exists to prevent.
+        for tise_cfg in ({"n_pts_eigenstate": bad}, {"continuum": {"n_pts": bad}}):
+            cfg = _minimal_cfg()
+            cfg["tise"] = tise_cfg
+            with pytest.raises(ConfigValidationError, match="n_pts"):
+                validate_config(cfg)
+
+    @pytest.mark.parametrize("bad", [[1], "tise", 3])
+    def test_tise_section_not_a_mapping_raises_config_error(self, bad):
+        cfg = _minimal_cfg()
+        cfg["tise"] = bad
+        with pytest.raises(ConfigValidationError, match="tise"):
+            validate_config(cfg)
+
     def test_continuum_n_pts_below_2_raises(self):
         cfg = _minimal_cfg()
         cfg["tise"] = {"continuum": {"n_pts": 1}}

@@ -1357,14 +1357,22 @@ EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
     const int ka   = order - 1;
     const int ldab = order;
 
-    // Eigen::GeneralizedSelfAdjointEigenSolver only ever reads the lower
-    // triangle (confirmed against the installed Eigen3 headers: it always
-    // constructs matA.selfadjointView<Lower>(), with no Upper/Lower option
-    // in its API) -- the upper-triangle entry is written once per band
-    // position below only because A/B are symmetric and this is the
-    // simplest way to keep both triangles consistent for anything that
-    // might read them later; GeneralizedSelfAdjointEigenSolver itself never
-    // looks at A(i,j)/B(i,j) for i < j.
+    // An empty basis is reachable from a legal-looking config (n_nodes=2,
+    // order=2 gives 2 B-splines, and the classic wall exclusion removes
+    // both). Eigen's solvers have no 0x0 contract -- they assert in debug
+    // builds and segfault under NDEBUG -- so refuse it by name here.
+    if (nEn < 1)
+        throw std::runtime_error(
+            "the B-spline basis has no usable functions left after boundary/drop-set "
+            "removal (nEn=" + std::to_string(nEn) + "); increase bspline.n_nodes or "
+            "bspline.order");
+
+    // Only the LOWER triangle of A and B is filled below. Eigen's
+    // GeneralizedSelfAdjointEigenSolver (and the SelfAdjointEigenSolver used
+    // for the conditioning check) reads only the lower triangle -- confirmed
+    // against the installed Eigen3 headers, which construct
+    // matA.selfadjointView<Lower>() with no Upper/Lower option in the API --
+    // so mirroring into the upper triangle would be dead writes.
     Eigen::MatrixXd A = Eigen::MatrixXd::Zero(nEn, nEn);
     Eigen::MatrixXd B = Eigen::MatrixXd::Zero(nEn, nEn);
     for (int j = 0; j < nEn; ++j)
@@ -2064,6 +2072,18 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
                                                    Real edgeTolerance,
                                                    const std::vector<DeltaTerm> &deltas)
 {
+    // The node-count rule is about what the caller asked for. It has to be
+    // checked here, before knot insertion: every delta/join splices extra
+    // knots in, so the grid.size() that BSpline::init sees below can look
+    // perfectly valid for a request like n_nodes=1, and a negative request
+    // would never reach init at all (buildUniformRadialGrid sizes a vector
+    // from it). Two nodes is the minimum; equal (degenerate) nodes are not
+    // rejected here -- BSpline::init's contract is "non-decreasing", and the
+    // multiplicity and conditioning checks own whether such a grid is usable.
+    if (nNodes < 2)
+        throw std::runtime_error("invalid bspline.n_nodes: n_nodes must be >= 2 (got " +
+                                 std::to_string(nNodes) + ") (BSpline::init code -1)");
+
     // Strategic grid construction is automatic, not something a caller
     // opts into separately: detectPotentialStructure always runs first, and
     // its result alone decides whether the grid ends up strategic. A

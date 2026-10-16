@@ -202,21 +202,49 @@ def validate_config(cfg: dict) -> None:
         )
     validate_potential_deltas(cfg.get("potential_deltas"), domain_tuple)
 
-    # Mirrors tise_solver_main.cpp's own validation of these two fields
-    # (PR #18 review, finding 3.3) -- deliberately scoped to only fire when
-    # the field is present, since controller.py does not otherwise require
-    # a 'tise' section at all.
-    tise_cfg = cfg.get("tise") or {}
-    if "n_pts_eigenstate" in tise_cfg and tise_cfg["n_pts_eigenstate"] < 2:
+    # Mirrors the solver's own count validation (tise_solver_main.cpp, and
+    # buildStrategicGridAndDropSet for n_nodes; PR #18 review finding 3.3):
+    # a list of nodes / grid points shorter than 2 is meaningless (the grid
+    # formula divides by n - 1, and a basis needs at least one interval).
+    # Deliberately scoped to fire only when the field is present, since this
+    # module does not otherwise require these sections. Equal ("degenerate")
+    # nodes are not this check's concern -- only the count is.
+    _require_int_at_least(cfg["bspline"].get("n_nodes", 2), "bspline.n_nodes", 2)
+
+    tise_cfg = _optional_mapping(cfg.get("tise"), "tise")
+    if "n_pts_eigenstate" in tise_cfg:
+        _require_int_at_least(tise_cfg["n_pts_eigenstate"], "tise.n_pts_eigenstate", 2)
+    continuum_cfg = _optional_mapping(tise_cfg.get("continuum"), "tise.continuum")
+    if "n_pts" in continuum_cfg:
+        _require_int_at_least(continuum_cfg["n_pts"], "tise.continuum.n_pts", 2)
+
+
+def _optional_mapping(value, name: str) -> dict:
+    """`value` as a dict, treating an absent/null section as empty. A present
+    but non-mapping section (a list, a scalar) is a config error, not a
+    reason for the lookups below to raise AttributeError/TypeError."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigValidationError(f"'{name}' must be a mapping, got {type(value).__name__}")
+    return value
+
+
+def _require_int_at_least(value, name: str, minimum: int) -> None:
+    """Raise ConfigValidationError unless `value` is an int >= `minimum`.
+
+    The type check comes first because the solver reads these with
+    yaml-cpp's `.as<int>()`: null, a string, or a float like 5.0 is rejected
+    there too, and comparing None/str against an int here would raise a raw
+    TypeError instead of naming the field. bool is an int subclass in Python
+    but `true` is not a count, so it is excluded explicitly.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigValidationError(
-            f"'tise.n_pts_eigenstate' must be >= 2 (got "
-            f"{tise_cfg['n_pts_eigenstate']})"
+            f"'{name}' must be an integer >= {minimum} (got {value!r})"
         )
-    continuum_cfg = tise_cfg.get("continuum") or {}
-    if "n_pts" in continuum_cfg and continuum_cfg["n_pts"] < 2:
-        raise ConfigValidationError(
-            f"'tise.continuum.n_pts' must be >= 2 (got {continuum_cfg['n_pts']})"
-        )
+    if value < minimum:
+        raise ConfigValidationError(f"'{name}' must be >= {minimum} (got {value})")
 
 
 def validate_potential_deltas(deltas_cfg, domain: tuple[float, float]) -> None:

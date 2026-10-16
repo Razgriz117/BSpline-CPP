@@ -3648,6 +3648,54 @@ TEST(BuildStrategicGridAndDropSetTest, ThrowsDescriptiveErrorForTooFewNodes)
     }
 }
 
+// The n_nodes >= 2 rule applies to the node count the USER asked for, not to
+// the size of the grid after strategic knot insertion has padded it: a delta
+// (or a potential join) splices extra knots in, so n_nodes=1 + one delta
+// used to reach BSpline::init as a perfectly valid-looking 1 + (order-1)-node
+// grid and sail through, failing much later with an unrelated "overlap matrix
+// is not usable" message.
+TEST(BuildStrategicGridAndDropSetTest, RejectsTooFewRequestedNodesEvenWhenDeltaKnotsPadTheGrid)
+{
+    std::map<std::string, std::string> potential = {{"[-20,20]", "0"}};
+    const std::vector<tise::DeltaTerm> deltas = {{0.0, -1.0}};
+    for (int nNodes : {1, 0, -3})
+    {
+        try
+        {
+            tise::buildStrategicGridAndDropSet(nNodes, 8, -20.0, 20.0, potential,
+                                               tise::kDefaultEdgeTolerance, deltas);
+            FAIL() << "expected std::runtime_error for n_nodes=" << nNodes;
+        }
+        catch (const std::runtime_error &e)
+        {
+            const std::string msg = e.what();
+            EXPECT_NE(msg.find("n_nodes"), std::string::npos) << msg;
+            EXPECT_NE(msg.find(std::to_string(nNodes)), std::string::npos) << msg;
+        }
+    }
+}
+
+// Two nodes is the minimum, and a DEGENERATE pair (equal values) is not
+// rejected by the node-count rule -- BSpline::init's contract is
+// "non-decreasing", and the multiplicity/conditioning checks downstream own
+// the question of whether such a grid is usable.
+TEST(BuildStrategicGridAndDropSetTest, TwoRequestedNodesPassTheNodeCountRule)
+{
+    std::map<std::string, std::string> potential = {{"[0,40]", "0"}};
+    EXPECT_NO_THROW(tise::buildStrategicGridAndDropSet(2, 4, 0.0, 40.0, potential));
+
+    // Degenerate pair: must not be refused for being "too few nodes".
+    std::map<std::string, std::string> degenerate = {{"[5,5]", "0"}};
+    try
+    {
+        tise::buildStrategicGridAndDropSet(2, 4, 5.0, 5.0, degenerate);
+    }
+    catch (const std::runtime_error &e)
+    {
+        EXPECT_EQ(std::string(e.what()).find("n_nodes must be >= 2"), std::string::npos) << e.what();
+    }
+}
+
 TEST(BuildStrategicGridAndDropSetTest, ThrowsDescriptiveErrorForInvalidOrder)
 {
     std::map<std::string, std::string> potential = {{"[0,40]", "0.5*x^2"}};
@@ -4150,6 +4198,24 @@ TEST(SolveEigenConditioningTest, RejectsRankDeficientOverlap)
     // near-coincident basis functions actually produce.
     auto [H, S] = identityAndSymmetric3x3(1.0, 1.0, 1.0, 1.0, 0.0, 0.0);
     EXPECT_THROW(tise::solveGeneralizedEigenproblem(H, S, 3, 3), std::runtime_error);
+}
+
+// An empty basis (nEn == 0) is reachable from a legal-looking config:
+// n_nodes=2, order=2 gives n_nodes+order-2 = 2 B-splines, and the classic
+// wall exclusion removes both. Eigen's solvers have no 0x0 contract (assert
+// in debug builds, segfault under NDEBUG), so this must be a named error.
+TEST(SolveEigenConditioningTest, RejectsAnEmptyBasisInsteadOfCrashing)
+{
+    EXPECT_THROW(tise::solveGeneralizedEigenproblem({}, {}, 0, 2), std::runtime_error);
+    try
+    {
+        tise::solveGeneralizedEigenproblem({}, {}, 0, 2);
+    }
+    catch (const std::runtime_error &e)
+    {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("n_nodes"), std::string::npos) << msg;
+    }
 }
 
 TEST(SolveEigenConditioningTest, AcceptsAWellConditionedOverlap)
