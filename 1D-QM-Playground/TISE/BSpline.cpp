@@ -541,6 +541,34 @@ namespace bspline
           return result;
      }
 
+     std::vector<Real> BSpline::evalBasisWindow(Real x, int derivativeOrder,
+                                                int &BsminOut, int &BsmaxOut) const
+     {
+          checkInitialization();
+
+          int i = whichInterval(x);
+          if (i < 0 || i > nNodes_ - 2)
+          {
+               BsminOut = 1;
+               BsmaxOut = 0; // empty: BsmaxOut < BsminOut
+               return {};
+          }
+
+          // Same window the no-skipFirst/Bsmin/Bsmax eval() overload above
+          // computes (Bsmi = i + 1 there, since skipFirst=false and
+          // Bsmin=-1 leave Bsmi at its max(1, i+1) = i+1 default).
+          BsminOut = i + 1;
+          BsmaxOut = std::min(nBSplines_, i + order_);
+
+          std::vector<Real> values;
+          values.reserve(static_cast<std::size_t>(BsmaxOut - BsminOut + 1));
+          for (int Bs = BsminOut; Bs <= BsmaxOut; ++Bs)
+          {
+               values.push_back(eval(x, Bs, derivativeOrder));
+          }
+          return values;
+     }
+
      Real BSpline::integral(const D2DFun &fun,
                             int Bs1,
                             int Bs2,

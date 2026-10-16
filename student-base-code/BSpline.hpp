@@ -133,9 +133,16 @@ namespace bspline
           // Compute the integral
           //
           //   ∫_a^b [ d^{n1} Bs_i(r)/dr^{n1} ] * f(r) *
-          //         [ d^{n2} Bs_j(r)/dr^{n2} ] * r^2 dr
+          //         [ d^{n2} Bs_j(r)/dr^{n2} ] dr
           //
           // where f(r) is a local operator.
+          //
+          // NOTE: the measure is plain dr -- there is NO r^2 Jacobian, despite what
+          // this comment long claimed. driverIntegral accumulates
+          // f(r)*B_i(r)*B_j(r) against Gauss-Legendre weights and nothing else.
+          // That is the correct measure here: these are matrix elements for the
+          // REDUCED radial function u(r) = r*R(r), normalized as integral |u|^2 dr,
+          // not the full 3D integral |R|^2 r^2 dr.
           //
           // This is a C++ analog of BSplineIntegral in Fortran, but simplified
           // to cover the use-cases in Template.f90:

@@ -195,6 +195,52 @@ class TestRunTiseSolverRealSubprocess:
         assert "TISE solver" in str(excinfo.value)
         assert not tise_dir.exists() or not any(tise_dir.iterdir())
 
+    def test_n_pts_eigenstate_below_2_raises_and_leaves_no_partial_files(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """Regression guard (PR #18 review, finding 3.3): the per-state grid
+        formula (rMax-rMin)*(ix-1)/(npts-1) in writeEigenstateTable and its
+        siblings divides by zero when npts=1, which was never checked --
+        the pre-fix binary exited 0 and wrote an eigenstates.dat whose only
+        data row was -nan in every column. Same "non-zero exit == no
+        partial output" contract as the other guards in this class."""
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["tise"]["n_pts_eigenstate"] = 1
+        bad_config = tmp_path / "config_n_pts_eigenstate_below_2.yaml"
+        with open(bad_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_tise_solver(str(bad_config), tise_dir, binary=tise_solver_binary)
+
+        assert "TISE solver" in str(excinfo.value)
+        assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
+    def test_continuum_n_pts_below_2_raises_and_leaves_no_partial_files(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        """Same regression guard as above, for the continuum grid's
+        (rMax-rMin)*(ix-1)/(npts-1) sites (writeContinuumTable and
+        writeContinuumInfo)."""
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["tise"]["continuum"]["enabled"] = True
+        cfg["tise"]["continuum"]["n_pts"] = 1
+        bad_config = tmp_path / "config_continuum_n_pts_below_2.yaml"
+        with open(bad_config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+
+        with pytest.raises(SolverStageError) as excinfo:
+            run_tise_solver(str(bad_config), tise_dir, binary=tise_solver_binary)
+
+        assert "TISE solver" in str(excinfo.value)
+        assert not tise_dir.exists() or not any(tise_dir.iterdir())
+
     def test_overlapping_potential_pieces_raises_and_leaves_no_partial_files(
         self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
     ):

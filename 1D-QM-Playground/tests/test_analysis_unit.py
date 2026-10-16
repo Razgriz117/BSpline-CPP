@@ -32,6 +32,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import math
+
 import pytest
 import yaml
 
@@ -48,6 +50,7 @@ from analysis import (
     main,
     plot_eigenstates,
     plot_phase_shifts,
+    plot_spectrum_overview,
     read_continuum_states,
     read_eigenstates,
     read_eigenvalues,
@@ -55,6 +58,7 @@ from analysis import (
     read_hamiltonian,
     read_overlap,
     read_phase_shifts,
+    read_potential,
     read_tise_output,
     run,
 )
@@ -477,6 +481,43 @@ class TestReadContinuumStates:
 # ─── read_eigenstates ───────────────────────────────────────────────────────
 
 
+class TestReadPotential:
+    """potential.dat is optional, and NaN in it is meaningful, not malformed."""
+
+    def test_missing_file_returns_empty_not_error(self, tmp_path):
+        # A run produced before tise_solver emitted this file has none; that
+        # is normal, unlike the Sec 7.2.2 required files.
+        assert read_potential(tmp_path) == []
+
+    def test_reads_two_columns(self, tmp_path):
+        (tmp_path / "potential.dat").write_text(
+            "# potential.dat\n# col 1 = x, col 2 = V(x)\n"
+            " 0.0 1.0\n 1.0 2.5\n"
+        )
+        assert read_potential(tmp_path) == [(0.0, 1.0), (1.0, 2.5)]
+
+    def test_nan_is_preserved_not_rejected(self, tmp_path):
+        # tise_solver writes NaN wherever no potential piece covers x -- the
+        # measure-zero-gap idiom for excising a singularity, or an endpoint an
+        # open interval excludes (hydrogen's '(0, inf)' omits x=0, where -1/x
+        # diverges). Rejecting it would make the file unreadable for exactly
+        # the potentials most worth plotting; dropping the row would
+        # desynchronize this grid from eigenstates.dat's.
+        (tmp_path / "potential.dat").write_text(
+            "# potential.dat\n 0.0 nan\n 1.0 -1.0\n"
+        )
+        rows = read_potential(tmp_path)
+        assert len(rows) == 2
+        assert math.isnan(rows[0][1])
+        assert rows[1] == (1.0, -1.0)
+
+    def test_required_files_still_reject_non_finite(self, tmp_path):
+        # The allow_non_finite opt-out must not have leaked to other readers.
+        (tmp_path / "eigenvalues.dat").write_text("# eigenvalues.dat\n 0 nan\n")
+        with pytest.raises(TiseOutputError, match="non-finite"):
+            read_eigenvalues(tmp_path / "eigenvalues.dat")
+
+
 class TestReadEigenstates:
     def test_happy_path_multiple_files_ascending_order_and_ignores_unrelated_files(self, tmp_path):
         _write_dat(tmp_path / "eigenvalues.dat", "# eigenvalues.dat: index, E_n", "0  -1.0")
@@ -825,6 +866,35 @@ class TestPlotEigenstates:
         mock_plot.assert_called_once_with([0.0], [4.0])
 
 
+# ─── plot_spectrum_overview ─────────────────────────────────────────────────
+
+
+class TestPlotSpectrumOverview:
+    def test_eigenstate_with_no_points_does_not_raise(self, tmp_path):
+        # PR #18 review, finding 3.4: the inner max(abs(p.phi) for p in st)
+        # has no `default=`, unlike the outer max() wrapping it -- an
+        # eigenstate with zero sample points (e.g. from
+        # n_pts_eigenstate <= 0) raised a bare ValueError instead of a
+        # clean AnalysisError.
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, -1.0)],
+            eigenstates=[(1, [])],
+        )
+        plot_spectrum_overview(data, [], str(tmp_path))  # must not raise
+
+    def test_no_eigenstates_writes_no_file(self, tmp_path):
+        plot_spectrum_overview(_empty_tise_data(), [], str(tmp_path))
+        assert not (tmp_path / "spectrum_overview.png").exists()
+
+    def test_normal_eigenstate_writes_one_png(self, tmp_path):
+        data = _empty_tise_data(
+            eigenvalues=[EigenvalueRow(0, -1.0)],
+            eigenstates=[(1, [EigenstatePoint(0.0, 0.0), EigenstatePoint(1.0, 0.5)])],
+        )
+        plot_spectrum_overview(data, [], str(tmp_path))
+        assert (tmp_path / "spectrum_overview.png").is_file()
+
+
 # ─── plot_phase_shifts ──────────────────────────────────────────────────────
 #
 # visualization.phase_shifts (config.yaml:96) is documented TISE-only, NOT
@@ -1040,6 +1110,21 @@ class TestRun:
         run(str(config_path), str(tise_dir), str(tdse_dir))
 
         assert not (tise_dir / "eigenstate_1.png").exists()
+
+    def test_visualization_present_but_null_does_not_raise(self, tmp_path):
+        # PR #18 review, finding 3.6: 'visualization:' with no value parses
+        # to None, not an absent key -- cfg.get("visualization", {}) then
+        # returns None (the key WAS found), and .get(...) on it raised
+        # AttributeError. Pre-existing for the other three toggles; this
+        # new line runs first and defaults True (opt-out), so it's the
+        # first to trip.
+        config_path = _write_yaml(tmp_path / "config.yaml", {"visualization": None})
+        tise_dir = tmp_path / "tise"
+        tise_dir.mkdir()
+        _write_required_tise_files(tise_dir)
+        tdse_dir = tmp_path / "does_not_exist_tdse"
+
+        run(str(config_path), str(tise_dir), str(tdse_dir))  # must not raise
 
     def test_visualization_bound_states_squared_true_threads_flag_into_plot_eigenstates(self, tmp_path):
         # Wiring test (mirrors TestMain's own "mock the callee, check call

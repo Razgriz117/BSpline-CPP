@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -26,13 +27,59 @@ import yaml
 # to the bspline domain edges (see validate_potential_tiling).
 EPS = 1e-9
 
-# TISE/build/tise_solver resolved relative to this file's OWN location (not
-# the current working directory), so controller.py is runnable from any
-# directory. This deliberately points at the real, current build location
-# (TISE/build/tise_solver) rather than the SDD Sec 11.2 "target" unified
-# ./build/tise_solver layout -- that directory-layout migration is a
-# separate, out-of-scope concern.
-DEFAULT_TISE_SOLVER = Path(__file__).resolve().parent / "TISE" / "build" / "tise_solver"
+# How close two deltas may be (in x) before validate_potential_deltas
+# refuses the config. Mirrors tise.hpp's kDeltaCollisionTolerance on the
+# C++ side -- NOT the same concern as EPS above. Measured empirically
+# (docs/tests/reports/pr-18-433e11a/): two deltas 1e-9 to 1e-13 apart
+# already corrupt the ground-state energy by 4-12 orders of magnitude
+# while the overlap matrix stays positive definite to Cholesky throughout;
+# 1e-6 and below is already physically indistinguishable from one merged
+# delta.
+DELTA_COLLISION_TOLERANCE = 1e-6
+
+# TISE/build/ resolved relative to this file's OWN location (not the current
+# working directory), so controller.py is runnable from any directory. This
+# deliberately points at the real, current build location (TISE/build/) rather
+# than the SDD Sec 11.2 "target" unified ./build/ layout -- that
+# directory-layout migration is a separate, out-of-scope concern.
+TISE_BUILD_DIR = Path(__file__).resolve().parent / "TISE" / "build"
+
+# The executable's name and exact location are not the same on every platform,
+# so they are searched for rather than hardcoded:
+#
+#   - Windows appends .exe.
+#   - Multi-config CMake generators (Visual Studio, Xcode) put the binary in a
+#     per-configuration subdirectory -- build/Release/ or build/Debug/ -- while
+#     single-config generators (Unix Makefiles, Ninja) put it directly in
+#     build/. Release is checked before Debug because a plain
+#     `cmake --build build` with no --config produces Debug on MSVC, and if a
+#     student has both, the optimized one is the one they want.
+_SOLVER_EXE = "tise_solver.exe" if os.name == "nt" else "tise_solver"
+
+
+def find_tise_solver(build_dir: Path = TISE_BUILD_DIR) -> Path:
+    """Locate the built tise_solver binary across platforms and CMake generators.
+
+    Returns the first candidate that exists. If none does, returns the
+    single-config path anyway so the caller's "could not execute" error names
+    the location a student is most likely to have expected.
+    """
+    candidates = [
+        build_dir / _SOLVER_EXE,
+        build_dir / "Release" / _SOLVER_EXE,
+        build_dir / "Debug" / _SOLVER_EXE,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+# Resolved once at import for callers that want the path without running
+# anything. run_tise_solver deliberately does NOT use this: it re-resolves at
+# call time, because the binary may be built after this module is imported
+# (the pytest integration suite does exactly that).
+DEFAULT_TISE_SOLVER = find_tise_solver()
 
 # analysis.py resolved the same way, for the same reason (see above).
 DEFAULT_ANALYSIS_SCRIPT = Path(__file__).resolve().parent / "analysis.py"
@@ -140,6 +187,143 @@ def validate_config(cfg: dict) -> None:
         raise ConfigValidationError(f"'bspline.domain' must be a [lo, hi] pair: {domain!r}") from e
 
     validate_potential_tiling(pieces, domain_tuple)
+
+    # 'potential_deltas: null' and 'potential_deltas:' (present, no value)
+    # both parse to the same Python None as the key being absent entirely
+    # -- but the C++ solver's yaml-cpp sees a *defined* null node for the
+    # first two and throws. "C++ is authoritative" means this pre-flight
+    # check must reject what the solver will reject, not silently narrow
+    # its own promise ("catching them here gives the error before a
+    # subprocess is launched") for this one input shape.
+    if "potential_deltas" in cfg and cfg["potential_deltas"] is None:
+        raise ConfigValidationError(
+            "'potential_deltas' must be a list of {x: ..., strength: ...} "
+            "mappings, not null"
+        )
+    validate_potential_deltas(cfg.get("potential_deltas"), domain_tuple)
+
+    # Mirrors the solver's own count validation (tise_solver_main.cpp, and
+    # buildStrategicGridAndDropSet for n_nodes; PR #18 review finding 3.3):
+    # a list of nodes / grid points shorter than 2 is meaningless (the grid
+    # formula divides by n - 1, and a basis needs at least one interval).
+    # Deliberately scoped to fire only when the field is present, since this
+    # module does not otherwise require these sections. Equal ("degenerate")
+    # nodes are not this check's concern -- only the count is.
+    _require_int_at_least(cfg["bspline"].get("n_nodes", 2), "bspline.n_nodes", 2)
+
+    tise_cfg = _optional_mapping(cfg.get("tise"), "tise")
+    if "n_pts_eigenstate" in tise_cfg:
+        _require_int_at_least(tise_cfg["n_pts_eigenstate"], "tise.n_pts_eigenstate", 2)
+    continuum_cfg = _optional_mapping(tise_cfg.get("continuum"), "tise.continuum")
+    if "n_pts" in continuum_cfg:
+        _require_int_at_least(continuum_cfg["n_pts"], "tise.continuum.n_pts", 2)
+
+
+def _optional_mapping(value, name: str) -> dict:
+    """`value` as a dict, treating an absent/null section as empty. A present
+    but non-mapping section (a list, a scalar) is a config error, not a
+    reason for the lookups below to raise AttributeError/TypeError."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigValidationError(f"'{name}' must be a mapping, got {type(value).__name__}")
+    return value
+
+
+def _require_int_at_least(value, name: str, minimum: int) -> None:
+    """Raise ConfigValidationError unless `value` is an int >= `minimum`.
+
+    The type check comes first because the solver reads these with
+    yaml-cpp's `.as<int>()`: null, a string, or a float like 5.0 is rejected
+    there too, and comparing None/str against an int here would raise a raw
+    TypeError instead of naming the field. bool is an int subclass in Python
+    but `true` is not a count, so it is excluded explicitly.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigValidationError(
+            f"'{name}' must be an integer >= {minimum} (got {value!r})"
+        )
+    if value < minimum:
+        raise ConfigValidationError(f"'{name}' must be >= {minimum} (got {value})")
+
+
+def validate_potential_deltas(deltas_cfg, domain: tuple[float, float]) -> None:
+    """Validate the optional 'potential_deltas' section.
+
+    Each entry is a mapping {x: <float>, strength: <float>} meaning
+    V(x) += strength * delta(x - x0). Absent or None means no deltas, which
+    is the common case; every config written before this section existed
+    must keep validating unchanged.
+
+    A delta cannot be written as an expression in x, which is why it is a
+    separate section rather than another `potential` piece -- and why it is
+    excluded from validate_potential_tiling, whose job is to check that the
+    piecewise V(x) covers the domain. Deltas neither extend nor puncture
+    that tiling.
+
+    The solver performs the same checks independently (it is separately
+    invocable), but catching them here gives the error before a subprocess
+    is launched.
+
+    Also rejects two deltas within DELTA_COLLISION_TOLERANCE of each other
+    (they degenerate the B-spline basis the solver builds). This does NOT
+    catch a delta colliding with a potential *join* (a Step/kink the
+    solver detects from the piecewise V(x) expressions) -- join locations
+    are a C++-only construct (tise.hpp's JoinType/detectPotentialStructure)
+    never exposed to this module; that collision is caught only by the
+    solver subprocess itself.
+    """
+    if deltas_cfg is None:
+        return
+
+    if not isinstance(deltas_cfg, list):
+        raise ConfigValidationError(
+            f"'potential_deltas' must be a list of "
+            f"{{x: ..., strength: ...}} mappings, got {type(deltas_cfg).__name__}"
+        )
+
+    lo, hi = domain
+    xs: list[float] = []
+    for i, entry in enumerate(deltas_cfg):
+        if not isinstance(entry, dict):
+            raise ConfigValidationError(
+                f"potential_deltas[{i}] must be a mapping with 'x' and "
+                f"'strength' keys, got {type(entry).__name__}: {entry!r}"
+            )
+        missing = [k for k in ("x", "strength") if k not in entry]
+        if missing:
+            raise ConfigValidationError(
+                f"potential_deltas[{i}] missing required key(s) "
+                f"{', '.join(missing)}: {entry!r}"
+            )
+        try:
+            x = float(entry["x"])
+            float(entry["strength"])
+        except (TypeError, ValueError) as e:
+            raise ConfigValidationError(
+                f"potential_deltas[{i}] 'x' and 'strength' must be numbers: {entry!r}"
+            ) from e
+
+        # Strictly inside: psi is already forced to zero at both walls, so a
+        # delta sitting on one contributes nothing at all. Silently ignoring
+        # it would be worse than refusing.
+        if not (lo < x < hi):
+            raise ConfigValidationError(
+                f"potential_deltas[{i}] x={x} lies outside the open domain "
+                f"({lo}, {hi}); a delta on the boundary has no effect because "
+                f"psi is already zero there"
+            )
+
+        for j, other_x in enumerate(xs):
+            if abs(x - other_x) < DELTA_COLLISION_TOLERANCE:
+                raise ConfigValidationError(
+                    f"potential_deltas[{j}] (x={other_x}) and potential_deltas[{i}] "
+                    f"(x={x}) are within {DELTA_COLLISION_TOLERANCE} of each other; "
+                    f"deltas this close degenerate the B-spline basis -- move them "
+                    f"farther apart, or combine them into a single delta of summed "
+                    f"strength if a single merged site was intended"
+                )
+        xs.append(x)
 
 
 # ─── Interval / potential-piece parsing ────────────────────────────────────
@@ -283,8 +467,15 @@ def _run_stage(stage_name: str, cmd: list[str]) -> subprocess.CompletedProcess:
         raise SolverStageError(f"{stage_name}: could not execute {cmd[0]}: {e}") from e
 
 
-def run_tise_solver(config_path: str, tise_output_dir: Path, binary: Path = DEFAULT_TISE_SOLVER) -> None:
-    """Invoke the TISE solver subprocess per docs/SDD.md Sec 7.2.1."""
+def run_tise_solver(config_path: str, tise_output_dir: Path, binary: Path | None = None) -> None:
+    """Invoke the TISE solver subprocess per docs/SDD.md Sec 7.2.1.
+
+    `binary` defaults to find_tise_solver()'s result, resolved at call time
+    rather than import time so that a binary built after this module was
+    imported is still found.
+    """
+    if binary is None:
+        binary = find_tise_solver()
     try:
         tise_output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:

@@ -13,6 +13,33 @@ namespace tise
 using Real = bspline::Real;
 
 // Holds the output of solveGeneralizedEigenproblem.
+// A Dirac delta term in the potential: V(x) += strength * delta(x - x0).
+//
+// Deltas are a separate input from the piecewise `potential` rather than
+// another JoinType, because a delta cannot be written as an expression in x
+// -- there is nothing in a piecewise V(x) for the join classifier to detect.
+// The caller states them explicitly instead.
+//
+// Two things follow from a delta, and both are handled automatically:
+//
+//   * psi is continuous at x0 but psi' jumps, so the basis must be only C^0
+//     there. An order-k B-spline basis with a knot of multiplicity m is
+//     C^(k-1-m), so x0 needs multiplicity k-1 -- that is, order-2 extra
+//     degenerate knots beyond the ordinary node. buildStrategicGridAndDropSet
+//     inserts them.
+//
+//   * The matrix element is a point evaluation,
+//     <B_i| strength*delta(x-x0) |B_j> = strength * B_i(x0) * B_j(x0),
+//     added to H by fillBandedMatrices. No quadrature is involved, and the
+//     delta that a kink puts into psi'' is never evaluated: the kinetic term
+//     is the weak form (hbar^2/2m) integral B_i' B_j', so only first
+//     derivatives appear and those are well defined for a C^0 function.
+struct DeltaTerm
+{
+    Real x;         // location x0, which must lie inside the domain
+    Real strength;  // lambda; negative is attractive
+};
+
 struct EigenResult
 {
     std::vector<Real> values;  // eigenvalues, ascending, size dim
@@ -31,6 +58,15 @@ struct AsymptoticResult
 
 // Build a uniform radial grid of nNodes points on [rMin, rMax].
 std::vector<Real> buildUniformRadialGrid(int nNodes, Real rMin, Real rMax);
+
+// The ix-th (1-based, ix in [1, npts]) point of a uniform grid of npts
+// points spanning [rMin, rMax]: rMin + (rMax-rMin)*(ix-1)/(npts-1). Shared
+// by the per-point table writers (writeEigenstate, writeEigenstateTable,
+// writeContinuumInfo, writeContinuumTable, writePotential), which were
+// each independently computing this inline. Callers must ensure npts >= 2
+// (division by npts-1); the config-validation layer is where that is
+// actually enforced, not here.
+Real linspacePoint(Real rMin, Real rMax, int ix, int npts);
 
 // Build a uniform energy grid epsilon_i = E_threshold + (E_max - E_threshold)/N_E * i,
 // for i = 1..N_E. Sampling starts at i=1 (never i=0) to avoid the k=0 (E=E_threshold=0)
@@ -304,6 +340,8 @@ AsymptoteClassification classifyAsymptote(const std::map<std::string, std::strin
 // physics.hbar generalization, ADR-0017. Only the kinetic-energy term
 // (hbar^2/2*mass, replacing the old fixed 1/2 factor) depends on them --
 // `overlap` and `potentialTerm` are mass/hbar-independent.
+// `deltas`: Dirac delta terms added to H as strength*B_i(x0)*B_j(x0) (see
+// DeltaTerm). Empty (the default) leaves H bit-identical to before.
 std::pair<std::vector<Real>, std::vector<Real>>
 fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                     std::map<std::string, std::string> potential,
@@ -311,7 +349,8 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                     std::optional<Real> case3RightR = std::nullopt,
                     std::optional<Real> case3RightDelta = std::nullopt,
                     Real mass = 1.0,
-                    Real hbar = 1.0);
+                    Real hbar = 1.0,
+                    const std::vector<DeltaTerm> &deltas = {});
 
 // Given the set of BSplines, Hamiltonian, and eigenvectors, solve for:
 // < phi_n | H | B_N > and < phi_n | B_N >, for each eigenvector
@@ -507,8 +546,19 @@ void writeContinuumInfo(std::ostream &out,
                      const EigenResult &eigen,
                      std::optional<std::vector<int>> dropSet = std::nullopt);
 
-// Solve H c = E S c via LAPACK DSBGV.
-// H and S are consumed (overwritten); pass by value intentionally.
+// Threshold for solveGeneralizedEigenproblem's overlap-matrix conditioning
+// guard: the generalized eigenproblem is refused if S's own condition
+// number (lambda_max/lambda_min, computed directly via a plain symmetric
+// eigensolve of S) exceeds this. Chosen from measured data
+// (docs/tests/reports/pr-18-433e11a/): real near-duplicate-delta configs
+// give cond(S) ~1e7-1e10 with correct answers, and ~1e13-1e17 with answers
+// wrong by 4-12 orders of magnitude -- 1e12 sits cleanly between the two.
+constexpr Real kMaxOverlapConditionNumber = 1e12;
+
+// Solve H c = E S c. Builds dense A/B from the banded H/S and diagonalizes
+// with Eigen::GeneralizedSelfAdjointEigenSolver -- H and S are passed by
+// value but never modified; the dense matrices are separate copies, so the
+// original banded arrays remain valid for the caller after this returns.
 EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
                                          std::vector<Real> S,
                                          int nEn,
@@ -702,6 +752,62 @@ void writeEigenstate(std::ostream &out,
                      Real rMin,
                      Real rMax);
 
+// Write eigenstates.dat: ONE self-contained, directly-loadable table of every
+// eigenstate, as an alternative to globbing the per-state eigenstate_NNN.dat
+// files and index-joining them against eigenvalues.dat (whose index column is
+// 0-based while those filenames are 1-based -- an off-by-one this file removes
+// entirely). Layout: column 1 is x, column n+1 is psi_n(x), for n = 1..nStates.
+//
+// Every eigenvalue is repeated in the '#' header, so the table stands alone:
+// nothing else needs to be opened to know what energy a column belongs to.
+// Comments use '#' and columns are whitespace-separated, so the file is read
+// by numpy.loadtxt(path) and by gnuplot's `plot ... using 1:k` with no
+// preprocessing. The per-state files are still written; this is additive.
+//
+// `dropSet` carries the same contract as eigenstateCoefficients: it MUST match
+// whatever drop-set `er` was diagonalized under, or coefficients are silently
+// misattributed.
+void writeEigenstateTable(std::ostream &out,
+                           const bspline::BSpline &bs,
+                           const EigenResult &er,
+                           int nStates,
+                           int nBSplines,
+                           int npts,
+                           Real rMin,
+                           Real rMax,
+                           std::optional<std::vector<int>> dropSet = std::nullopt,
+                           Real mass = 1.0,
+                           Real hbar = 1.0);
+
+// Write continuum_states.dat: the continuum counterpart of
+// writeEigenstateTable. Column 1 is x, column i+1 is psi_{eps_i}(x), with each
+// energy and its phase shift delta(eps_i) carried in the '#' header. Same
+// rationale: one loadable table instead of globbing continuum_state_NNN.dat
+// and index-joining against phase_shifts.dat.
+void writeContinuumTable(std::ostream &out,
+                          const bspline::BSpline &bs,
+                          const AsymptoticResult &result,
+                          const std::vector<Real> &grid,
+                          const std::vector<std::vector<Real>> &states,
+                          const EigenResult &eigen,
+                          int npts,
+                          Real rMin,
+                          Real rMax,
+                          std::optional<std::vector<int>> dropSet = std::nullopt,
+                          Real mass = 1.0,
+                          Real hbar = 1.0);
+
+// Write potential.dat: 2 columns, x and V(x), on the same uniform grid
+// writeEigenstateTable samples. The piecewise potential is only ever
+// evaluable inside the solver (the `function` strings are muparser
+// expressions), so without this file a downstream script cannot draw V(x)
+// alongside the wavefunctions without re-implementing the expression parser.
+void writePotential(std::ostream &out,
+                     const std::map<std::string, std::string> &potential,
+                     int npts,
+                     Real rMin,
+                     Real rMax);
+
 // Write eigenvalues.dat: 0-based index, E_n, one line per state, for the
 // first nStates entries of er.values (ascending, per EigenResult's own
 // contract). Per ADR-0007, no bound/continuum filtering is applied here --
@@ -783,15 +889,67 @@ struct StrategicGridResult
 // physically meaningful distance between a join and the box wall.
 constexpr Real kDefaultEdgeTolerance = 1e-9;
 
+// How close two knot-vector entries must be (in x) to be treated as "the
+// same point" when buildStrategicRadialGrid decides whether to splice in a
+// new base point or stack onto an existing one. Named here so the grid-
+// construction code and anything reasoning about its output (e.g. the
+// knot-multiplicity invariant below) share one definition.
+constexpr Real kKnotMergeTolerance = 1e-12;
+
+// How close two deltas (or a delta and a detected potential join) may be
+// before validateDeltaTerms refuses the config outright. This is NOT the
+// same tolerance as kKnotMergeTolerance above: that one detects exact (to
+// float round-off) duplicate grid points during knot insertion, while this
+// one protects against deltas close enough to numerically degrade the
+// overlap matrix without ever triggering exact knot-merge. Measured
+// empirically (docs/tests/reports/pr-18-433e11a/): two deltas 1e-9 to 1e-13
+// apart already corrupt the ground-state energy by 4-12 orders of
+// magnitude while S remains positive definite to Cholesky throughout (the
+// damage is cond(S) blowing up, not indefiniteness) -- 1e-6 and below is
+// already physically indistinguishable from a single merged delta.
+constexpr Real kDeltaCollisionTolerance = 1e-6;
+
 // `edgeTolerance`: how close a detected Singular join's x must be to rMin/
 // rMax to be treated as "at the domain edge" (already regularized by the
 // classic wall exclusion, so no extra B-spline removal is applied there --
 // see the "Gap 2" comment in this function's tise.cpp definition) rather
 // than a genuine interior singularity. Defaults to the value this function
 // has always used.
+// `deltas`: each one contributes order-2 extra degenerate knots at its x, so
+// the basis is C^0 there and can represent the kink the delta forces in psi.
+// Empty (the default) leaves the grid bit-identical to before.
 StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMin, Real rMax,
                                                    const std::map<std::string, std::string> &potential,
-                                                   Real edgeTolerance = kDefaultEdgeTolerance);
+                                                   Real edgeTolerance = kDefaultEdgeTolerance,
+                                                   const std::vector<DeltaTerm> &deltas = {});
+
+// Throw std::runtime_error if any delta sits outside (rMin, rMax) or on the
+// domain boundary. A delta exactly at a wall is meaningless -- psi is already
+// forced to zero there, so the term contributes nothing and silently doing
+// nothing would be worse than refusing.
+//
+// Also throws if two deltas, or a delta and an entry of `existingKnots`
+// (the join-derived knots already assembled by the time
+// buildStrategicGridAndDropSet calls this), fall within
+// kDeltaCollisionTolerance of each other. `existingKnots` defaults to empty
+// so callers that only care about the domain-bounds check (e.g. existing
+// tests) are unaffected.
+void validateDeltaTerms(const std::vector<DeltaTerm> &deltas, Real rMin, Real rMax,
+                        const std::vector<StrategicKnot> &existingKnots = {});
+
+// Throw std::runtime_error if any value in `grid` has multiplicity >= order
+// (i.e. `order` or more mutually-within-kKnotMergeTolerance entries). A
+// valid B-spline knot vector never does this -- it is what guarantees a
+// linearly independent basis and therefore a positive-definite overlap
+// matrix by construction. This is the structural invariant: it fires
+// regardless of *why* a knot over-stacked (colliding deltas, a delta on a
+// join, or any future source), not just the specific cases
+// validateDeltaTerms' pairwise check happens to catch pre-emptively. Note
+// it does NOT catch two knots that are merely *close* without ever
+// reaching multiplicity order -- that failure mode (a degenerate basis
+// without any excess multiplicity) is what solveGeneralizedEigenproblem's
+// conditioning guard exists for instead.
+void validateKnotMultiplicities(const std::vector<Real> &grid, int order);
 
 struct SolveTISEResult
 {
@@ -837,7 +995,8 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
                            Real E_threshold, Real E_max, int N_E,
                            int continuumOutputPoints = kDefaultContinuumOutputPoints,
                            Real mass = 1.0,
-                           Real hbar = 1.0);
+                           Real hbar = 1.0,
+                           const std::vector<DeltaTerm> &deltas = {});
 
 // === A5: E_acc continuum-accuracy warning (REQ-F-040, warning half) ===
 // Reduce a (possibly non-uniform, possibly containing degenerate/repeated

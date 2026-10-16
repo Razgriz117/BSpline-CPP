@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <ostream>
 #include <stdexcept>
 #include <vector>
@@ -19,17 +20,7 @@
 #include "muParser.h"
 #include <sstream>
 
-extern "C"
-{
-    void dsbgv_(char *jobz, char *uplo,
-                int *n, int *ka, int *kb,
-                double *ab, int *ldab,
-                double *bb, int *ldbb,
-                double *w,
-                double *z, int *ldz,
-                double *work,
-                int *info);
-}
+#include <Eigen/Dense>
 
 namespace tise
 {
@@ -41,6 +32,11 @@ std::vector<Real> buildUniformRadialGrid(int nNodes, Real rMin, Real rMax)
     for (int i = 0; i < nNodes; ++i)
         grid[i] = rMin + span * static_cast<Real>(i) / static_cast<Real>(nNodes - 1);
     return grid;
+}
+
+Real linspacePoint(Real rMin, Real rMax, int ix, int npts)
+{
+    return rMin + (rMax - rMin) * static_cast<Real>(ix - 1) / static_cast<Real>(npts - 1);
 }
 
 std::vector<Real> buildEnergyGrid(Real E_threshold, Real E_max, int N_E)
@@ -79,6 +75,15 @@ struct ParsedInterval
 
 ParsedInterval parseInterval(const std::string& interval)
 {
+    // Memoized on the interval string. A potential has a handful of distinct
+    // domain strings, but inInterval is called from the matrix-fill inner
+    // loop -- once per piece per quadrature point per B-spline pair -- and
+    // running this regex there dominated the cost of a solve.
+    static thread_local std::map<std::string, ParsedInterval> cache;
+    const auto cached = cache.find(interval);
+    if (cached != cache.end())
+        return cached->second;
+
     static const std::regex re(
         R"(^\s*([\[\(])\s*(-?(?:\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|[+-]?(?:inf|infinity))\s*,\s*(-?(?:\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|[+-]?(?:inf|infinity))\s*([\]\)])\s*$)",
         std::regex_constants::icase
@@ -110,7 +115,48 @@ ParsedInterval parseInterval(const std::string& interval)
     out.upperInclusive = m[4] == "]";
     out.lower = parseBound(m[2]);
     out.upper = parseBound(m[3]);
+
+    // Only well-formed intervals are cached; a malformed one threw above and
+    // will keep throwing, which is the behavior callers already rely on.
+    cache.emplace(interval, out);
     return out;
+}
+
+// A muParser instance with `fn` already compiled to bytecode, bound to its own
+// variable slot.
+//
+// Constructing a mu::Parser registers muParser's entire operator, function and
+// constant table, and SetExpr tokenizes and compiles the expression -- both far
+// more expensive than the arithmetic they enable. evaluateFunction used to do
+// both on every call, from the matrix-fill inner loop, for an expression that
+// never changes during a solve.
+//
+// The instance lives in a unique_ptr so its address is stable: DefineVar binds
+// the parser to &x by pointer, and a rehash or reallocation that moved the
+// struct would leave the parser reading freed memory.
+struct CompiledExpression
+{
+    double x = 0.0;
+    mu::Parser parser;
+};
+
+// Compiled form of `fn`, created on first use. Throws mu::ParserError for a
+// malformed expression, exactly as SetExpr did inline; a failed compile is not
+// cached, so the same error is raised again on the next call.
+CompiledExpression &compiledExpression(const std::string &fn)
+{
+    static thread_local std::map<std::string, std::unique_ptr<CompiledExpression>> cache;
+    const auto cached = cache.find(fn);
+    if (cached != cache.end())
+        return *cached->second;
+
+    auto entry = std::make_unique<CompiledExpression>();
+    entry->parser.DefineVar("x", &entry->x);
+    entry->parser.SetExpr(fn);
+
+    CompiledExpression &ref = *entry;
+    cache.emplace(fn, std::move(entry));
+    return ref;
 }
 } // namespace
 
@@ -130,15 +176,14 @@ double evaluateFunction(const std::map<std::string, std::string> &function, doub
     for (const auto& [domain, fn] : function) {
         if (inInterval(x, domain))
         {
-            // evaluate function
-            // muparser expression using "x" as the sole variable, bound to a
-            // fresh Parser each call since the expression string varies per piece
-            mu::Parser p;
-            p.DefineVar("x", &x);
+            // muParser expression using "x" as the sole variable. The parser
+            // is compiled once per distinct expression string and reused (see
+            // compiledExpression); only the variable slot is rewritten here.
             try
             {
-                p.SetExpr(fn);
-                return p.Eval();
+                CompiledExpression &compiled = compiledExpression(fn);
+                compiled.x = x;
+                return compiled.parser.Eval();
             }
             catch (const mu::ParserError &e)
             {
@@ -641,7 +686,8 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
                     std::optional<Real> case3RightR,
                     std::optional<Real> case3RightDelta,
                     Real mass,
-                    Real hbar)
+                    Real hbar,
+                    const std::vector<DeltaTerm> &deltas)
 {
     const int nBSplines = bs.getNBSplines();
     const ColumnMap map = resolveDropSet(nBSplines, nEn, dropSet);
@@ -688,6 +734,20 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
         if (col2 == 0)
             continue;
         const int iBs1Min = std::max(1, iBs2 - order + 1);
+
+        // bs.eval(d.x, iBs2, 0) doesn't depend on iBs1, but the inner loop
+        // below re-evaluated it once per iBs1 anyway -- hoist it here so
+        // it's computed once per (iBs2, delta) pair instead of once per
+        // (iBs1, iBs2, delta) triple. Skipped entirely when there are no
+        // deltas, which is the common case.
+        std::vector<Real> deltaEvalAtIBs2;
+        if (!deltas.empty())
+        {
+            deltaEvalAtIBs2.reserve(deltas.size());
+            for (const auto &d : deltas)
+                deltaEvalAtIBs2.push_back(bs.eval(d.x, iBs2, 0));
+        }
+
         for (int iBs1 = iBs1Min; iBs1 <= iBs2; ++iBs1)
         {
             const int col1 = colOf[iBs1];
@@ -698,11 +758,18 @@ fillBandedMatrices(const bspline::BSpline &bs, int nEn, int order, int L,
             Real kinetic       = (hbar * hbar / (2.0 * mass)) * bs.integral(fUni, iBs1, iBs2, 1, 1);
             Real potentialTerm = bs.integral(fPot, iBs1, iBs2, 0, 0, parvec);
 
+            // <B_i| lambda*delta(x-x0) |B_j> = lambda * B_i(x0) * B_j(x0).
+            // A point evaluation, not a quadrature: the delta collapses the
+            // integral exactly, so this term is as accurate as bs.eval is.
+            Real deltaTerm = 0.0;
+            for (std::size_t k = 0; k < deltas.size(); ++k)
+                deltaTerm += deltas[k].strength * bs.eval(deltas[k].x, iBs1, 0) * deltaEvalAtIBs2[k];
+
             const int row = order + col1 - col2;
             const int idx = bandIndex(row, col2);
 
             Smat[idx] = overlap;
-            Hmat[idx] = kinetic + potentialTerm;
+            Hmat[idx] = kinetic + potentialTerm + deltaTerm;
         }
     }
 
@@ -1193,14 +1260,67 @@ void writeContinuumInfo(std::ostream &out,
         stOut << std::scientific << std::setprecision(16);
         for (int ix = 1; ix <= npts; ++ix)
         {
-            Real x = rMin + (rMax - rMin) *
-                     static_cast<Real>(ix - 1) / static_cast<Real>(npts - 1);
+            Real x = linspacePoint(rMin, rMax, ix, npts);
             Real psi = result.A_E[i] * bs.eval(x, fc.data(), fc.size(), 0);
             stOut << " " << std::setw(24) << x
                   << " " << std::setw(24) << psi << "\n";
         }
     }
 }
+
+namespace
+{
+// An eigenvector is only defined up to an overall sign, and nothing in an
+// eigensolver's contract says which one you get -- LAPACK's dsbgv and Eigen's
+// GeneralizedSelfAdjointEigenSolver, given the same matrices, return
+// eigenvalues agreeing to ~1e-12 but per-state signs that differ. Left to the
+// solver, that means the same config.yaml can plot psi_n upside down on one
+// machine versus another, which is a confusing thing to hand someone trying to
+// compare against a textbook figure.
+//
+// So the sign is pinned here rather than inherited: each column is scaled so
+// that its first numerically significant coefficient is positive. Since the coefficients are B-spline amplitudes ordered left to
+// right across the domain, that makes psi_n positive just inside the left
+// boundary -- the usual textbook convention for a radial function (R_nl(r) > 0
+// as r -> 0+).
+//
+// "Significant" is relative to the column's own largest coefficient. An
+// absolute threshold would latch onto rounding noise in the near-wall
+// coefficients, where the true amplitude is genuinely tiny, and the resulting
+// choice would itself vary between machines -- reintroducing exactly the
+// nondeterminism this is meant to remove. Scanning left to right and taking
+// the first qualifying coefficient also avoids the tie that a
+// largest-magnitude rule would hit on a symmetric potential, where mirror-image
+// coefficients have equal magnitude.
+void canonicalizeEigenvectorSigns(EigenResult &result)
+{
+    constexpr Real kRelativeSignificance = 1e-6;
+
+    const int n = result.dim;
+    for (int j = 0; j < n; ++j)
+    {
+        Real *col = result.vectors.data() + static_cast<std::size_t>(j) * n;
+
+        Real maxAbs = 0.0;
+        for (int i = 0; i < n; ++i)
+            maxAbs = std::max(maxAbs, std::abs(col[i]));
+        if (maxAbs == 0.0)
+            continue;
+
+        const Real threshold = kRelativeSignificance * maxAbs;
+        for (int i = 0; i < n; ++i)
+        {
+            if (std::abs(col[i]) > threshold)
+            {
+                if (col[i] < 0.0)
+                    for (int k = 0; k < n; ++k)
+                        col[k] = -col[k];
+                break;
+            }
+        }
+    }
+}
+} // namespace
 
 EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
                                           std::vector<Real> S,
@@ -1213,29 +1333,126 @@ EigenResult solveGeneralizedEigenproblem(std::vector<Real> H,
     result.values.assign(nEn, 0.0);
     result.vectors.assign(nEn * nEn, 0.0);
 
-    std::vector<Real> work(3 * nEn, 0.0);
+    // H and S arrive in LAPACK's upper banded layout ('U'), which is the format
+    // the matrix-fill code produces: column-major, leading dimension
+    // ldab = order, superdiagonal count ka = order - 1, so the element (i, j)
+    // with i <= j and j - i <= ka lives at H[j*ldab + ka+i-j]. Only the upper
+    // triangle is stored; both matrices are symmetric, so the lower triangle is
+    // filled by reflection.
+    //
+    // That layout is a holdover from this routine's original implementation, a
+    // call to LAPACK's banded solver dsbgv. LAPACK was dropped because it is
+    // Fortran: there is no build-it-from-source path for it that does not
+    // require a Fortran toolchain, which made it the one dependency standing
+    // between this project and a plain "compiler + CMake" build on Windows.
+    // Eigen is header-only and solves the identical generalized problem.
+    //
+    // The cost is asymptotic only: densifying is O(n^2) memory against the
+    // banded form's O(n*order), and the solve is O(n^3) rather than exploiting
+    // the band. At the sizes this is called with (n = n_nodes + order - 2, ~61
+    // for the default config.yaml and a few hundred at most) neither shows up
+    // -- the full test suite measured marginally faster this way than through
+    // LAPACK. A basis large enough to change that would want the banded solver
+    // back, and this is the single function that would have to change.
+    const int ka   = order - 1;
+    const int ldab = order;
 
-    char jobz = 'V';
-    char uplo = 'U';
-    int n    = nEn;
-    int ka   = order - 1;
-    int kb   = order - 1;
-    int ldab = order;
-    int ldbb = order;
-    int ldz  = nEn;
-    int info = 0;
+    // An empty basis is reachable from a legal-looking config (n_nodes=2,
+    // order=2 gives 2 B-splines, and the classic wall exclusion removes
+    // both). Eigen's solvers have no 0x0 contract -- they assert in debug
+    // builds and segfault under NDEBUG -- so refuse it by name here.
+    if (nEn < 1)
+        throw std::runtime_error(
+            "the B-spline basis has no usable functions left after boundary/drop-set "
+            "removal (nEn=" + std::to_string(nEn) + "); increase bspline.n_nodes or "
+            "bspline.order");
 
-    dsbgv_(&jobz, &uplo,
-            &n, &ka, &kb,
-            H.data(), &ldab,
-            S.data(), &ldbb,
-            result.values.data(),
-            result.vectors.data(), &ldz,
-            work.data(),
-            &info);
+    // Only the LOWER triangle of A and B is filled below. Eigen's
+    // GeneralizedSelfAdjointEigenSolver (and the SelfAdjointEigenSolver used
+    // for the conditioning check) reads only the lower triangle -- confirmed
+    // against the installed Eigen3 headers, which construct
+    // matA.selfadjointView<Lower>() with no Upper/Lower option in the API --
+    // so mirroring into the upper triangle would be dead writes.
+    Eigen::MatrixXd A = Eigen::MatrixXd::Zero(nEn, nEn);
+    Eigen::MatrixXd B = Eigen::MatrixXd::Zero(nEn, nEn);
+    for (int j = 0; j < nEn; ++j)
+    {
+        for (int i = std::max(0, j - ka); i <= j; ++i)
+        {
+            const std::size_t k = static_cast<std::size_t>(j) * ldab + (ka + i - j);
+            A(j, i) = H[k];
+            B(j, i) = S[k];
+        }
+    }
 
-    if (info != 0)
-        throw std::runtime_error("DSBGV failed with info=" + std::to_string(info));
+    // GeneralizedSelfAdjointEigenSolver::info() does NOT report whether B is
+    // positive definite, despite internally computing a Cholesky
+    // factorization of it (GeneralizedSelfAdjointEigenSolver.h) -- it only
+    // reports whether the *separate* tridiagonal QR step that follows
+    // converged, which is a near-orthogonal question. Confirmed empirically
+    // (SolveEigenConditioningTest; docs/tests/reports/pr-18-433e11a/): an
+    // indefinite or rank-deficient B reliably reports info()==Success and
+    // returns finite, unremarkable-looking, wrong eigenvalues. The knot
+    // vector invariant (validateKnotMultiplicities) and delta-collision
+    // check (validateDeltaTerms) prevent the known, structural ways B can
+    // become degenerate before this function is ever reached, but neither
+    // can see a basis that has merely become numerically near-degenerate
+    // (e.g. two knots close but not within kKnotMergeTolerance of each
+    // other) -- which is exactly the case measured to corrupt results by
+    // 4-12 orders of magnitude while B stays positive definite to Cholesky
+    // throughout. So B's own conditioning is checked directly here, as the
+    // measurement-based backstop for everything the structural checks
+    // cannot see.
+    {
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> bEig(B, Eigen::EigenvaluesOnly);
+        const Real lambdaMin = bEig.eigenvalues()(0);
+        const Real lambdaMax = bEig.eigenvalues()(nEn - 1);
+        if (lambdaMin <= 0.0 || lambdaMax / lambdaMin > kMaxOverlapConditionNumber)
+        {
+            std::ostringstream oss;
+            oss << "overlap matrix S is not usable: smallest eigenvalue="
+                << lambdaMin << ", condition number=" << (lambdaMax / lambdaMin)
+                << " exceeds " << kMaxOverlapConditionNumber << ". This usually "
+                   "means two delta terms, or a delta and a potential join, are "
+                   "placed too close together.";
+            throw std::runtime_error(oss.str());
+        }
+    }
+
+    // Ax_lBx selects the problem type H c = E S c. Eigen reduces it via a
+    // Cholesky factorization of S, so the returned eigenvalues are ascending
+    // and the eigenvectors are S-orthonormal (Z^T S Z = I) -- both properties
+    // the continuum construction downstream relies on, and both matching what
+    // the previous LAPACK implementation guaranteed.
+    Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd>
+        solver(A, B, Eigen::ComputeEigenvectors | Eigen::Ax_lBx);
+
+    if (solver.info() != Eigen::Success)
+        throw std::runtime_error(
+            "Eigen GeneralizedSelfAdjointEigenSolver failed; the overlap matrix "
+            "is most likely not positive definite");
+
+    const Eigen::MatrixXd &Z = solver.eigenvectors();
+    for (int j = 0; j < nEn; ++j)
+    {
+        result.values[j] = solver.eigenvalues()(j);
+        for (int i = 0; i < nEn; ++i)
+            result.vectors[static_cast<std::size_t>(j) * nEn + i] = Z(i, j);
+    }
+
+    canonicalizeEigenvectorSigns(result);
+
+    // Cheap, zero-cost-when-healthy last-resort guard against any other
+    // source of a non-finite value reaching an output file -- not a fix for
+    // the conditioning issue above (confirmed it would not have caught any
+    // of the measured corruption, since those wrong answers are large but
+    // finite), just defense-in-depth kept alongside the real fix.
+    for (Real v : result.values)
+        if (!std::isfinite(v))
+            throw std::runtime_error("solveGeneralizedEigenproblem produced a non-finite eigenvalue");
+    for (Real v : result.vectors)
+        if (!std::isfinite(v))
+            throw std::runtime_error("solveGeneralizedEigenproblem produced a non-finite eigenvector component");
 
     return result;
 }
@@ -1473,7 +1690,7 @@ std::vector<Real> buildStrategicRadialGrid(int nNodes, Real rMin, Real rMax,
     for (const auto &knot : sorted)
     {
         auto it = std::lower_bound(grid.begin(), grid.end(), knot.x);
-        const bool alreadyPresent = (it != grid.end()) && (std::abs(*it - knot.x) < 1e-12);
+        const bool alreadyPresent = (it != grid.end()) && (std::abs(*it - knot.x) < kKnotMergeTolerance);
 
         if (!alreadyPresent)
             it = grid.insert(it, knot.x); // splice a new base point at knot.x
@@ -1560,11 +1777,176 @@ void writeEigenstate(std::ostream &out,
     const int n = static_cast<int>(coeffs.size());
     for (int ix = 1; ix <= npts; ++ix)
     {
-        Real x = rMin + (rMax - rMin) *
-                 static_cast<Real>(ix - 1) / static_cast<Real>(npts - 1);
+        Real x = linspacePoint(rMin, rMax, ix, npts);
         Real psi = bs.eval(x, coeffs.data(), n);
         out << " " << std::setw(24) << x
             << " " << std::setw(24) << psi << "\n";
+    }
+}
+
+void writeEigenstateTable(std::ostream &out,
+                           const bspline::BSpline &bs,
+                           const EigenResult &er,
+                           int nStates,
+                           int nBSplines,
+                           int npts,
+                           Real rMin,
+                           Real rMax,
+                           std::optional<std::vector<int>> dropSet,
+                           Real mass,
+                           Real hbar)
+{
+    // Resolve every state's coefficients up front: each column of the table
+    // needs its own, and re-deriving them per row would be O(npts*nStates)
+    // redundant work on the hot loop.
+    std::vector<std::vector<Real>> coeffs;
+    coeffs.reserve(nStates);
+    for (int n = 1; n <= nStates; ++n)
+        coeffs.push_back(eigenstateCoefficients(er.vectors, n, er.dim, nBSplines, dropSet));
+
+    out << "# eigenstates.dat -- psi_n(x), one column per state\n";
+    out << "# atomic units: hbar = " << hbar << ", mass = " << mass << "\n";
+    out << "# domain [" << rMin << ", " << rMax << "], " << npts
+        << " points; <psi_n|psi_n> = 1, sign arbitrary\n";
+    out << "# col 1 = x, col n+1 = psi_n\n";
+    out << std::scientific << std::setprecision(16);
+    for (int n = 1; n <= nStates; ++n)
+        out << "# E_" << std::setw(4) << std::left << n << std::right
+            << " = " << std::setw(24) << er.values[n - 1] << "\n";
+
+    // Column-label row, aligned with the 25-wide data columns below.
+    out << "#" << std::setw(24) << "x";
+    for (int n = 1; n <= nStates; ++n)
+    {
+        std::ostringstream lbl;
+        lbl << "psi_" << n;
+        out << " " << std::setw(24) << lbl.str();
+    }
+    out << "\n";
+
+    for (int ix = 1; ix <= npts; ++ix)
+    {
+        const Real x = linspacePoint(rMin, rMax, ix, npts);
+        out << " " << std::setw(24) << x;
+
+        // The active basis window at x doesn't depend on which state's
+        // coefficients it's dotted against -- share it across all nStates
+        // instead of letting bs.eval's vector-form overload redo
+        // whichInterval(x) plus one eval(x, Bs) per active Bs on every
+        // single-state call.
+        int Bsmin = 0, Bsmax = 0;
+        const std::vector<Real> basis = bs.evalBasisWindow(x, 0, Bsmin, Bsmax);
+        for (int n = 0; n < nStates; ++n)
+        {
+            Real psi = 0.0;
+            for (int Bs = Bsmin; Bs <= Bsmax; ++Bs)
+            {
+                const int idxCoeff = Bs - 1;
+                if (idxCoeff >= 0 && idxCoeff < static_cast<int>(coeffs[n].size()))
+                    psi += coeffs[n][idxCoeff] * basis[Bs - Bsmin];
+            }
+            out << " " << std::setw(24) << psi;
+        }
+        out << "\n";
+    }
+}
+
+void writeContinuumTable(std::ostream &out,
+                          const bspline::BSpline &bs,
+                          const AsymptoticResult &result,
+                          const std::vector<Real> &grid,
+                          const std::vector<std::vector<Real>> &states,
+                          const EigenResult &eigen,
+                          int npts,
+                          Real rMin,
+                          Real rMax,
+                          std::optional<std::vector<int>> dropSet,
+                          Real mass,
+                          Real hbar)
+{
+    const int nBSplines = bs.getNBSplines();
+    const ColumnMap map = columnIndexMap(nBSplines, dropSet.value_or(std::vector<int>{1}));
+    const std::vector<int> &physicalOf = map.physicalOf;
+
+    // Transform every energy's coefficients once, for the same reason
+    // writeEigenstateTable pre-resolves its own.
+    std::vector<std::vector<Real>> fc;
+    fc.reserve(grid.size());
+    for (std::size_t i = 0; i < grid.size(); ++i)
+        fc.push_back(continuumStateToBSplineCoeffs(states[i], eigen, nBSplines, physicalOf));
+
+    const std::size_t nE = grid.size();
+    out << "# continuum_states.dat -- psi_eps(x), one column per energy\n";
+    out << "# atomic units: hbar = " << hbar << ", mass = " << mass << "\n";
+    out << "# domain [" << rMin << ", " << rMax << "], " << npts
+        << " points; energy-normalized, <psi_E|psi_E'> = delta(E-E')\n";
+    out << "# col 1 = x, col i+1 = psi_eps_i\n";
+    out << std::scientific << std::setprecision(16);
+    for (std::size_t i = 0; i < nE; ++i)
+        out << "# eps_" << std::setw(4) << std::left << (i + 1) << std::right
+            << " = " << std::setw(24) << grid[i]
+            << "   delta = " << std::setw(24) << result.delta[i] << "\n";
+
+    out << "#" << std::setw(24) << "x";
+    for (std::size_t i = 0; i < nE; ++i)
+    {
+        std::ostringstream lbl;
+        lbl << "psi_eps_" << (i + 1);
+        out << " " << std::setw(24) << lbl.str();
+    }
+    out << "\n";
+
+    for (int ix = 1; ix <= npts; ++ix)
+    {
+        const Real x = linspacePoint(rMin, rMax, ix, npts);
+        out << " " << std::setw(24) << x;
+
+        // Same sharing as writeEigenstateTable: the basis window at x is
+        // independent of which energy's coefficients it's dotted against.
+        int Bsmin = 0, Bsmax = 0;
+        const std::vector<Real> basis = bs.evalBasisWindow(x, 0, Bsmin, Bsmax);
+        for (std::size_t i = 0; i < nE; ++i)
+        {
+            Real psi = 0.0;
+            for (int Bs = Bsmin; Bs <= Bsmax; ++Bs)
+            {
+                const int idxCoeff = Bs - 1;
+                if (idxCoeff >= 0 && idxCoeff < static_cast<int>(fc[i].size()))
+                    psi += fc[i][idxCoeff] * basis[Bs - Bsmin];
+            }
+            out << " " << std::setw(24) << result.A_E[i] * psi;
+        }
+        out << "\n";
+    }
+}
+
+void writePotential(std::ostream &out,
+                     const std::map<std::string, std::string> &potential,
+                     int npts,
+                     Real rMin,
+                     Real rMax)
+{
+    out << "# potential.dat -- V(x) on the eigenstate output grid\n";
+    out << "# col 1 = x, col 2 = V(x)\n";
+    out << std::scientific << std::setprecision(16);
+    for (int ix = 1; ix <= npts; ++ix)
+    {
+        const Real x = linspacePoint(rMin, rMax, ix, npts);
+        // A grid point can legitimately fall outside every piece's domain --
+        // the measure-zero gap idiom used to excise a singular point (see the
+        // authoring guide's tiling rules), or an endpoint an open interval
+        // excludes. Emit NaN there rather than aborting the whole solve:
+        // numpy.loadtxt reads it as nan and matplotlib leaves a gap, which is
+        // the honest picture of a potential that is undefined at that point.
+        Real v = std::numeric_limits<Real>::quiet_NaN();
+        try
+        {
+            v = evaluateFunction(potential, x);
+        }
+        catch (const std::runtime_error &)
+        {
+        }
+        out << " " << std::setw(24) << x << " " << std::setw(24) << v << "\n";
     }
 }
 
@@ -1607,10 +1989,101 @@ void writeBandedMatrix(std::ostream &out, const std::vector<Real> &mat,
     }
 }
 
+void validateDeltaTerms(const std::vector<DeltaTerm> &deltas, Real rMin, Real rMax,
+                        const std::vector<StrategicKnot> &existingKnots)
+{
+    for (const auto &d : deltas)
+    {
+        if (!(d.x > rMin && d.x < rMax))
+        {
+            std::ostringstream oss;
+            oss << "delta term at x=" << d.x << " lies outside the open domain ("
+                << rMin << ", " << rMax << "). A delta on the boundary has no "
+                   "effect, since psi is already forced to zero there.";
+            throw std::runtime_error(oss.str());
+        }
+    }
+
+    for (std::size_t i = 0; i < deltas.size(); ++i)
+    {
+        for (std::size_t j = i + 1; j < deltas.size(); ++j)
+        {
+            if (std::abs(deltas[i].x - deltas[j].x) < kDeltaCollisionTolerance)
+            {
+                std::ostringstream oss;
+                oss << "delta terms at x=" << deltas[i].x << " and x=" << deltas[j].x
+                    << " are within " << kDeltaCollisionTolerance << " of each other. "
+                       "Deltas this close degenerate the B-spline basis and silently "
+                       "corrupt the result instead of merely being imprecise -- move "
+                       "them farther apart, or combine them into a single delta of "
+                       "summed strength if a single merged site was intended.";
+                throw std::runtime_error(oss.str());
+            }
+        }
+    }
+
+    for (const auto &d : deltas)
+    {
+        for (const auto &k : existingKnots)
+        {
+            if (std::abs(d.x - k.x) < kDeltaCollisionTolerance)
+            {
+                std::ostringstream oss;
+                oss << "delta term at x=" << d.x << " is within "
+                    << kDeltaCollisionTolerance << " of an existing potential "
+                       "join at x=" << k.x << ". A delta this close to a join "
+                       "degenerates the B-spline basis the same way two colliding "
+                       "deltas do -- move the delta away from the join.";
+                throw std::runtime_error(oss.str());
+            }
+        }
+    }
+}
+
+void validateKnotMultiplicities(const std::vector<Real> &grid, int order)
+{
+    std::size_t runStart = 0;
+    for (std::size_t i = 1; i <= grid.size(); ++i)
+    {
+        const bool sameAsRunStart =
+            i < grid.size() && std::abs(grid[i] - grid[runStart]) < kKnotMergeTolerance;
+        if (sameAsRunStart)
+            continue;
+
+        const std::size_t runLength = i - runStart;
+        if (static_cast<int>(runLength) >= order)
+        {
+            std::ostringstream oss;
+            oss << "knot at x=" << grid[runStart] << " has multiplicity "
+                << runLength << ", which is >= order (" << order << "). A knot "
+                   "vector this degenerate does not have a linearly independent "
+                   "B-spline basis -- the overlap matrix it would produce is "
+                   "singular by construction. This is usually caused by two "
+                   "potential joins or delta terms landing on (or within "
+                   "kDeltaCollisionTolerance of) the same point.";
+            throw std::runtime_error(oss.str());
+        }
+        runStart = i;
+    }
+}
+
 StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMin, Real rMax,
                                                    const std::map<std::string, std::string> &potential,
-                                                   Real edgeTolerance)
+                                                   Real edgeTolerance,
+                                                   const std::vector<DeltaTerm> &deltas)
 {
+    // The node-count rule is about what the caller asked for. It has to be
+    // checked here, before knot insertion: every delta/join splices extra
+    // knots in, so the grid.size() that BSpline::init sees below can look
+    // perfectly valid for a request like n_nodes=1, and a negative request
+    // would never reach init at all (buildUniformRadialGrid sizes a vector
+    // from it). Two nodes is the minimum; equal (degenerate) nodes are not
+    // rejected here -- BSpline::init's contract is "non-decreasing", and the
+    // multiplicity and conditioning checks own whether such a grid is usable.
+    if (nNodes < 2)
+        throw std::runtime_error("invalid bspline.n_nodes: n_nodes must be >= 2 (got " +
+                                 std::to_string(nNodes) + ") (BSpline::init code -1)");
+
     // Strategic grid construction is automatic, not something a caller
     // opts into separately: detectPotentialStructure always runs first, and
     // its result alone decides whether the grid ends up strategic. A
@@ -1645,6 +2118,19 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
             knots.push_back({j.x, order - 2});
     }
 
+    // A delta at x0 forces psi to be C^0 there (psi continuous, psi' jumping
+    // by 2*m*strength/hbar^2). An order-k basis is C^(k-1-m) at a knot of
+    // multiplicity m, so C^0 needs m = k-1, i.e. order-2 copies beyond the
+    // ordinary node buildStrategicRadialGrid already splices in. Giving the
+    // basis less multiplicity than this leaves it too smooth to represent the
+    // kink and the energy comes out badly wrong -- at order 8 the ground state
+    // of a unit delta well is off by 8e-2 with a simple knot, versus 2e-14
+    // with the full multiplicity (TISETests, DeltaPotential).
+    validateDeltaTerms(deltas, rMin, rMax, knots);
+    if (order - 2 > 0)
+        for (const auto &d : deltas)
+            knots.push_back({d.x, order - 2});
+
     auto grid  = buildStrategicRadialGrid(nNodes, rMin, rMax, knots);
     const int nNodesActual = static_cast<int>(grid.size());
 
@@ -1674,6 +2160,12 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
         throw std::runtime_error("BSpline::init failed: " + reason +
                                  " (code " + std::to_string(initInfo) + ")");
     }
+
+    // Runs only once order/nNodes/grid have already passed BSpline::init's
+    // own validation above -- the "multiplicity >= order" framing doesn't
+    // mean anything for a degenerate order, and that failure mode already
+    // has its own clear error from init().
+    validateKnotMultiplicities(grid, order);
 
     int nBSplines = bs.getNBSplines();
 
@@ -1754,9 +2246,11 @@ StrategicGridResult buildStrategicGridAndDropSet(int nNodes, int order, Real rMi
 
 SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, std::map<std::string, std::string> potential,
                            Real E_threshold, Real E_max, int N_E, int continuumOutputPoints,
-                           Real mass, Real hbar)
+                           Real mass, Real hbar,
+                           const std::vector<DeltaTerm> &deltas)
 {
-    auto sgr = buildStrategicGridAndDropSet(nNodes, order, rMin, rMax, potential);
+    auto sgr = buildStrategicGridAndDropSet(nNodes, order, rMin, rMax, potential,
+                                            kDefaultEdgeTolerance, deltas);
 
     if (sgr.rightEdgeSingular)
         std::cerr << "Warning: potential is singular at the right domain edge x=" << rMax
@@ -1766,7 +2260,7 @@ SolveTISEResult solveTISE(int nNodes, int order, Real rMin, Real rMax, int L, st
     const int nEnFilled = sgr.nEnBound + 1;
 
     auto [H, S] = fillBandedMatrices(sgr.bs, nEnFilled, order, L, potential, sgr.fillDropSet,
-                                      std::nullopt, std::nullopt, mass, hbar);
+                                      std::nullopt, std::nullopt, mass, hbar, deltas);
     EigenResult er = solveGeneralizedEigenproblem(H, S, sgr.nEnBound, order);
 
     auto energyGrid = buildEnergyGrid(E_threshold, E_max, N_E);

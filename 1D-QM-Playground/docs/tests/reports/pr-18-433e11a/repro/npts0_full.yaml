@@ -1,0 +1,5 @@
+run: {run_tise: true, run_tdse: false, run_analysis: true, output_dir: "./out-npts0-full"}
+bspline: {n_nodes: 81, order: 8, domain: [-20.0, 20.0]}
+potential: [ "{'domain': '[-20, 20]', 'function': '0'}" ]
+potential_deltas: [{x: 0.0, strength: -1.0}]
+tise: {n_pts_eigenstate: 0, error_threshold: 1.0e-10, continuum: {enabled: false}}

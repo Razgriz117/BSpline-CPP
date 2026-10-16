@@ -451,6 +451,80 @@ class TestFreeParticleContinuumPhysics:
             assert points[0].psi == pytest.approx(0.0, abs=1e-9)
 
 
+class TestDeltaWellBoundStates:
+    """PR #18 review, finding 4.6: the delta-potential feature's C++ unit
+    tests (TISETests DeltaPotentialTest) cover this analytically already,
+    but nothing drove it through the real tise_solver subprocess via a
+    config.yaml-shaped input until now -- this is the single-delta half of
+    the "analytic benchmark suite" (single delta, double delta, square
+    well, harmonic oscillator) the team named as the merge-gate spec."""
+
+    def test_ground_state_matches_closed_form(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["bspline"]["n_nodes"] = 81
+        cfg["bspline"]["order"] = 8
+        cfg["bspline"]["domain"] = [-20.0, 20.0]
+        cfg["potential"] = ["{'domain': '[-20, 20]', 'function': '0'}"]
+        cfg["potential_deltas"] = [{"x": 0.0, "strength": -1.0}]
+        cfg["tise"]["continuum"]["enabled"] = False
+        config = tmp_path / "config_delta_well.yaml"
+        with open(config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        # V = -lambda*delta(x) -> E_0 = -lambda^2/2 (hbar = m = 1), lambda=1.
+        assert data.eigenvalues[0].energy == pytest.approx(-0.5, abs=1e-9)
+
+
+class TestDoubleDeltaWellBoundStates:
+    """The double-delta half of the analytic benchmark suite -- the
+    even/odd doublet already covered to 1e-9 by the C++ unit test
+    TwoDeltasGiveTheSymmetricDoublet, driven here through the real
+    tise_solver subprocess instead."""
+
+    def test_even_odd_doublet_matches_closed_form(
+        self, tmp_config: Path, tise_solver_binary: Path, tmp_path: Path
+    ):
+        with open(tmp_config) as f:
+            cfg = yaml.safe_load(f)
+        cfg["bspline"]["n_nodes"] = 161
+        cfg["bspline"]["order"] = 8
+        cfg["bspline"]["domain"] = [-20.0, 20.0]
+        cfg["potential"] = ["{'domain': '[-20, 20]', 'function': '0'}"]
+        cfg["potential_deltas"] = [
+            {"x": -1.0, "strength": -1.0},
+            {"x": 1.0, "strength": -1.0},
+        ]
+        cfg["tise"]["continuum"]["enabled"] = False
+        config = tmp_path / "config_double_delta_well.yaml"
+        with open(config, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        # kappa = lambda*(1 +/- exp(-2*kappa*a)), lambda=a=1, solved by
+        # fixed-point iteration -- same relation TwoDeltasGiveTheSymmetricDoublet
+        # (TISETests) validates against the C++ solver directly.
+        def kappa_for(sign: float) -> float:
+            k = 1.0
+            for _ in range(500):
+                k = 1.0 + sign * math.exp(-2.0 * k)
+            return k
+
+        k_even, k_odd = kappa_for(1.0), kappa_for(-1.0)
+        assert data.eigenvalues[0].energy == pytest.approx(-0.5 * k_even**2, abs=1e-9)
+        assert data.eigenvalues[1].energy == pytest.approx(-0.5 * k_odd**2, abs=1e-9)
+        assert data.eigenvalues[0].energy < data.eigenvalues[1].energy
+
+
 class TestHarmonicOscillatorBoundStates:
     """A 1D harmonic oscillator has no true continuum (Case 1: confining
     potential, box-confined pseudostates only -- confirmed during the
@@ -529,6 +603,26 @@ class TestKnownSolutionConfigFilesLoadAndRun:
         for row in data.eigenvalues[:10]:
             expected = (row.index + 0.5) * omega
             assert row.energy == pytest.approx(expected, abs=1e-3)
+
+    def test_delta_well_yaml_runs_and_produces_expected_output(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("delta_well", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert data.eigenvalues[0].energy == pytest.approx(-0.5, abs=1e-9)
+
+    def test_double_delta_well_yaml_runs_and_produces_expected_output(
+        self, tise_solver_binary: Path, tmp_path: Path
+    ):
+        config = _load_known_solution_config("double_delta_well", tmp_path)
+        tise_dir = tmp_path / "data" / "tise"
+        run_tise_solver(str(config), tise_dir, binary=tise_solver_binary)
+        data = read_tise_output(tise_dir)
+
+        assert data.eigenvalues[0].energy < data.eigenvalues[1].energy < 0.0
 
 
 class TestFreeParticleGeneralUnitsRealSubprocess:
